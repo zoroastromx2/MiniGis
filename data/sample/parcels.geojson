@@ -1,0 +1,37 @@
+{
+  "type": "FeatureCollection",
+  "name": "parcels",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": { "parcel_id": "P-001", "uso": "residencial", "area_ha": 12.5, "manzana": 101 },
+      "geometry": { "type": "Polygon", "coordinates": [ [ [ -3.7200, 40.4000 ], [ -3.7000, 40.4000 ], [ -3.7000, 40.4200 ], [ -3.7200, 40.4200 ], [ -3.7200, 40.4000 ] ] ] }
+    },
+    {
+      "type": "Feature",
+      "properties": { "parcel_id": "P-002", "uso": "industrial", "area_ha": 20.1, "manzana": 102 },
+      "geometry": { "type": "Polygon", "coordinates": [ [ [ -3.7000, 40.4000 ], [ -3.6800, 40.4000 ], [ -3.6800, 40.4200 ], [ -3.7000, 40.4200 ], [ -3.7000, 40.4000 ] ] ] }
+    },
+    {
+      "type": "Feature",
+      "properties": { "parcel_id": "P-003", "uso": "verde", "area_ha": 8.3, "manzana": 103 },
+      "geometry": { "type": "Polygon", "coordinates": [ [ [ -3.7200, 40.3800 ], [ -3.7000, 40.3800 ], [ -3.7000, 40.4000 ], [ -3.7200, 40.4000 ], [ -3.7200, 40.3800 ] ] ] }
+    },
+    {
+      "type": "Feature",
+      "properties": { "parcel_id": "P-004", "uso": "residencial", "area_ha": 15.7, "manzana": 104 },
+      "geometry": { "type": "Polygon", "coordinates": [ [ [ -3.7000, 40.3800 ], [ -3.6800, 40.3800 ], [ -3.6800, 40.4000 ], [ -3.7000, 40.4000 ], [ -3.7000, 40.3800 ] ] ] }
+    },
+    {
+      "type": "Feature",
+      "properties": { "parcel_id": "P-005", "uso": "mixto", "area_ha": 42.0, "manzana": 105 },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [ [ -3.7600, 40.3600 ], [ -3.7200, 40.3600 ], [ -3.7200, 40.4000 ], [ -3.7600, 40.4000 ], [ -3.7600, 40.3600 ] ],
+          [ [ -3.7520, 40.3680 ], [ -3.7280, 40.3680 ], [ -3.7280, 40.3920 ], [ -3.7520, 40.3920 ], [ -3.7520, 40.3680 ] ]
+        ]
+      }
+    }
+  ]
+}

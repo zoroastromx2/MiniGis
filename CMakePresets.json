@@ -1,0 +1,96 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 25,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "windows-base",
+      "hidden": true,
+      "description": "Base comun: Ninja + MSVC 2022 x64 + Qt 6.10.3 oficial + GDAL de vcpkg (arbol ya compilado)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": "E:/vcpkg/scripts/buildsystems/vcpkg.cmake",
+        "MINIGIS_VCPKG_ROOT": "E:/vcpkg",
+        "VCPKG_TARGET_TRIPLET": "x64-windows",
+        "VCPKG_INSTALLED_DIR": "E:/vcpkg/installed",
+        "MINIGIS_USE_VCPKG_MANIFEST": "OFF",
+        "Qt6_DIR": "D:/QtWin/6.10.3/msvc2022_64/lib/cmake/Qt6",
+        "CMAKE_PREFIX_PATH": "D:/QtWin/6.10.3/msvc2022_64",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "MINIGIS_BUILD_TESTS": "ON",
+        "MINIGIS_COPY_RUNTIME_DLLS": "ON",
+        "MINIGIS_DEPLOY_QT_RUNTIME": "ON"
+      },
+      "environment": {
+        "VCPKG_ROOT": "E:/vcpkg",
+        "VSLANG": "1033"
+      }
+    },
+    {
+      "name": "windows-msvc-debug",
+      "inherits": "windows-base",
+      "displayName": "Windows MSVC 2022 x64 - Debug (Qt Creator)",
+      "description": "Perfil recomendado para depurar en Qt Creator: simbolos completos y sin optimizar",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "windows-msvc-reldbg",
+      "inherits": "windows-base",
+      "displayName": "Windows MSVC 2022 x64 - RelWithDebInfo",
+      "description": "Depuracion con dependencias release (alternativa si faltase la variante Debug de GDAL)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      }
+    },
+    {
+      "name": "windows-msvc-release",
+      "inherits": "windows-base",
+      "displayName": "Windows MSVC 2022 x64 - Release",
+      "description": "Binario optimizado para repartir",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "windows-msvc-debug",
+      "configurePreset": "windows-msvc-debug",
+      "displayName": "Compilar Debug"
+    },
+    {
+      "name": "windows-msvc-reldbg",
+      "configurePreset": "windows-msvc-reldbg",
+      "displayName": "Compilar RelWithDebInfo"
+    },
+    {
+      "name": "windows-msvc-release",
+      "configurePreset": "windows-msvc-release",
+      "displayName": "Compilar Release"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "windows-msvc-debug",
+      "configurePreset": "windows-msvc-debug",
+      "displayName": "Probar Debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "windows-msvc-reldbg",
+      "configurePreset": "windows-msvc-reldbg",
+      "displayName": "Probar RelWithDebInfo",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

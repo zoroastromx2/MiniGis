@@ -1,0 +1,22 @@
+# Build trees (presets escriben en build/<preset>)
+build/
+out/
+dist/
+
+# Qt Creator / IDE
+*.user
+*.user.*
+CMakeUserPresets.json
+.vs/
+.vscode/
+.idea/
+.cache/
+compile_commands.json
+
+# vcpkg en modo manifest local (si no se reutiliza E:/vcpkg/installed)
+vcpkg_installed/
+
+# Artefactos de ejecucion / pruebas
+*.png
+!docs/*.png
+*.log

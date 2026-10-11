@@ -1,0 +1,18 @@
+{
+  "type": "FeatureCollection",
+  "name": "cities",
+  "features": [
+    { "type": "Feature", "properties": { "name": "Madrid",                 "country": "ES", "population": 3280782, "area_km2": 604.3,  "capital": 1 }, "geometry": { "type": "Point", "coordinates": [ -3.70379, 40.41678 ] } },
+    { "type": "Feature", "properties": { "name": "Barcelona",              "country": "ES", "population": 1620343, "area_km2": 101.4,  "capital": 0 }, "geometry": { "type": "Point", "coordinates": [  2.17340, 41.38506 ] } },
+    { "type": "Feature", "properties": { "name": "Valencia",               "country": "ES", "population": 807693,  "area_km2": 134.6,  "capital": 0 }, "geometry": { "type": "Point", "coordinates": [ -0.37629, 39.46991 ] } },
+    { "type": "Feature", "properties": { "name": "Sevilla",                "country": "ES", "population": 681998,  "area_km2": 140.8,  "capital": 0 }, "geometry": { "type": "Point", "coordinates": [ -5.98446, 37.38909 ] } },
+    { "type": "Feature", "properties": { "name": "Zaragoza",               "country": "ES", "population": 675301,  "area_km2": 973.8,  "capital": 0 }, "geometry": { "type": "Point", "coordinates": [ -0.88909, 41.64882 ] } },
+    { "type": "Feature", "properties": { "name": "Malaga",                 "country": "ES", "population": 586384,  "area_km2": 398.3,  "capital": 0 }, "geometry": { "type": "Point", "coordinates": [ -4.42140, 36.72016 ] } },
+    { "type": "Feature", "properties": { "name": "Murcia",                 "country": "ES", "population": 462979,  "area_km2": 881.9,  "capital": 0 }, "geometry": { "type": "Point", "coordinates": [ -1.13065, 37.99222 ] } },
+    { "type": "Feature", "properties": { "name": "Palma",                  "country": "ES", "population": 424837,  "area_km2": 208.6,  "capital": 0 }, "geometry": { "type": "Point", "coordinates": [  2.65016, 39.56960 ] } },
+    { "type": "Feature", "properties": { "name": "Bilbao",                 "country": "ES", "population": 346843,  "area_km2": 41.6,   "capital": 0 }, "geometry": { "type": "Point", "coordinates": [ -2.93499, 43.26271 ] } },
+    { "type": "Feature", "properties": { "name": "A Coruna",               "country": "ES", "population": 245468,  "area_km2": 37.8,   "capital": 0 }, "geometry": { "type": "Point", "coordinates": [ -8.41154, 43.36234 ] } },
+    { "type": "Feature", "properties": { "name": "Las Palmas de G.C.",     "country": "ES", "population": 380863,  "area_km2": 100.6,  "capital": 0 }, "geometry": { "type": "Point", "coordinates": [ -15.41343, 28.12355 ] } },
+    { "type": "Feature", "properties": { "name": "Santa Cruz de Tenerife", "country": "ES", "population": 208563,  "area_km2": 150.6,  "capital": 0 }, "geometry": { "type": "Point", "coordinates": [ -16.25462, 28.46981 ] } }
+  ]
+}

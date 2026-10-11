@@ -1,0 +1,16 @@
+{
+  "vcpkg-configuration": {
+    "default-registry": {
+      "kind": "git",
+      "baseline": "8f57207a8a1b96a4a864e11f85d57b0a252b3ac3",
+      "repository": "https://github.com/microsoft/vcpkg"
+    }
+  },
+  "name": "minigis",
+  "version-string": "0.1.0",
+  "description": "MiniGIS: visor SIG minimo (Qt 6 + GDAL) siguiendo las convenciones de compilacion de QGIS",
+  "homepage": "https://github.com/",
+  "dependencies": [
+    "gdal"
+  ]
+}
