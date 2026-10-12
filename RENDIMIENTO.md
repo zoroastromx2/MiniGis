@@ -25,10 +25,15 @@ Carga de la capa de 47,8 MB / 2,2 M de vértices: **~0,4 s** construyendo el ín
 en un hilo de trabajo, con barra de progreso y sin bloquear la ventana (antes: la
 ventana se quedaba congelada durante varios segundos y sin ninguna señal visual).
 
-Trabajo realizado: **6 archivos de código nuevos** (más este documento) y **15
+Trabajo realizado: **9 archivos de código nuevos** (más este documento) y **16
 modificados**, con el motor clásico intacto y seleccionable (`--renderer legacy`) para
 poder comparar y como red de seguridad. Incluye un banco de pruebas (`--bench`) y una
 prueba de CTest que falla si una regresión de rendimiento supera el presupuesto.
+
+Además, la sección 9 documenta el caso que motivó la última tanda de trabajo: dos
+capas reales de Nueva Zelanda (**3,24 M de edificios** y **2,43 M de direcciones**)
+que antes tardaban 70 segundos por cuadro (o quedaban directamente inutilizables) y
+ahora responden en 13 ms a escala de ciudad y 76 ms con el país entero en pantalla.
 
 ---
 
@@ -741,7 +746,114 @@ JSON (`--json | jq .quality.median_ms`), que es mucho más estable que el p90.
 
 ---
 
-## 9. Trabajo pendiente, por orden de rentabilidad
+## 9. Caso real: capas masivas (nz-building-outlines y nz-addresses)
+
+Prueba de carga sobre datos reales de LINZ (Nueva Zelanda), no sintéticos:
+
+| Capa | Elementos | Geometria | `.shp` | `.dbf` |
+|---|---|---|---|---|
+| `nz-building-outlines` | 3.236.141 | poligonos (~10 vertices) | 584 MB | 1,1 GB |
+| `nz-addresses` | 2.429.477 | puntos | 65 MB | 1,47 GB |
+
+### 9.1 Lo que pasaba
+
+`nz-building-outlines` **se abria** (0,1 s) pero no se podia usar: el almacen en
+memoria se rechazaba por presupuesto (~32 M de vertices, cuatro veces el limite de
+8 M) y la capa caia al camino clasico, que tardaba **70 s por cuadro** (y 14,5 s
+incluso activando el filtro espacial del archivo, porque un shapefile sin `.qix`
+obliga a GDAL a recorrer los 3,24 M de registros en cada consulta). Es decir: la
+ventana quedaba congelada y se percibia como "no carga".
+
+### 9.2 Que se hizo: modo envolventes
+
+El formato `.shp` permite leer la envolvente de cada elemento **sin leer su
+geometria** (8 bytes de cabecera de registro + 4 de tipo + 32 de envolvente). Con ese
+recorrido secuencial se construye un indice de solo envolventes y la geometria se lee
+despues, bajo demanda, solo de lo que se ve:
+
+| | Geometria completa | Solo envolventes |
+|---|---|---|
+| Memoria (3,24 M de elementos) | ~750 MB | **146 MB** |
+| Construccion | rechazada por presupuesto | **1,1 s** (recorrido 0,35 s + indice 0,71 s) |
+| Lectura por cuadro | imposible | solo lo visible, con cache entre cuadros |
+
+El indice se construye en el hilo de trabajo con progreso, y cada elemento leido se
+guarda en una cache con presupuesto (300.000 elementos), de modo que al desplazar solo
+se leen las geometrias nuevas: en un paneo de 5 cuadros se leyeron **1.651
+geometrias** (unas 330 por cuadro) en lugar de releer lo visible.
+
+### 9.3 Resultados
+
+| Caso | Antes | Ahora |
+|---|---|---|
+| Ciudad (2x2 km, 1.619 edificios) | 70 s (lectura completa) | **13 ms · 77 fps** |
+| Ciudad, cuadro de borrador | 70 s | **3 ms · 333 fps** |
+| Pais completo (3,24 M de candidatos) | 81 s (con lecturas dispersas) | **76 ms · 13 fps** |
+| Indice + carga de la capa | — | **1,1 s** en segundo plano con progreso |
+
+El pais completo ya no lee geometria: a esa escala un edificio ocupa menos de una
+milesima de pixel, asi que se dibuja **el centro de su envolvente como punto** (segun
+`minimumGeometryPixels`), que no cuesta I/O y produce un mapa de densidad de
+edificacion legible. Con el suavizado activo, 150.000 puntos costaban 200 ms de
+cuadro; con pluma cosmetica y sin suavizado, decenas de milisegundos.
+
+`nz-addresses` (puntos) si cabe en memoria, pero aparecieron dos problemas: el **DBF
+de 1,47 GB** se parseaba al indexar (51 s de lectura para algo que no necesita
+atributos) y los **puntos no se pueden simplificar**, asi que los niveles de detalle
+eran copias exactas de los datos crudos (40 MB por nivel). Corregido:
+
+| | Antes | Ahora |
+|---|---|---|
+| Construccion del almacen | 52 s · 240 MB | **13,4 s · 184 MB** |
+| Pais completo | 403 ms · 2,5 fps | **111 ms · 9 fps** |
+| Auckland (5 km, 7.047 direcciones) | 41 ms | **39 ms · 26 fps** |
+
+(los 12,9 s restantes son GDAL leyendo 2,43 M de puntos; es coste de una sola vez, en
+segundo plano y con barra de progreso).
+
+### 9.4 Herramienta de diagnostico anadida
+
+`--index-shp` recorre el `.shp`, construye el indice y **verifica las envolventes
+contra GDAL elemento a elemento** (comparando el FID del indice con la geometria que
+devuelve OGR). Fue lo que permitio detectar que el tipo de forma de la cabecera va en
+*little-endian* (leerlo en big-endian daba `0x05000000` en lugar de `5`):
+
+```bat
+minigis --index-shp "E:\datos\nz-building-outlines.shp"
+  Elementos indexados : 3236141
+  Elementos de la capa: 3236141
+  Recorrido          : 584.1 MB en 316 ms
+  Memoria del indice : 123.4 MB
+  Verificacion       : 8 elementos comparados con GDAL, 0 discrepancias, diferencia maxima 0
+```
+
+### 9.5 Dos fallos propios detectados en esta prueba
+
+- El bucle de dibujado esperaba en `entryFirstRing` el indice del primer **anillo** y
+  `acquireSubset` guardaba el del primer **vertice**: lectura fuera de los arrays
+  (violacion de acceso). Lo cazo la prueba con esta capa.
+- El intento de almacen en memoria leia ~8 M de vertices (7 s) antes de rendirse.
+  Ahora se estima el total con los primeros 512 elementos y se aborta en
+  milisegundos: la construccion del indice de la capa de edificios paso de **8,7 s a
+  1,1 s**.
+
+### 9.6 Limites de este modo
+
+- Solo para **ESRI Shapefile en disco** (es el formato cuyo indice de envolventes se
+  puede leer sin GDAL). Para otros formatos se mantiene el camino clasico, con el
+  filtro espacial del archivo si se pide (`--spatial-filter`).
+- El almacen **presta** la capa OGR (no es dueno del dataset): la capa debe seguir
+  viva mientras se dibuja.
+- A escalas muy lejanas la capa se degrada a nube de puntos: es una decision
+  explicita y configurable (`minimumGeometryPixels`, `dotBudget`), no un fallo
+  silencioso.
+- El indice de 3,24 M de envolventes ocupa 146 MB y su consulta cuesta ~50 ms por
+  cuadro (recorrer 3,24 M de envolventes); bajar de ahi exigiria un indice
+  multinivel que responda con nodos gruesos en lugar de elemento a elemento.
+
+---
+
+## 10. Trabajo pendiente, por orden de rentabilidad
 
 1. **Picos del primer cuadro de cada nivel de detalle** (p90 90 ms frente a mediana
    45 ms). Construir los niveles que falten **en segundo plano** y, mientras tanto,
@@ -771,7 +883,7 @@ JSON (`--json | jq .quality.median_ms`), que es mucho más estable que el p90.
 
 ---
 
-## 10. Límites y diferencias visuales (para que no sorprendan)
+## 11. Límites y diferencias visuales (para que no sorprendan)
 
 - **Trazos *hairline* por encima de 2.000 elementos dibujados**: el contorno sigue
   midiendo 1 px, pero se traza sin suavizado (líneas rectas con dientes en diagonales).
@@ -793,11 +905,13 @@ JSON (`--json | jq .quality.median_ms`), que es mucho más estable que el p90.
 - **El motor acelerado es el de por defecto** (`RendererBackend::Auto`) y las capas
   que aún no tienen almacén (mientras cargan, o si no cupieron en memoria) se
   dibujan con el clásico, respetando el orden de apilado.
-- **No implementado**: teselas, GPU, etiquetas, y el modo streaming del punto 6.
+- **Modo envolventes**: a escalas muy lejanas una capa masiva se dibuja como nube de
+  puntos (envolventes) en lugar de geometría. Es visible y configurable.
+- **No implementado**: teselas, GPU y etiquetas.
 
 ---
 
-## 11. Archivos del cambio
+## 12. Archivos del cambio
 
 **Nuevos**
 
@@ -805,6 +919,7 @@ JSON (`--json | jq .quality.median_ms`), que es mucho más estable que el p90.
 src/core/minigisgeometrystore.h    src/core/minigisgeometrystore.cpp
 src/core/minigisfastrenderer.h     src/core/minigisfastrenderer.cpp
 src/core/minigisvectorloader.h     src/core/minigisvectorloader.cpp
+src/core/minigisshapefileindex.h   src/core/minigisshapefileindex.cpp
 RENDIMIENTO.md                     este documento
 ```
 
@@ -817,10 +932,11 @@ src/core/CMakeLists.txt            fuentes nuevas + Qt6::Concurrent + optimizaci
 src/gui/CMakeLists.txt             optimizaciones
 src/app/CMakeLists.txt             optimizaciones en el enlazado
 src/core/minigismaprenderer.h/.cpp filtro espacial opcional, paintLayerInto() para mezclar motores
-src/core/minigisvectorlayer.h      referencia al GeometryStore
+src/core/minigisvectorlayer.h/.cpp referencia al GeometryStore, envolvente por elemento (--index-shp)
 src/gui/minigismapcanvas.h/.cpp    motor seleccionable, modo borrador, presupuesto, reutilizacion de cuadro
 src/gui/minigismainwindow.h/.cpp   carga asincrona, barra de progreso, cancelar, espera en los modos de captura
-src/app/main.cpp                   --bench, --bench-scenario, --bench-budget, --renderer, --vertex-budget, --spatial-filter
+src/app/main.cpp                   --bench, --bench-scenario, --bench-budget, --renderer, --vertex-budget,
+                                   --spatial-filter, --read-budget, --index-shp
 tests/CMakeLists.txt               pruebas minigis.bench y minigis.rendimiento
 tests/run_cli_test.cmake           modo bench (contrato JSON + presupuesto)
 ```

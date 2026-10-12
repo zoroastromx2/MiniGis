@@ -73,6 +73,13 @@ public:
   QString fieldValue(qint64 row, int fieldIndex) const;
 
   /**
+   * Envolvente de un elemento leida con GDAL. Sirve para comprobar que el indice
+   * de envolventes de ShapefileIndex apunta al mismo elemento que el FID de OGR
+   * (es la verificacion que se hace en el diagnostico --index-shp).
+   */
+  Rectangle featureEnvelope(qint64 row) const;
+
+  /**
    * Valores de todos los campos de una fila. Hace una sola lectura en GDAL,
    * por lo que es la forma recomendada para pintar la tabla de atributos.
    */

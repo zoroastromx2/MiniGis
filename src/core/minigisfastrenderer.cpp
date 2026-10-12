@@ -72,11 +72,19 @@ QPainterPath &startChunk(std::vector<QPainterPath> &chunks, int &featuresInChunk
 } // namespace
 
 void FastMapRenderer::buildBatch(Batch &batch, const GeometryStore &store, const GeometryStore::Level &level,
-                                 const MapToPixel &transform) const
+                                 const MapToPixel &transform, qint64 pointStride) const
 {
-  const std::vector<GeometryStore::Feature> &features = store.features();
-  const std::vector<uint8_t> &ringKinds = store.ringKinds();
+  buildBatch(batch, level, store.ringKinds(), store.entryFirstRing(), store.entryRingCount(), mCandidates,
+             transform, pointStride);
+}
 
+void FastMapRenderer::buildBatch(Batch &batch, const GeometryStore::Level &level,
+                                 const std::vector<uint8_t> &ringKinds,
+                                 const std::vector<uint32_t> &entryFirstRing,
+                                 const std::vector<uint32_t> &entryRingCount,
+                                 const std::vector<uint32_t> &entries, const MapToPixel &transform,
+                                 qint64 pointStride) const
+{
   const double *coords = level.coords.data();
   const uint32_t *ringFirst = level.ringFirst.data();
   const uint32_t *ringCount = level.ringCount.data();
@@ -85,15 +93,20 @@ void FastMapRenderer::buildBatch(Batch &batch, const GeometryStore &store, const
   int lineFeaturesInChunk = 0;
   QPainterPath *polygonPath = nullptr;
   QPainterPath *linePath = nullptr;
-  const int chunkLimit = featuresPerChunkFor(mCandidates.size());
+  const int chunkLimit = featuresPerChunkFor(entries.size());
+  qint64 pointCounter = 0;
 
-  for (const uint32_t featureIndex : mCandidates)
+  for (const uint32_t entryIndex : entries)
   {
-    const GeometryStore::Feature &feature = features[featureIndex];
-    const uint32_t lastRing = feature.firstRing + feature.ringCount;
+    if (entryIndex >= entryFirstRing.size())
+      continue;
+
+    const uint32_t first = entryFirstRing[entryIndex];
+    const uint32_t ringTotal = entryRingCount[entryIndex];
+    const uint32_t lastRing = first + ringTotal;
 
     bool anyDrawn = false;
-    for (uint32_t ring = feature.firstRing; ring < lastRing; ++ring)
+    for (uint32_t ring = first; ring < lastRing; ++ring)
     {
       const uint32_t count = ringCount[ring];
       const uint8_t kind = ringKinds[ring];
@@ -108,6 +121,11 @@ void FastMapRenderer::buildBatch(Batch &batch, const GeometryStore &store, const
 
       if (kind == kKindPoint)
       {
+        // Los marcadores se muestrean si la capa tiene millones de puntos: no se
+        // pueden simplificar y dibujarlos todos cuesta segundos por cuadro.
+        if (pointStride > 1 && (pointCounter++ % pointStride) != 0)
+          continue;
+
         double x = 0.0;
         double y = 0.0;
         transform.projectInline(xy[0], xy[1], x, y);
@@ -209,6 +227,13 @@ void FastMapRenderer::paint(QPainter &painter, const std::vector<Layer> &layers,
     if (mCandidates.empty())
       continue;
 
+    // Muestreo de marcadores: los puntos no se pueden simplificar, asi que el
+    // numero de elementos visibles acota el trabajo del cuadro.
+    const qint64 pointStride =
+      (options.pointBudget > 0 && static_cast<qint64>(mCandidates.size()) > options.pointBudget)
+        ? (static_cast<qint64>(mCandidates.size()) + options.pointBudget - 1) / options.pointBudget
+        : 1;
+
     int level = store.levelForTolerance(wantedTolerance);
     mStats.level = level;
     mStats.tolerance = wantedTolerance;
@@ -217,26 +242,97 @@ void FastMapRenderer::paint(QPainter &painter, const std::vector<Layer> &layers,
     // para el presupuesto de vertices, se sube un nivel de simplificacion.
     const int maximumLevel = std::min(store.maximumLevel(), level + std::max(0, options.maximumLevelAttempts));
     Batch batch;
-    for (int attempt = 0;; ++attempt)
+
+    if (store.mode() == GeometryStore::Mode::Envelopes)
     {
-      const GeometryStore::Level *levelData = store.acquireLevel(level);
-      if (!levelData)
-        break;
-
-      batch = Batch();
-
+      // Modo envolventes: la geometria de lo visible se lee del archivo bajo
+      // demanda (con presupuesto por cuadro) y se simplifica al vuelo. Si a esta
+      // escala cada elemento ocupa menos de un pixel, en lugar de leerlo se
+      // dibuja su envolvente como punto.
       timer.restart();
-      buildBatch(batch, store, *levelData, transform);
-      mStats.pathMs += timer.elapsed();
+      const double minimumGeometrySize =
+        (options.minimumGeometryPixels > 0.0) ? options.minimumGeometryPixels * unitsPerPixel : 0.0;
 
-      mStats.level = level;
-      mStats.tolerance = levelData->tolerance;
+      const std::shared_ptr<const GeometryStore::Subset> subset =
+        store.acquireSubset(mCandidates, wantedTolerance, options.readBudget, minimumGeometrySize,
+                            options.dotBudget);
+      mStats.readFeatures += subset ? subset->readFeatures : 0;
+      mStats.skippedFeatures += subset ? subset->missingFeatures - subset->readFeatures : 0;
+      mStats.envelopeMode = true;
+      mStats.queryMs += timer.elapsed();
 
-      const bool fits = (options.vertexBudget <= 0) || (batch.vertices <= options.vertexBudget);
-      if (fits || level >= maximumLevel)
-        break;
+      if (subset && subset->level && !subset->level->coords.empty())
+      {
+        mPositions.resize(subset->entryFirstRing.size());
+        for (size_t i = 0; i < mPositions.size(); ++i)
+          mPositions[i] = static_cast<uint32_t>(i);
 
-      ++level;
+        timer.restart();
+        buildBatch(batch, *subset->level, subset->entryRingKind, subset->entryFirstRing,
+                   subset->entryRingCount, mPositions, transform, 1);
+        mStats.pathMs += timer.elapsed();
+      }
+
+      if (subset && !subset->dotEntries.empty())
+      {
+        // Nube de puntos con las envolventes: cada elemento sub-pixel se dibuja
+        // en el centro de su envolvente.
+        const std::vector<GeometryStore::Feature> &features = store.features();
+        mDots.clear();
+        mDots.reserve(subset->dotEntries.size());
+
+        timer.restart();
+        for (const uint32_t fid : subset->dotEntries)
+        {
+          if (fid >= features.size())
+            continue;
+
+          const GeometryStore::Feature &feature = features[fid];
+          double x = 0.0;
+          double y = 0.0;
+          transform.projectInline((feature.minX + feature.maxX) / 2.0, (feature.minY + feature.maxY) / 2.0, x, y);
+          mDots.emplace_back(x, y);
+        }
+        mStats.pathMs += timer.elapsed();
+        mStats.dotFeatures += static_cast<qint64>(mDots.size());
+
+        if (!mDots.empty())
+        {
+          // Nube de puntos: se dibuja con pluma cosmetica y sin suavizado. Con
+          // suavizado, 150.000 puntos costaban ~200 ms de cuadro; sin el, unas
+          // decimas. A un pixel de tamano la diferencia visual es despreciable.
+          const bool antialiasingWasOn = painter.renderHints() & QPainter::Antialiasing;
+          painter.setRenderHint(QPainter::Antialiasing, false);
+          painter.setBrush(Qt::NoBrush);
+          painter.setPen(QPen(style.strokeColor, 0.0));
+          painter.drawPoints(mDots.data(), static_cast<int>(mDots.size()));
+          painter.setRenderHint(QPainter::Antialiasing, antialiasingWasOn);
+        }
+      }
+    }
+    else
+    {
+      for (int attempt = 0;; ++attempt)
+      {
+        const GeometryStore::Level *levelData = store.acquireLevel(level);
+        if (!levelData)
+          break;
+
+        batch = Batch();
+
+        timer.restart();
+        buildBatch(batch, store, *levelData, transform, pointStride);
+        mStats.pathMs += timer.elapsed();
+
+        mStats.level = level;
+        mStats.tolerance = levelData->tolerance;
+
+        const bool fits = (options.vertexBudget <= 0) || (batch.vertices <= options.vertexBudget);
+        if (fits || level >= maximumLevel)
+          break;
+
+        ++level;
+      }
     }
 
     mStats.drawnFeatures += batch.features;
@@ -277,21 +373,36 @@ void FastMapRenderer::paint(QPainter &painter, const std::vector<Layer> &layers,
       // Los marcadores se dibujan como puntos con extremo redondeado: un trazo
       // grueso con cap redondo es un circulo. Dos llamadas bastan para el
       // contorno y el relleno de todos los puntos de la capa.
-      const double diameter = std::max(1.0, style.pointSize);
       const int pointTotal = static_cast<int>(batch.points.size());
       const QPointF *points = batch.points.data();
 
       painter.setBrush(Qt::NoBrush);
 
-      if (style.strokeWidth > 0.0)
+      if (pointStride > 1)
       {
-        painter.setPen(QPen(style.strokeColor, diameter, Qt::SolidLine, Qt::RoundCap));
+        // Capa de millones de puntos muestreada: a esta densidad el simbolo
+        // completo no aporta informacion y cuesta. Se dibuja un punto de un
+        // pixel, sin suavizado y con pluma cosmetica (medido con 115.000
+        // puntos: 284 ms -> decenas de ms).
+        painter.setRenderHint(QPainter::Antialiasing, false);
+        painter.setPen(QPen(style.strokeColor, 0.0));
+        painter.drawPoints(points, pointTotal);
+        painter.setRenderHint(QPainter::Antialiasing, options.antialiasing);
+      }
+      else
+      {
+        const double diameter = std::max(1.0, style.pointSize);
+
+        if (style.strokeWidth > 0.0)
+        {
+          painter.setPen(QPen(style.strokeColor, diameter, Qt::SolidLine, Qt::RoundCap));
+          painter.drawPoints(points, pointTotal);
+        }
+
+        const double innerDiameter = std::max(0.1, diameter - 2.0 * style.strokeWidth);
+        painter.setPen(QPen(style.fillColor, innerDiameter, Qt::SolidLine, Qt::RoundCap));
         painter.drawPoints(points, pointTotal);
       }
-
-      const double innerDiameter = std::max(0.1, diameter - 2.0 * style.strokeWidth);
-      painter.setPen(QPen(style.fillColor, innerDiameter, Qt::SolidLine, Qt::RoundCap));
-      painter.drawPoints(points, pointTotal);
     }
 
     painter.setOpacity(1.0);

@@ -100,13 +100,34 @@ void VectorLayerLoader::run(const QStringList &paths)
       const int innerSpan = std::max(0, span - std::max(1, span / 10));
 
       QString storeError;
-      const std::shared_ptr<GeometryStore> store = GeometryStore::buildFromLayer(
+      std::shared_ptr<GeometryStore> store = GeometryStore::buildFromLayer(
         *layer, mDestinationEpsg, mStoreOptions,
         [this, innerBase, innerSpan, &shortName](int percent, const QString &message) {
           const int global = innerBase + (innerSpan * percent) / 100;
           return reportProgress(global, QStringLiteral("%1 — %2").arg(shortName, message));
         },
         &storeError);
+
+      // La capa no cabe en memoria (millones de elementos): en lugar de
+      // renunciar a la aceleracion, se indexan solo las envolventes y la
+      // geometria se lee bajo demanda segun lo que se ve.
+      if (!store && mStoreOptions.allowEnvelopeFallback && !mCancelled.load())
+      {
+        reportProgress(innerBase, QStringLiteral("%1 — La capa no cabe en memoria; indexando "
+                                                 "envolventes...").arg(shortName));
+
+        QString envelopeError;
+        store = GeometryStore::buildEnvelopeIndex(
+          *layer, mDestinationEpsg, mStoreOptions,
+          [this, innerBase, innerSpan, &shortName](int percent, const QString &message) {
+            const int global = innerBase + (innerSpan * percent) / 100;
+            return reportProgress(global, QStringLiteral("%1 — %2").arg(shortName, message));
+          },
+          &envelopeError);
+
+        if (!store)
+          storeError = QStringLiteral("%1\nIndice de envolventes: %2").arg(storeError, envelopeError);
+      }
 
       if (store)
       {

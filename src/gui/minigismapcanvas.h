@@ -86,6 +86,17 @@ public:
   qint64 vertexBudget() const { return mFastOptions.vertexBudget; }
 
   /**
+   * Elementos cuya geometria se lee del archivo por cuadro cuando la capa esta
+   * indexada por envolventes (capas que no caben en memoria). 0 = sin limite.
+   */
+  void setReadBudget(qint64 budget)
+  {
+    mFastOptions.readBudget = budget;
+    invalidateFrameCache();
+  }
+  qint64 readBudget() const { return mFastOptions.readBudget; }
+
+  /**
    * Filtra en origen con el indice espacial del archivo. Solo afecta a las capas
    * que se dibujan con el camino clasico (las que no caben en el almacen).
    */

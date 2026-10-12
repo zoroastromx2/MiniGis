@@ -14,6 +14,8 @@ set(MINIGIS_CORE_SRCS
   minigisvectorlayer.cpp
   minigisgeometrystore.h
   minigisgeometrystore.cpp
+  minigisshapefileindex.h
+  minigisshapefileindex.cpp
   minigisvectorloader.h
   minigisvectorloader.cpp
   minigismaprenderer.h

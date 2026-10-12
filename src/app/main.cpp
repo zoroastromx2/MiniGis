@@ -49,6 +49,7 @@ constexpr unsigned int kUtf8CodePage = 65001;
 #include "minigismainwindow.h"
 #include "minigismapcanvas.h"
 #include "minigisrectangle.h"
+#include "minigisshapefileindex.h"
 #include "minigisstyle.h"
 #include "minigisvectorlayer.h"
 
@@ -69,6 +70,12 @@ enum ExitCode
 };
 
 bool g_verbose = false;
+
+// Se definen mas abajo, junto a los modos sin ventana.
+std::shared_ptr<GeometryStore> buildGeometryStore(const std::shared_ptr<VectorLayer> &layer,
+                                                  int destinationEpsg, qint64 *buildMs,
+                                                  QString *modeName, QString *error);
+QString storeModeName(const GeometryStore &store);
 
 QTextStream &stdOut()
 {
@@ -382,6 +389,7 @@ struct BenchRequest
   qint64 maxFeatures = 0;
   QString renderer = QStringLiteral("auto");
   qint64 vertexBudget = 600000;
+  qint64 readBudget = 40000;
   qint64 budgetMs = 0;
   bool spatialFilter = false;
   bool asJson = false;
@@ -403,12 +411,14 @@ int runBenchmark(const BenchRequest &request)
   canvas.setDestinationEpsg(request.destinationEpsg);
   canvas.setMaximumFeaturesPerLayer(request.maxFeatures);
   canvas.setVertexBudget(request.vertexBudget);
+  canvas.setReadBudget(request.readBudget);
   canvas.setRendererBackend(useStore ? MapCanvas::RendererBackend::Fast
                                      : MapCanvas::RendererBackend::Legacy);
   canvas.setUseSpatialFilter(request.spatialFilter);
   canvas.resize(request.size);
 
   QStringList layerNames;
+  bool envelopeMode = false;
   qint64 storeBuildMs = 0;
   qint64 storeVertices = 0;
   qint64 storeBytes = 0;
@@ -433,13 +443,12 @@ int runBenchmark(const BenchRequest &request)
 
     if (useStore)
     {
-      QElapsedTimer timer;
-      timer.start();
-
       QString storeError;
+      QString modeName;
+      qint64 layerBuildMs = 0;
       const std::shared_ptr<GeometryStore> store =
-        GeometryStore::buildFromLayer(*layer, request.destinationEpsg, GeometryStore::Options(), nullptr, &storeError);
-      storeBuildMs += timer.elapsed();
+        buildGeometryStore(layer, request.destinationEpsg, &layerBuildMs, &modeName, &storeError);
+      storeBuildMs += layerBuildMs;
 
       if (store)
       {
@@ -447,8 +456,10 @@ int runBenchmark(const BenchRequest &request)
         storeFeatures += stats.features;
         storeVertices += stats.vertices;
         storeBytes += stats.bytes;
+        if (stats.mode == GeometryStore::Mode::Envelopes)
+          envelopeMode = true;
         layer->setGeometryStore(store);
-        logVerbose(QStringLiteral("almacen de «%1»: %2 elementos, %3 vertices, %4 MB, niveles %5 "
+        logVerbose(QStringLiteral("almacen de «%1» (%9): %2 elementos, %3 vertices, %4 MB, niveles %5 "
                                   "(lectura %6 ms, indice %7 ms, detalle %8 ms)")
                      .arg(layer->name())
                      .arg(stats.features)
@@ -457,7 +468,8 @@ int runBenchmark(const BenchRequest &request)
                      .arg(stats.cachedLevels)
                      .arg(stats.readMs)
                      .arg(stats.indexMs)
-                     .arg(stats.levelsMs));
+                     .arg(stats.levelsMs)
+                     .arg(modeName));
       }
       else
       {
@@ -490,6 +502,8 @@ int runBenchmark(const BenchRequest &request)
   qint64 queryMs = 0;
   qint64 pathMs = 0;
   qint64 paintMs = 0;
+  qint64 readFeatures = 0;
+  qint64 skippedFeatures = 0;
 
   for (int frame = 0; frame < request.frames; ++frame)
   {
@@ -504,6 +518,8 @@ int runBenchmark(const BenchRequest &request)
     queryMs += lastStats.queryMs;
     pathMs += lastStats.pathMs;
     paintMs += lastStats.paintMs;
+    readFeatures += lastStats.readFeatures;
+    skippedFeatures += lastStats.skippedFeatures;
 
     if (image.isNull())
     {
@@ -558,6 +574,10 @@ int runBenchmark(const BenchRequest &request)
     store.insert(QStringLiteral("drawn_features_last_frame"), static_cast<double>(lastStats.drawnFeatures));
     store.insert(QStringLiteral("drawn_vertices_last_frame"), static_cast<double>(lastStats.drawnVertices));
     store.insert(QStringLiteral("level_last_frame"), lastStats.level);
+    store.insert(QStringLiteral("mode"), envelopeMode ? QStringLiteral("envelopes") : QStringLiteral("memory"));
+    store.insert(QStringLiteral("read_total"), static_cast<double>(readFeatures));
+    store.insert(QStringLiteral("skipped_total"), static_cast<double>(skippedFeatures));
+    store.insert(QStringLiteral("read_last_frame"), static_cast<double>(lastStats.readFeatures));
     root.insert(QStringLiteral("store"), store);
 
     QJsonObject phases;
@@ -592,6 +612,15 @@ int runBenchmark(const BenchRequest &request)
                  .arg(storeBuildMs));
     }
 
+    if (envelopeMode)
+    {
+      writeOut(QStringLiteral("Muestreo   : %1 geometrias leidas del archivo en %2 cuadros, "
+                              "%3 elementos omitidos por presupuesto")
+                 .arg(readFeatures)
+                 .arg(frames)
+                 .arg(skippedFeatures));
+    }
+
     writeOut(QStringLiteral("Cuadro calidad : %1").arg(timingsText(quality)));
     writeOut(QStringLiteral("Cuadro borrador: %1").arg(timingsText(draft)));
 
@@ -620,24 +649,181 @@ int runBenchmark(const BenchRequest &request)
   return budgetExceeded ? ExitBudgetExceeded : ExitOk;
 }
 
+QString storeModeName(const GeometryStore &store)
+{
+  return store.mode() == GeometryStore::Mode::Envelopes ? QStringLiteral("envolventes")
+                                                        : QStringLiteral("memoria");
+}
+
+/**
+ * Diagnostico del indice de envolventes (`--index-shp`).
+ *
+ * Ademas de medir el recorrido del .shp, comprueba que las envolventes leidas
+ * del archivo corresponden al mismo elemento que devuelve el FID de OGR: si el
+ * indice se desalineara, el mapa dibujaria geometrias que no estan donde toca, y
+ * ese fallo seria muy dificil de ver a ojo.
+ */
+int inspectShapefileIndex(const QString &path, bool asJson)
+{
+  if (!ShapefileIndex::supports(QStringLiteral("ESRI Shapefile"), path))
+  {
+    writeErr(QStringLiteral("«%1» no es un .shp de disco indexable.").arg(QDir::toNativeSeparators(path)));
+    return ExitUsage;
+  }
+
+  ShapefileIndex::Stats stats;
+  std::vector<ShapefileIndex::Entry> entries;
+
+  writeErr(QStringLiteral("[minigis] recorriendo «%1»...").arg(QDir::toNativeSeparators(path)));
+
+  QString error;
+  if (!ShapefileIndex::scan(path, entries, stats, nullptr, &error))
+  {
+    writeErr(error);
+    return ExitOpenFailed;
+  }
+
+  // Verificacion: la envolvente del indice debe coincidir con la de GDAL.
+  Error openError;
+  const std::shared_ptr<VectorLayer> layer = VectorLayer::open(path, &openError);
+  if (!layer)
+  {
+    writeErr(openError.toText());
+    return ExitOpenFailed;
+  }
+
+  const qint64 featureCount = layer->featureCount();
+  int checked = 0;
+  int mismatches = 0;
+  double worstDelta = 0.0;
+
+  const qint64 samples[] = {0, 1, 2, featureCount / 4, featureCount / 2, (featureCount * 3) / 4,
+                            featureCount - 2, featureCount - 1};
+
+  for (const qint64 row : samples)
+  {
+    if (row < 0 || row >= static_cast<qint64>(entries.size()))
+      continue;
+
+    const Rectangle envelope = layer->featureEnvelope(row);
+    if (!envelope.isValid())
+      continue;
+
+    const ShapefileIndex::Entry &entry = entries[static_cast<size_t>(row)];
+    const double delta = std::max(std::max(std::abs(entry.minX - envelope.xMin()), std::abs(entry.minY - envelope.yMin())),
+                                  std::max(std::abs(entry.maxX - envelope.xMax()), std::abs(entry.maxY - envelope.yMax())));
+
+    worstDelta = std::max(worstDelta, delta);
+    ++checked;
+    if (delta > 1e-6)
+      ++mismatches;
+  }
+
+  if (asJson)
+  {
+    QJsonObject root;
+    root.insert(QStringLiteral("records"), static_cast<double>(stats.records));
+    root.insert(QStringLiteral("nullShapes"), static_cast<double>(stats.nullShapes));
+    root.insert(QStringLiteral("unsupported"), static_cast<double>(stats.unsupported));
+    root.insert(QStringLiteral("shapeType"), stats.shapeType);
+    root.insert(QStringLiteral("bytes"), static_cast<double>(stats.bytes));
+    root.insert(QStringLiteral("scanMs"), static_cast<double>(stats.scanMs));
+    root.insert(QStringLiteral("envelopeBytes"),
+                static_cast<double>(entries.size() * (4 * sizeof(double) + 2 * sizeof(uint32_t))));
+    root.insert(QStringLiteral("layerFeatures"), static_cast<double>(featureCount));
+    root.insert(QStringLiteral("checked"), checked);
+    root.insert(QStringLiteral("mismatches"), mismatches);
+    root.insert(QStringLiteral("worstDelta"), worstDelta);
+    writeOut(QString::fromUtf8(QJsonDocument(root).toJson(QJsonDocument::Indented)).trimmed());
+  }
+  else
+  {
+    writeOut(QStringLiteral("Elementos indexados : %1").arg(stats.records));
+    writeOut(QStringLiteral("Elementos de la capa: %1").arg(featureCount));
+    writeOut(QStringLiteral("Formas vacias      : %1   no soportadas: %2   tipo de forma: %3")
+               .arg(stats.nullShapes)
+               .arg(stats.unsupported)
+               .arg(stats.shapeType));
+    writeOut(QStringLiteral("Recorrido          : %1 MB en %2 ms")
+               .arg(QString::number(static_cast<double>(stats.bytes) / (1024.0 * 1024.0), 'f', 1))
+               .arg(stats.scanMs));
+    writeOut(QStringLiteral("Memoria del indice : %1 MB")
+               .arg(QString::number(static_cast<double>(entries.size() * (4 * sizeof(double) + 2 * sizeof(uint32_t)))
+                                      / (1024.0 * 1024.0), 'f', 1)));
+    writeOut(QStringLiteral("Verificacion       : %1 elementos comparados con GDAL, %2 discrepancias, "
+                            "diferencia maxima %3")
+               .arg(checked)
+               .arg(mismatches)
+               .arg(worstDelta));
+  }
+
+  return mismatches == 0 ? ExitOk : ExitRenderFailed;
+}
+
+/**
+ * Construye el almacen de una capa: primero la geometria completa en memoria y,
+ * si no cabe (millones de elementos), el indice de solo envolventes con lectura
+ * de geometria bajo demanda. Devuelve nullptr solo si ninguna de las dos cosas es
+ * posible, con el motivo en `error`.
+ */
+std::shared_ptr<GeometryStore> buildGeometryStore(const std::shared_ptr<VectorLayer> &layer,
+                                                  int destinationEpsg, qint64 *buildMs,
+                                                  QString *modeName, QString *error)
+{
+  if (!layer)
+    return {};
+
+  GeometryStore::Options options;
+
+  QElapsedTimer timer;
+  timer.start();
+
+  QString memoryError;
+  std::shared_ptr<GeometryStore> store =
+    GeometryStore::buildFromLayer(*layer, destinationEpsg, options, nullptr, &memoryError);
+
+  if (!store)
+  {
+    QString envelopeError;
+    store = GeometryStore::buildEnvelopeIndex(*layer, destinationEpsg, options, nullptr, &envelopeError);
+    if (!store && error)
+      *error = QStringLiteral("%1\nIndice de envolventes: %2").arg(memoryError, envelopeError);
+  }
+  else if (error)
+  {
+    *error = memoryError;
+  }
+
+  if (buildMs)
+    *buildMs = timer.elapsed();
+
+  if (modeName && store)
+    *modeName = storeModeName(*store);
+
+  return store;
+}
+
 /** Construye el almacen indexado de una capa para los modos sin ventana. */
 void attachGeometryStore(const std::shared_ptr<VectorLayer> &layer, int destinationEpsg, bool enabled)
 {
   if (!enabled || !layer)
     return;
 
+  qint64 buildMs = 0;
+  QString modeName;
   QString error;
-  const std::shared_ptr<GeometryStore> store =
-    GeometryStore::buildFromLayer(*layer, destinationEpsg, GeometryStore::Options(), nullptr, &error);
+  const std::shared_ptr<GeometryStore> store = buildGeometryStore(layer, destinationEpsg, &buildMs, &modeName, &error);
 
   if (store)
   {
     layer->setGeometryStore(store);
     const GeometryStore::Stats stats = store->stats();
-    logVerbose(QStringLiteral("almacen indexado: %1 elementos, %2 vertices, %3 niveles")
+    logVerbose(QStringLiteral("almacen (%1): %2 elementos, %3 vertices, %4 niveles, %5 ms")
+                 .arg(modeName)
                  .arg(stats.features)
                  .arg(stats.vertices)
-                 .arg(stats.cachedLevels));
+                 .arg(stats.cachedLevels)
+                 .arg(buildMs));
   }
   else
   {
@@ -670,6 +856,7 @@ int main(int argc, char *argv[])
              || argument == QStringLiteral("--list-drivers")
              || argument == QStringLiteral("--snapshot")
              || argument == QStringLiteral("--bench")
+             || argument == QStringLiteral("--index-shp")
              || argument == QStringLiteral("--help") || argument == QStringLiteral("-h")
              || argument == QStringLiteral("--version") || argument == QStringLiteral("-v"))
     {
@@ -743,11 +930,17 @@ int main(int argc, char *argv[])
                                               QStringLiteral("n"), QStringLiteral("600000"));
   const QCommandLineOption spatialFilterOption(QStringLiteral("spatial-filter"),
                                                QStringLiteral("Filtra en origen con el indice del archivo (util en capas que no caben en memoria)"));
+  const QCommandLineOption indexShpOption(QStringLiteral("index-shp"),
+                                          QStringLiteral("Diagnostico: indexa las envolventes de <archivo.shp> y las verifica contra GDAL"),
+                                          QStringLiteral("archivo.shp"));
+  const QCommandLineOption readBudgetOption(QStringLiteral("read-budget"),
+                                            QStringLiteral("Elementos leidos del archivo por cuadro en capas indexadas por envolventes (0 = sin limite)"),
+                                            QStringLiteral("n"), QStringLiteral("40000"));
 
   parser.addOptions({infoOption, jsonOption, driversOption, snapshotOption, snapshotWindowOption,
                      layerOption, extentOption, sizeOption, crsOption, maxFeaturesOption, verboseOption,
                      benchOption, benchScenarioOption, benchBudgetOption, rendererOption, vertexBudgetOption,
-                     spatialFilterOption});
+                     spatialFilterOption, readBudgetOption, indexShpOption});
   parser.addPositionalArgument(QStringLiteral("archivo"),
                               QStringLiteral("Capas a cargar (opcional, se puede repetir)"),
                               QStringLiteral("[archivo...]"));
@@ -794,6 +987,21 @@ int main(int argc, char *argv[])
   const QStringList layerPaths = collectLayerPaths(parser);
 
   // ---------------------------------------------------------------------
+  // Diagnostico del indice de envolventes (sin ventana)
+  // ---------------------------------------------------------------------
+  if (parser.isSet(indexShpOption))
+  {
+    const QString path = parser.value(indexShpOption);
+    if (!QFileInfo::exists(path))
+    {
+      writeErr(QStringLiteral("No existe el archivo: %1").arg(QDir::toNativeSeparators(path)));
+      return ExitFileNotFound;
+    }
+
+    return inspectShapefileIndex(path, parser.isSet(jsonOption));
+  }
+
+  // ---------------------------------------------------------------------
   // Banco de pruebas de rendimiento (sin ventana)
   // ---------------------------------------------------------------------
   if (parser.isSet(benchOption))
@@ -812,6 +1020,7 @@ int main(int argc, char *argv[])
     request.renderer = parser.value(rendererOption).toLower();
     request.budgetMs = parser.value(benchBudgetOption).toLongLong();
     request.vertexBudget = parser.value(vertexBudgetOption).toLongLong();
+    request.readBudget = parser.value(readBudgetOption).toLongLong();
     request.maxFeatures = parser.value(maxFeaturesOption).toLongLong();
     request.spatialFilter = parser.isSet(spatialFilterOption);
     request.asJson = parser.isSet(jsonOption);
@@ -990,6 +1199,7 @@ int main(int argc, char *argv[])
     canvas.setDestinationEpsg(destinationEpsg);
     canvas.setMaximumFeaturesPerLayer(maxFeatures);
     canvas.setVertexBudget(parser.value(vertexBudgetOption).toLongLong());
+    canvas.setReadBudget(parser.value(readBudgetOption).toLongLong());
     canvas.setRendererBackend(useStore ? MapCanvas::RendererBackend::Fast
                                        : MapCanvas::RendererBackend::Legacy);
     canvas.setUseSpatialFilter(parser.isSet(spatialFilterOption));

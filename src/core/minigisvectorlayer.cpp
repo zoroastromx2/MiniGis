@@ -293,8 +293,30 @@ QString VectorLayer::fieldValue(qint64 row, int fieldIndex) const
   return value;
 }
 
-QVector<QString> VectorLayer::fieldValues(qint64 row) const
+Rectangle VectorLayer::featureEnvelope(qint64 row) const
 {
+  Rectangle result;
+  if (!mLayerHandle)
+    return result;
+
+  OGRFeatureH feature = OGR_L_GetFeature(mLayerHandle, static_cast<GIntBig>(row));
+  if (!feature)
+    return result;
+
+  if (OGRGeometryH geometry = OGR_F_GetGeometryRef(feature))
+  {
+    OGREnvelope envelope;
+    std::memset(&envelope, 0, sizeof(envelope));
+    OGR_G_GetEnvelope(geometry, &envelope);
+    if (envelope.IsInit())
+      result = Rectangle(envelope.MinX, envelope.MinY, envelope.MaxX, envelope.MaxY);
+  }
+
+  OGR_F_Destroy(feature);
+  return result;
+}
+
+QVector<QString> VectorLayer::fieldValues(qint64 row) const{
   QVector<QString> values;
   if (!mLayerHandle)
     return values;

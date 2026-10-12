@@ -3,15 +3,18 @@
 #include <QString>
 
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <unordered_map>
 #include <vector>
 
 #include "minigisstyle.h"
 
 class OGRLayer;
+class OGRCoordinateTransformation;
 
 namespace minigis
 {
@@ -42,6 +45,23 @@ class VectorLayer;
 class GeometryStore
 {
 public:
+  /**
+   * Como se guarda la capa.
+   *
+   *   * `InMemory`: la geometria completa en buffers planos (rapido, pero necesita
+   *     ~24 bytes por vertice). Es el modo normal.
+   *   * `Envelopes`: solo las envolventes (~40 bytes por elemento) mas los
+   *     desplazamientos del archivo; la geometria de lo que se ve se lee bajo
+   *     demanda y se cachea. Es el modo para capas que no caben: 3,2 M de
+   *     edificios ocupan ~130 MB de indice en lugar de ~750 MB de geometria, y
+   *     el cuadro deja de depender del tamano de la capa.
+   */
+  enum class Mode
+  {
+    InMemory,
+    Envelopes
+  };
+
   /** Envolvente y anillos de un elemento, en coordenadas del SRC de destino. */
   struct Feature
   {
@@ -73,7 +93,7 @@ public:
   struct Stats
   {
     qint64 features = 0;
-    qint64 vertices = 0;   // vertices del nivel 0
+    qint64 vertices = 0;   // vertices del nivel 0 (0 en modo envolventes)
     qint64 rings = 0;
     qint64 bytes = 0;      // memoria aproximada de todos los buffers
     int cachedLevels = 0;
@@ -83,6 +103,49 @@ public:
     qint64 readMs = 0;
     qint64 indexMs = 0;
     qint64 levelsMs = 0;
+    Mode mode = Mode::InMemory;
+    /** Modo envolventes: geometria leida bajo demanda y elementos en cache. */
+    qint64 cachedGeometries = 0;
+    qint64 geometriesRead = 0;
+    qint64 cachedGeometriesBytes = 0;
+  };
+
+  /**
+   * Geometria de los elementos visibles, lista para dibujar: un nivel
+   * simplificado (igual que en modo memoria) mas los anillos de cada elemento,
+   * indexados por su posicion en la lista de candidatos de la consulta.
+   */
+  struct Subset
+  {
+    std::shared_ptr<const Level> level;
+    std::vector<uint32_t> entryFirstRing;
+    std::vector<uint32_t> entryRingCount;
+    /** Tipo de geometria de cada anillo del subconjunto. */
+    std::vector<uint8_t> entryRingKind;
+    /**
+     * Elementos que NO se leen y se dibujan como punto (basta su envolvente). Se
+     * usan cuando la escala es tan lejana que cada elemento ocupa menos de un
+     * pixel: leer su geometria seria I/O aleatoria para dibujar algo
+     * indistinguible. Una capa de 3,2 M de edificios vista entera pasa de 81 s
+     * por cuadro a decenas de milisegundos.
+     */
+    std::vector<uint32_t> dotEntries;
+    qint64 readFeatures = 0;    // leidos del archivo en este cuadro
+    qint64 missingFeatures = 0; // visibles que no se han leido
+    bool geometryRead = true;   // false = a esta escala solo se dibujan puntos
+  };
+
+  /**
+   * Geometria de un elemento leida del archivo en modo `Envelopes`. Es publica
+   * por comodidad de implementacion (la usan los ayudantes del .cpp), no como
+   * parte del contrato de uso.
+   */
+  struct CachedGeometry
+  {
+    std::vector<double> coords;
+    std::vector<uint32_t> ringFirst;
+    std::vector<uint32_t> ringCount;
+    std::vector<uint8_t> ringKind;
   };
 
   struct Options
@@ -93,6 +156,10 @@ public:
     int precomputedLevels = 6;
     /** Memoria maxima de los niveles precalculados, en bytes. */
     qint64 precomputeBytes = 192LL * 1024 * 1024;
+    /** Elementos que se mantienen en la cache de geometria (modo `Envelopes`). */
+    qint64 cacheBudget = 300000;
+    /** Si el modo `InMemory` no cabe, se intenta el indice de envolventes. */
+    bool allowEnvelopeFallback = true;
   };
 
   /**
@@ -116,11 +183,46 @@ public:
     const std::function<bool(int, const QString &)> &progress = {},
     QString *error = nullptr);
 
+  /**
+   * Construye un indice de solo envolventes (modo `Envelopes`) recorriendo el
+   * .shp sin leer la geometria. Solo para el driver ESRI Shapefile; para el resto
+   * de formatos devuelve nullptr con el motivo en `error`.
+   *
+   * El almacen resultante **presta** la capa OGR (no es dueño del dataset): las
+   * lecturas bajo demanda se hacen con `OGR_L_GetFeature(fid)` desde el hilo que
+   * dibuja, y la capa debe seguir viva mientras el almacen se use.
+   */
+  static std::shared_ptr<GeometryStore> buildEnvelopeIndex(
+    const VectorLayer &layer, int destinationEpsg, const Options &options,
+    const std::function<bool(int, const QString &)> &progress = {},
+    QString *error = nullptr);
+
+  Mode mode() const { return mMode; }
+
+  /**
+   * Prepara para dibujar los elementos indicados: lee del archivo los que falten
+   * (hasta `readBudget`) y devuelve el nivel simplificado a `tolerance`.
+   *
+   * `minimumGeometrySize` es el tamano minimo (en unidades de mapa) que debe
+   * tener un elemento para que valga la pena leer su geometria: por debajo de el
+   * se dibujan puntos con la envolvente, hasta `dotBudget` elementos. Pasar 0
+   * desactiva esa degradacion (siempre se intenta leer la geometria).
+   *
+   * Nunca devuelve nullptr en modo envolventes.
+   */
+  std::shared_ptr<const Subset> acquireSubset(const std::vector<uint32_t> &candidates, double tolerance,
+                                              qint64 readBudget, double minimumGeometrySize = 0.0,
+                                              qint64 dotBudget = 0) const;
+
   Stats stats() const;
 
   const std::vector<Feature> &features() const { return mFeatures; }
   /** Tipo de geometria de cada anillo (GeometryKind como entero). */
   const std::vector<uint8_t> &ringKinds() const { return mRingKinds; }
+
+  /** Anillo inicial y numero de anillos de cada elemento, en arrays planos. */
+  const std::vector<uint32_t> &entryFirstRing() const { return mEntryFirstRing; }
+  const std::vector<uint32_t> &entryRingCount() const { return mEntryRingCount; }
 
   /**
    * Devuelve el nivel pedido, construyendolo si aun no existe. Nunca devuelve
@@ -163,8 +265,28 @@ private:
   void buildIndex();
   std::shared_ptr<Level> buildLevel(int index, const Level &raw) const;
 
+  /** Lee del archivo la geometria de `fid` y la guarda en la cache. */
+  bool fetchGeometry(uint32_t fid) const;
+  void evictCacheIfNeeded() const;
+
   std::vector<Feature> mFeatures;
   std::vector<uint8_t> mRingKinds;
+
+  /** Arrays planos por elemento (mismo contenido que mFeatures, mejor recorrido). */
+  std::vector<uint32_t> mEntryFirstRing;
+  std::vector<uint32_t> mEntryRingCount;
+
+  Mode mMode = Mode::InMemory;
+
+  // Modo envolventes: capa prestada, reproyeccion propia y cache de geometria.
+  OGRLayer *mBorrowedLayer = nullptr;
+  std::unique_ptr<OGRCoordinateTransformation> mTransformation;
+  mutable std::unordered_map<uint32_t, std::shared_ptr<CachedGeometry>> mCache;
+  mutable std::deque<uint32_t> mCacheOrder;
+  mutable qint64 mCacheBytes = 0;
+  qint64 mCacheBudget = 300000;
+  mutable qint64 mGeometriesRead = 0;
+  mutable std::vector<uint32_t> mMissingScratch;
 
   std::vector<RNode> mNodes;
   /** Elementos (indices de mFeatures) de cada hoja, agrupados por nodo. */
@@ -182,6 +304,11 @@ private:
   double mFullSpan = 1.0;   // lado mayor de la extension completa
   double mBaseTolerance = 1e-9;
   int mMaximumLevel = 24;
+  /**
+   * False cuando simplificar no reduce nada (capas de puntos): se dibuja siempre
+   * el nivel 0 y no se construyen niveles duplicados.
+   */
+  bool mSimplificationUseful = true;
 
   mutable std::mutex mMutex;
   mutable std::map<int, std::shared_ptr<Level>> mLevels;

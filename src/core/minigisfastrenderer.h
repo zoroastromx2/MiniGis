@@ -64,6 +64,29 @@ public:
      * umbral se prioriza la fluidez. Con `draft` se usa siempre.
      */
     qint64 hairlineFeatureThreshold = 2000;
+    /**
+     * Elementos cuya geometria se lee del archivo por cuadro en el modo
+     * envolventes (capas que no caben en memoria). Si la vista contiene mas, se
+     * toma uno de cada k: el R-tree devuelve los elementos en orden espacial, de
+     * modo que la muestra queda repartida por toda la vista. 0 = sin limite.
+     */
+    qint64 readBudget = 40000;
+    /**
+     * Tamano minimo (en pixeles) que debe ocupar un elemento para leer su
+     * geometria en el modo envolventes. Por debajo, la capa se dibuja como nube
+     * de puntos con las envolventes: a esa escala el contorno no se distingue y
+     * leerlo costaria segundos de I/O dispersa. 0 desactiva la degradacion.
+     */
+    double minimumGeometryPixels = 2.0;
+    /** Puntos maximos que se dibujan en esa nube (0 = sin limite). */
+    qint64 dotBudget = 150000;
+    /**
+     * Puntos maximos que se dibujan por cuadro en cualquier modo. Los marcadores
+     * no se pueden simplificar (cada elemento es un vertice), asi que una capa de
+     * millones de puntos se muestrea para acotar el coste del cuadro. 0 = sin
+     * limite.
+     */
+    qint64 pointBudget = 120000;
   };
 
   struct FrameStats
@@ -77,6 +100,12 @@ public:
     qint64 queryMs = 0;
     qint64 pathMs = 0;
     qint64 paintMs = 0;
+    /** Modo envolventes: elementos leidos del archivo en este cuadro y omitidos. */
+    qint64 readFeatures = 0;
+    qint64 skippedFeatures = 0;
+    /** Elementos dibujados como punto (envolvente) por ser sub-pixel. */
+    qint64 dotFeatures = 0;
+    bool envelopeMode = false;
   };
 
   struct Layer
@@ -120,10 +149,24 @@ private:
 
   /** Construye los lotes de una capa en un nivel de detalle dado. */
   void buildBatch(Batch &batch, const GeometryStore &store, const GeometryStore::Level &level,
-                  const MapToPixel &transform) const;
+                  const MapToPixel &transform, qint64 pointStride) const;
+
+  /**
+   * Igual, a partir de arrays planos por elemento. Los dos modos del almacen
+   * (memoria y envolventes) comparten este bucle: solo cambia de donde salen los
+   * anillos de cada elemento.
+   */
+  void buildBatch(Batch &batch, const GeometryStore::Level &level, const std::vector<uint8_t> &ringKinds,
+                  const std::vector<uint32_t> &entryFirstRing, const std::vector<uint32_t> &entryRingCount,
+                  const std::vector<uint32_t> &entries, const MapToPixel &transform,
+                  qint64 pointStride) const;
 
   FrameStats mStats;
   std::vector<uint32_t> mCandidates;
+  /** Secuencia 0..n-1 reutilizada por el modo envolventes (subconjunto por posicion). */
+  std::vector<uint32_t> mPositions;
+  /** Puntos de la nube de envolventes (elementos sub-pixel). */
+  std::vector<QPointF> mDots;
 };
 
 } // namespace minigis

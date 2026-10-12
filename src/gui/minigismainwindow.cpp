@@ -3,6 +3,7 @@
 #include "minigisattributetablemodel.h"
 #include "minigiserror.h"
 #include "minigisgdalinit.h"
+#include "minigisgeometrystore.h"
 #include "minigislayerpanel.h"
 #include "minigismapcanvas.h"
 #include "minigisstyledialog.h"
@@ -344,10 +345,22 @@ void MainWindow::onLayerLoaded(const std::shared_ptr<VectorLayer> &layer, bool f
   addRecentFile(layer->sourcePath());
   updateCrsLabel();
 
-  statusBar()->showMessage(QStringLiteral("Capa «%1» cargada: %2 elementos (%3)")
+  // Si la capa no cabia en memoria se ha indexado por envolventes: se avisa,
+  // porque la geometria se lee al acercarse y conviene que el usuario lo sepa.
+  QString note;
+  if (const std::shared_ptr<GeometryStore> store = layer->geometryStore())
+  {
+    if (store->mode() == GeometryStore::Mode::Envelopes)
+    {
+      note = QStringLiteral(" Capa indexada por envolventes (%1 elementos): el detalle se lee al acercarse.")
+               .arg(store->stats().features);
+    }
+  }
+
+  statusBar()->showMessage(QStringLiteral("Capa «%1» cargada: %2 elementos (%3).%4")
                              .arg(layer->name())
                              .arg(layer->featureCount())
-                             .arg(layer->crsDescription()),
+                             .arg(layer->crsDescription(), note),
                            kStatusTimeoutMs);
 }
 

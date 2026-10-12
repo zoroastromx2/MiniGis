@@ -257,6 +257,12 @@ por nivel de zoom, dibujado por lotes, modo borrador durante los gestos, reutili
 anterior y carga en segundo plano con barra de progreso. El análisis completo, las medidas y el
 trabajo pendiente están en **[RENDIMIENTO.md](RENDIMIENTO.md)**.
 
+Las capas que **no caben en memoria** (millones de elementos) se indexan por envolventes leyendo el
+`.shp` sin la geometría: así una capa de 3,24 M de edificios (584 MB) se abre en ~1 s con 146 MB de
+índice, responde en 13 ms por cuadro a escala de ciudad y se dibuja como mapa de densidad con el
+país entero en pantalla. A escalas muy lejanas la geometría se sustituye por puntos (envolventes),
+porque a esa escala no aporta y leerla costaría segundos de I/O por cuadro.
+
 ```bat
 :: medir el paneo/zoom sin abrir ventana (40 cuadros, con desglose por fase)
 bin\minigis.exe --bench 40 --bench-scenario mixed -l capa.gpkg --size 1200x800 -V
@@ -266,6 +272,9 @@ bin\minigis.exe --bench 40 --renderer legacy -l capa.gpkg --size 1200x800
 
 :: puerta de regresión: falla con código 6 si el p90 supera el presupuesto
 bin\minigis.exe --bench 24 --bench-budget 150 -l capa.gpkg --json
+
+:: diagnosticar el índice de envolventes de un shapefile (lo verifica contra GDAL)
+bin\minigis.exe --index-shp "E:\datos\capas\nz-building-outlines.shp"
 ```
 
 Con una capa pesada (12.000 polígonos, 2,2 M de vértices, 47,8 MB) el cuadro de paneo pasa de
