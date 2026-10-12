@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "minigisfastrenderer.h"
+#include "minigislabelrenderer.h"
 #include "minigismaprenderer.h"
 #include "minigisrectangle.h"
 
@@ -127,6 +128,16 @@ public:
   /** Estadisticas del ultimo cuadro acelerado (elementos y vertices dibujados). */
   const FastMapRenderer::FrameStats &fastFrameStats() const { return mFastRenderer.lastStats(); }
 
+  /** Estadisticas del ultimo etiquetado (etiquetas colocadas y descartadas). */
+  const LabelRenderer::FrameStats &labelFrameStats() const { return mLabelRenderer.lastStats(); }
+
+  /** Interruptor global de etiquetas: apaga las de todas las capas de golpe. */
+  void setLabelsVisible(bool visible);
+
+  /** Dibuja las etiquetas sobre un cuadro ya renderizado (siempre, no solo la franja). */
+  void drawLabels(QImage &image, const MapToPixel &transform, const QSize &size, bool draft);
+  bool labelsVisible() const { return mLabelsVisible; }
+
   /** Milisegundos del ultimo cuadro que reutilizo el anterior (0 si no lo hizo). */
   qint64 lastReuseMilliseconds() const { return mLastReuseMs; }
 
@@ -201,7 +212,9 @@ private:
   std::shared_ptr<VectorLayer> mCurrentLayer;
   MapRenderer mRenderer;
   FastMapRenderer mFastRenderer;
+  LabelRenderer mLabelRenderer;
   FastMapRenderer::Options mFastOptions;
+  bool mLabelsVisible = true;
   QTimer *mQualityTimer = nullptr;
   RendererBackend mBackend = RendererBackend::Auto;
   Rectangle mExtent;

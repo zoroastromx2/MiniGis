@@ -25,10 +25,12 @@ Carga de la capa de 47,8 MB / 2,2 M de vértices: **~0,4 s** construyendo el ín
 en un hilo de trabajo, con barra de progreso y sin bloquear la ventana (antes: la
 ventana se quedaba congelada durante varios segundos y sin ninguna señal visual).
 
-Trabajo realizado: **9 archivos de código nuevos** (más este documento) y **16
+Trabajo realizado: **13 archivos de código nuevos** (más este documento) y **18
 modificados**, con el motor clásico intacto y seleccionable (`--renderer legacy`) para
-poder comparar y como red de seguridad. Incluye un banco de pruebas (`--bench`) y una
-prueba de CTest que falla si una regresión de rendimiento supera el presupuesto.
+poder comparar y como red de seguridad. Incluye un banco de pruebas (`--bench`), una
+prueba de CTest que falla si una regresión de rendimiento supera el presupuesto, y
+**etiquetas configurables por capa** (sección 4.8: campos, fuente, halo, escalas,
+colocación y control de saturación) con su propia prueba de contrato.
 
 Además, la sección 9 documenta el caso que motivó la última tanda de trabajo: dos
 capas reales de Nueva Zelanda (**3,24 M de edificios** y **2,43 M de direcciones**)
@@ -303,6 +305,123 @@ hacerlo (sección 6.3). Dos alternativas sin cambiar de marco:
    varios niveles de zoom simultáneos.
 2. **`QPainter::drawImage` de una capa simplificada + overlays nítidos**: útil si el
    detalle fino solo importa en una ventana de interés.
+
+### 4.8 Etiquetas de los elementos
+
+Ficheros: `src/core/minigislabelstyle.h` (configuración),
+`src/core/minigislabelrenderer.h/.cpp` (dibujado) y
+`src/gui/minigislabeldialog.h/.cpp` (diálogo). La capa guarda su `LabelStyle` y
+cambiarla sube la revisión, igual que la simbología, así que el mapa se redibuja solo.
+
+**Qué se puede configurar** (todo lo que hace falta para que un etiquetado sea útil, no
+solo para que se vea texto):
+
+| Grupo | Opciones |
+|---|---|
+| Campos | Uno o varios campos, en el orden elegido, con separador configurable |
+| Fuente | Familia, tamaño, negrita, cursiva, color |
+| Halo | Activación, color y grosor (para leer el texto sobre cualquier relleno) |
+| Escala | En qué margen de escala aparecen (unidades de mapa por pixel) y si el tamaño se mide en **puntos de pantalla** (habitual) o en **unidades del mapa** (el texto crece al acercarse) |
+| Colocación | Encima / centrado / sobre el punto medio, desplazamiento en píxeles, **distancia mínima entre etiquetas**, **tamaño mínimo del elemento** |
+| Saturación | Máximo de etiquetas por cuadro, descarte de textos repetidos, prioridad |
+
+**Cómo se dibuja** (y por qué así):
+
+1. Los elementos salen de la consulta al **R-tree** del almacén, con un margen, no de
+   recorrer la capa.
+2. **Ancla**: para un punto, el punto; para una línea o un polígono, un **punto
+   interior** calculado cortando el elemento con la horizontal de su centro y tomando
+   el tramo interior más ancho, emparejando los cruces de **todos** los anillos. El
+   centro de la envolvente no sirve: en la parcela en L con hueco de los datos de
+   ejemplo el texto acababa dentro del hueco. En modo envolventes no se lee geometría
+   para etiquetar y se usa el centro de la envolvente.
+3. **Texto**: se leen los campos con **una sola lectura de GDAL por elemento**
+   (`fieldValues`) y se cachean por elemento entre cuadros (con límite de 200.000
+   entradas para acotar memoria). Así, desplazar el mapa no vuelve a leer los mismos
+   atributos: medido, 0 lecturas y 5 aciertos de caché en el segundo cuadro.
+4. **Colisión**: rejilla de celdas de 32 px; cada etiqueta se comprueba contra las
+   celdas que cubre su rectángulo **ampliado** por la distancia mínima. Sin la
+   ampliación el margen no tendría efecto (fue un fallo real: el parámetro se
+   ignoraba y las etiquetas se pisaban).
+5. **Dibujado**: con halo se traza el contorno del texto (`QPainterPath::addText` +
+   `drawPath` + `fillPath`); sin él, `drawText`. Si la plataforma no da contornos de
+   glifo (la plataforma sin ventana, por ejemplo) el halo se consigue dibujando el
+   texto alrededor en el color del halo: cuesta más llamadas, pero es la diferencia
+   entre ver la etiqueta o no verla.
+
+**La decisión de arquitectura importante**: las etiquetas se dibujan en una **pasada
+aparte, al final y sobre todo el lienzo**, nunca sobre la franja que se repinta al
+desplazar. El texto no se puede reutilizar desplazando una imagen: una etiqueta copiada
+quedaría en el sitio equivocado. Para no perder la reutilización de cuadro, el lienzo
+guarda su caché **antes** de esta pasada y compartiendo buffer con el lienzo devuelto
+(`QImage` cuenta referencias): al pintar las etiquetas Qt separa la copia y la caché se
+queda con la geometría limpia. Resultado medido: el paneo con etiquetas coincide
+exactamente con el redibujado (0 píxeles distintos) **y** la reutilización sigue
+funcionando.
+
+**Coste medido** (capa sintética de 12.000 polígonos, 1200x800, paneo):
+
+| | Sin etiquetas | Con etiquetas |
+|---|---|---|
+| Cuadro de calidad (mediana / p90) | 51 / 57 ms | 50 / 53 ms |
+| Cuadro de borrador (mediana / p90) | 21 / 26 ms | 21 / 21 ms |
+
+El coste es despreciable porque el trabajo está acotado: límite de etiquetas, rejilla de
+colisión, descarte de repetidos y caché de textos. En modo borrador se etiqueta uno de
+cada dos elementos para no competir con el arrastre.
+
+**Tres fallos propios que encontró la prueba del etiquetado** (`--check-labels`, 17
+comprobaciones, en la batería como `minigis.etiquetas`). Los tres habrían llegado al
+usuario:
+
+1. **Las etiquetas desaparecían al repintar sin cambios**: si el cuadro se reutilizaba
+   entero (nada había cambiado), el atajo devolvía la imagen cacheada —que a propósito
+   no lleva etiquetas— y no se dibujaba ninguna. Ahora la pasada de etiquetas se ejecuta
+   en los dos caminos.
+2. **El texto se dibujaba fuera de la imagen**: la línea base se componía con
+   `QFontMetricsF::boundingRect().topLeft()`, y hay motores de fuente que devuelven el
+   **tamaño correcto pero la posición descolocada** (medido: `(-99973, -99772)` en la
+   plataforma sin ventana). Ahora se compone con la `ascent`, que sí es fiable.
+3. **La distancia mínima entre etiquetas se ignoraba**: el margen solo ampliaba la
+   búsqueda en la rejilla, pero la comparación de solape usaba el rectángulo sin
+   ampliar.
+
+Además, la prueba comprueba que **las etiquetas no rompen el invariante del paneo**
+(reutilizar el cuadro y redibujar dan lo mismo, con texto dibujado encima) y que los
+textos se cachean entre cuadros.
+
+**El tamaño en unidades del mapa (y un fallo de usabilidad serio).** Este modo es el que
+responde a "que el texto crezca al acercarse", pero tal como estaba era inservible: el
+mismo número significaba cosas distintas según el modo, así que al elegir "unidades del
+mapa" un `10` se interpretaba como **10 unidades del mapa** (cientos de píxeles) y las
+etiquetas se veían como manchas negras en lugar de letras. Y había un segundo problema,
+peor: el control de tamaño tenía rango `[1, 200]` con un decimal, de modo que un valor
+correcto para un SRC geográfico (del orden de 0,0001) **no se podía ni escribir**: el
+control lo recortaba a 1 y el texto salía de miles de píxeles.
+
+Se corrigió en tres capas:
+
+1. **El diálogo convierte el valor al cambiar de modo**, para que la etiqueta no cambie
+   de tamaño aparente: el usuario ve el mismo texto y ajusta a partir de ahí. El rango
+   del control se adapta al modo (seis decimales y sufijo `u.m.` en unidades del mapa,
+   con pasos del tamaño de un píxel a la escala actual). El modo y el rango se fijan
+   **antes** que el valor, porque si no el control recorta el valor al cargar el diálogo.
+2. **Se muestra el tamaño real en píxeles** junto al control (`≈ 12,0 px a la escala
+   actual; el texto crece al acercarse`) y el aviso se pone en rojo cuando el valor deja
+   el texto fuera de lo legible. Es la diferencia entre un número y saber qué significa.
+   La vista previa usa la misma conversión, así que enseña el tamaño real.
+3. **El renderizador recorta el tamaño** a un margen razonable (1 a 400 px) y lo cuenta
+   en las estadísticas. Sin ese límite, un valor mal puesto sigue dando manchas negras;
+   con él, el texto se sigue leyendo aunque el valor sea absurdo.
+
+La prueba comprueba las dos cosas que importan: que el tamaño en unidades del mapa
+**equivale** al de pantalla cuando se convierte a la escala actual (mismo tamaño aparente,
+mismo resultado) y que un valor desproporcionado **se recorta** en lugar de dibujarse.
+
+**Límites conocidos**: el texto no gira para seguir una línea ni se curva; una etiqueta
+más ancha que su polígono se sale de él (no se recorta ni se parte en líneas); en modo
+envolventes el ancla es el centro de la envolvente; y no hay control de prioridad por
+campo (solo un valor global por capa).
 
 ---
 
@@ -1002,9 +1121,9 @@ minigis --index-shp "E:\datos\nz-building-outlines.shp"
    espacial del archivo por cuadro (ya disponible con `--spatial-filter`) + límite de
    elementos, en lugar de copiar la geometría a memoria.
 7. **Símbolos de punto con sello cacheado** (una textura por estilo en lugar de
-   construir trazados de elipse) y, si se añaden, **etiquetas**: hoy no hay
-   renderizado de texto en el mapa, y las etiquetas son el siguiente orden de
-   magnitud en complejidad.
+   construir trazados de elipse) y **etiquetas giradas o curvas**: hoy las etiquetas
+   son horizontales (sección 4.8); seguirlas a lo largo de una línea es el siguiente
+   orden de magnitud en complejidad.
 8. **`mimalloc`** como asignador, a medir.
 
 ---
@@ -1033,7 +1152,7 @@ minigis --index-shp "E:\datos\nz-building-outlines.shp"
   dibujan con el clásico, respetando el orden de apilado.
 - **Modo envolventes**: a escalas muy lejanas una capa masiva se dibuja como nube de
   puntos (envolventes) en lugar de geometría. Es visible y configurable.
-- **No implementado**: teselas, GPU y etiquetas.
+- **No implementado**: teselas y GPU (las etiquetas ya estan implementadas, seccion 4.8).
 
 ---
 
@@ -1046,6 +1165,10 @@ src/core/minigisgeometrystore.h    src/core/minigisgeometrystore.cpp
 src/core/minigisfastrenderer.h     src/core/minigisfastrenderer.cpp
 src/core/minigisvectorloader.h     src/core/minigisvectorloader.cpp
 src/core/minigisshapefileindex.h   src/core/minigisshapefileindex.cpp
+src/core/minigislabelstyle.h       configuracion de las etiquetas de una capa
+src/core/minigislabelrenderer.h    src/core/minigislabelrenderer.cpp
+src/gui/minigislabeldialog.h       src/gui/minigislabeldialog.cpp
+tests/run_cli_test.cmake           modos check-refresh, check-labels
 RENDIMIENTO.md                     este documento
 ```
 
@@ -1060,9 +1183,13 @@ src/app/CMakeLists.txt             optimizaciones en el enlazado
 src/core/minigismaprenderer.h/.cpp filtro espacial opcional, paintLayerInto() para mezclar motores
 src/core/minigisvectorlayer.h/.cpp referencia al GeometryStore, envolvente por elemento (--index-shp)
 src/gui/minigismapcanvas.h/.cpp    motor seleccionable, modo borrador, presupuesto, reutilizacion de cuadro
-src/gui/minigismainwindow.h/.cpp   carga asincrona, barra de progreso, cancelar, espera en los modos de captura
+src/gui/minigismainwindow.h/.cpp   carga asincrona, barra de progreso, cancelar, espera en los modos de captura,
+                                   menu y boton de Etiquetas, interruptor global de etiquetas
+src/gui/minigislayerpanel.h/.cpp   boton Etiquetas y senal labelRequested
 src/app/main.cpp                   --bench, --bench-scenario, --bench-budget, --renderer, --vertex-budget,
-                                   --spatial-filter, --read-budget, --index-shp
+                                   --spatial-filter, --read-budget, --index-shp,
+                                   --label-field, --label-size, --no-labels,
+                                   --check-labels, --snapshot-dialog
 tests/CMakeLists.txt               pruebas minigis.bench y minigis.rendimiento
 tests/run_cli_test.cmake           modo bench (contrato JSON + presupuesto)
 ```

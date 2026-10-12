@@ -14,6 +14,9 @@ set(MINIGIS_CORE_SRCS
   minigisvectorlayer.cpp
   minigisgeometrystore.h
   minigisgeometrystore.cpp
+  minigislabelstyle.h
+  minigislabelrenderer.h
+  minigislabelrenderer.cpp
   minigisshapefileindex.h
   minigisshapefileindex.cpp
   minigisvectorloader.h

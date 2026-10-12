@@ -6,6 +6,7 @@
 #include "minigisgeometrystore.h"
 #include "minigislayerpanel.h"
 #include "minigismapcanvas.h"
+#include "minigislabeldialog.h"
 #include "minigisstyledialog.h"
 #include "minigisvectorlayer.h"
 #include "minigisvectorloader.h"
@@ -138,6 +139,22 @@ void MainWindow::createActions()
   mStyleAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+Y")));
   connect(mStyleAction, &QAction::triggered, this, &MainWindow::editCurrentLayerStyle);
 
+  mLabelAction = new QAction(QStringLiteral("&Etiquetas de la capa..."), this);
+  mLabelAction->setShortcut(QKeySequence(Qt::Key_F7));
+  mLabelAction->setToolTip(QStringLiteral("Campos, fuente, color, halo y escalas de las etiquetas"));
+  connect(mLabelAction, &QAction::triggered, this, &MainWindow::editCurrentLayerLabels);
+
+  mShowLabelsAction = new QAction(QStringLiteral("Mostrar &etiquetas"), this);
+  mShowLabelsAction->setCheckable(true);
+  mShowLabelsAction->setChecked(true);
+  mShowLabelsAction->setToolTip(QStringLiteral("Apaga o enciende las etiquetas de todas las capas"));
+  connect(mShowLabelsAction, &QAction::toggled, this, [this](bool visible) {
+    mCanvas->setLabelsVisible(visible);
+    statusBar()->showMessage(visible ? QStringLiteral("Etiquetas activadas.")
+                                     : QStringLiteral("Etiquetas desactivadas."),
+                             kStatusTimeoutMs);
+  });
+
   mAttributeAction = new QAction(QStringLiteral("Tabla de atributos"), this);
   mAttributeAction->setShortcut(QKeySequence(QStringLiteral("F6")));
   mAttributeAction->setCheckable(true);
@@ -170,6 +187,9 @@ void MainWindow::createMenusAndToolBar()
   viewMenu->addAction(mZoomLayerAction);
   viewMenu->addSeparator();
   viewMenu->addAction(mStyleAction);
+  viewMenu->addAction(mLabelAction);
+  viewMenu->addSeparator();
+  viewMenu->addAction(mShowLabelsAction);
   viewMenu->addAction(mAttributeAction);
 
   QMenu *helpMenu = menuBar()->addMenu(QStringLiteral("A&yuda"));
@@ -188,6 +208,7 @@ void MainWindow::createMenusAndToolBar()
   toolBar->addAction(mZoomLayerAction);
   toolBar->addSeparator();
   toolBar->addAction(mStyleAction);
+  toolBar->addAction(mLabelAction);
   toolBar->addAction(mAttributeAction);
 }
 
@@ -211,6 +232,11 @@ void MainWindow::createDocks()
   connect(mLayerPanel, &LayerPanel::styleRequested, this, [this](const std::shared_ptr<VectorLayer> &layer) {
     mCanvas->setCurrentLayer(layer);
     editCurrentLayerStyle();
+  });
+  connect(mLayerPanel, &LayerPanel::labelRequested, this, [this](const std::shared_ptr<VectorLayer> &layer) {
+    if (layer)
+      mCanvas->setCurrentLayer(layer);
+    editCurrentLayerLabels();
   });
   connect(mLayerPanel, &LayerPanel::attributeTableRequested, this, [this](const std::shared_ptr<VectorLayer> &layer) {
     mCanvas->setCurrentLayer(layer);
@@ -539,6 +565,49 @@ void MainWindow::editCurrentLayerStyle()
   }
 }
 
+void MainWindow::editCurrentLayerLabels()
+{
+  const std::shared_ptr<VectorLayer> layer = currentLayer();
+  if (!layer)
+  {
+    statusBar()->showMessage(QStringLiteral("Selecciona una capa para configurar sus etiquetas."), kStatusTimeoutMs);
+    return;
+  }
+
+  if (layer->fields().isEmpty())
+  {
+    statusBar()->showMessage(QStringLiteral("La capa «%1» no tiene campos que mostrar.").arg(layer->name()),
+                             kStatusTimeoutMs);
+    return;
+  }
+
+  LabelDialog dialog(layer->name(), layer->fields(), layer->labelStyle(), mCanvas->mapUnitsPerPixel(), this);
+  if (dialog.exec() != QDialog::Accepted)
+    return;
+
+  const LabelStyle style = dialog.labelStyle();
+  layer->setLabelStyle(style);
+
+  // Redibujado inmediato: descarta el cuadro cacheado y repinta. Las etiquetas se
+  // dibujan despues de la geometria, asi que el cambio se ve al instante.
+  mCanvas->refreshMap();
+
+  if (style.enabled && !style.fields.isEmpty())
+  {
+    const LabelRenderer::FrameStats &stats = mCanvas->labelFrameStats();
+    statusBar()->showMessage(QStringLiteral("Etiquetas de «%1»: %2 campos (%3). %4 etiquetas en la vista.")
+                               .arg(layer->name())
+                               .arg(style.fields.size())
+                               .arg(style.fields.join(style.separator))
+                               .arg(stats.placed),
+                             kStatusTimeoutMs);
+  }
+  else
+  {
+    statusBar()->showMessage(QStringLiteral("Etiquetas desactivadas en «%1».").arg(layer->name()), kStatusTimeoutMs);
+  }
+}
+
 void MainWindow::showAttributeTable(bool visible)
 {
   if (!mAttributeDock)
@@ -676,6 +745,7 @@ void MainWindow::updateWindowTitle()
   const bool hasLayer = layer != nullptr;
   mCloseAction->setEnabled(hasLayer);
   mStyleAction->setEnabled(hasLayer);
+  mLabelAction->setEnabled(hasLayer);
   mZoomLayerAction->setEnabled(hasLayer);
 }
 

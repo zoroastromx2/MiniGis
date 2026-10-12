@@ -65,6 +65,8 @@ void LayerPanel::buildUi()
   mZoomButton->setToolTip(QStringLiteral("Encuadrar la capa seleccionada"));
   mStyleButton = new QPushButton(QStringLiteral("Estilo"), this);
   mStyleButton->setToolTip(QStringLiteral("Cambiar el color y el grosor de la capa seleccionada"));
+  mLabelButton = new QPushButton(QStringLiteral("Etiquetas"), this);
+  mLabelButton->setToolTip(QStringLiteral("Configurar las etiquetas de la capa seleccionada (F7)"));
   mTableButton = new QPushButton(QStringLiteral("Tabla"), this);
   mTableButton->setToolTip(QStringLiteral("Ver la tabla de atributos de la capa seleccionada (F6)"));
 
@@ -74,6 +76,7 @@ void LayerPanel::buildUi()
   buttonsRow->addWidget(mRemoveButton);
   buttonsRow->addWidget(mZoomButton);
   buttonsRow->addWidget(mStyleButton);
+  buttonsRow->addWidget(mLabelButton);
   buttonsRow->addWidget(mTableButton);
   buttonsRow->addStretch(1);
 
@@ -100,6 +103,10 @@ void LayerPanel::buildUi()
   connect(mStyleButton, &QPushButton::clicked, this, [this] {
     if (const std::shared_ptr<VectorLayer> layer = selectedLayer())
       emit styleRequested(layer);
+  });
+  connect(mLabelButton, &QPushButton::clicked, this, [this] {
+    if (const std::shared_ptr<VectorLayer> layer = selectedLayer())
+      emit labelRequested(layer);
   });
   connect(mTableButton, &QPushButton::clicked, this, [this] {
     if (const std::shared_ptr<VectorLayer> layer = selectedLayer())

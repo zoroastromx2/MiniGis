@@ -90,6 +90,18 @@ add_test(NAME minigis.redibujado
           -DMODE=check-refresh
           -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
 
+# Etiquetado: campos, fuente, halo, escalas, solapes, repeticiones y la cache de
+# textos. Se ejecuta en la plataforma sin ventana (la prueba comprueba la
+# semantica de cada opcion; las comprobaciones de pixeles se omiten solas si la
+# plataforma no dibuja texto).
+add_test(NAME minigis.etiquetas
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DSAMPLE=${MINIGIS_ROOT_DIR}/data/sample/shapefiles/parcels.shp"
+          -DMODE=check-labels
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
+set_tests_properties(minigis.etiquetas PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 set_tests_properties(minigis.bench PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 set_tests_properties(minigis.indice-envolventes PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 set_tests_properties(minigis.redibujado PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

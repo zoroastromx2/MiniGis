@@ -6,6 +6,7 @@
 #include <memory>
 
 #include "minigiserror.h"
+#include "minigislabelstyle.h"
 #include "minigisrectangle.h"
 #include "minigisstyle.h"
 
@@ -102,6 +103,17 @@ public:
   }
 
   /**
+   * Etiquetas de los elementos de la capa (campos, fuente, halo, escala...).
+   * Cambiarlas sube la revision, de modo que el lienzo redibuja.
+   */
+  const LabelStyle &labelStyle() const { return mLabelStyle; }
+  void setLabelStyle(const LabelStyle &style)
+  {
+    mLabelStyle = style;
+    bumpRevision();
+  }
+
+  /**
    * Numero que sube cada vez que cambia algo que afecta a como se dibuja la capa
    * (simbologia, visibilidad o la aparicion del almacen indexado).
    *
@@ -147,6 +159,7 @@ private:
   QVector<FieldInfo> mFields;
   Rectangle mExtent;
   Style mStyle;
+  LabelStyle mLabelStyle;
   std::shared_ptr<GeometryStore> mGeometryStore;
   bool mVisible = true;
   quint64 mRevision = 1;

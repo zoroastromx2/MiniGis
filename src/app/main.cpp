@@ -22,6 +22,7 @@
 #include <QElapsedTimer>
 #include <QFileInfo>
 #include <QImage>
+#include <QPainter>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -46,6 +47,7 @@ constexpr unsigned int kUtf8CodePage = 65001;
 
 #include "minigisgdalinit.h"
 #include "minigisgeometrystore.h"
+#include "minigislabeldialog.h"
 #include "minigismainwindow.h"
 #include "minigismapcanvas.h"
 #include "minigisrectangle.h"
@@ -77,6 +79,23 @@ std::shared_ptr<GeometryStore> buildGeometryStore(const std::shared_ptr<VectorLa
                                                   QString *modeName, QString *error);
 QString storeModeName(const GeometryStore &store);
 void attachGeometryStore(const std::shared_ptr<VectorLayer> &layer, int destinationEpsg, bool enabled);
+
+/**
+ * Opciones de etiquetado de la linea de comandos: permiten comprobar las
+ * etiquetas sin abrir la interfaz (capturas y banco de pruebas).
+ */
+struct LabelOptions
+{
+  QStringList fields;
+  double size = 10.0;
+  bool enabled = true; // --no-labels las apaga todas
+  bool halo = true;
+  /** Tamano en unidades del mapa (si > 0, se usa el modo "unidades del mapa"). */
+  double mapUnitsSize = 0.0;
+  bool parsed = false;
+};
+
+void applyLabelOptions(const std::shared_ptr<VectorLayer> &layer, const LabelOptions &options);
 
 QTextStream &stdOut()
 {
@@ -389,6 +408,7 @@ struct BenchRequest
   Rectangle extent;
   qint64 maxFeatures = 0;
   QString renderer = QStringLiteral("auto");
+  LabelOptions labels;
   qint64 vertexBudget = 600000;
   qint64 readBudget = 40000;
   qint64 budgetMs = 0;
@@ -478,6 +498,8 @@ int runBenchmark(const BenchRequest &request)
                    .arg(QDir::toNativeSeparators(path), storeError));
       }
     }
+
+    applyLabelOptions(layer, request.labels);
 
     layerNames << layer->name();
     canvas.addLayer(layer, opened == 0);
@@ -654,6 +676,25 @@ QString storeModeName(const GeometryStore &store)
 {
   return store.mode() == GeometryStore::Mode::Envelopes ? QStringLiteral("envolventes")
                                                         : QStringLiteral("memoria");
+}
+
+
+/** Aplica las opciones de etiqueta a una capa recien abierta. */
+void applyLabelOptions(const std::shared_ptr<VectorLayer> &layer, const LabelOptions &options)
+{
+  if (!layer || !options.parsed)
+    return;
+
+  LabelStyle style = layer->labelStyle();
+  style.enabled = options.enabled && !options.fields.isEmpty();
+  style.fields = options.fields;
+  style.fontSize = options.mapUnitsSize > 0.0 ? options.mapUnitsSize : options.size;
+  style.sizeMode = options.mapUnitsSize > 0.0 ? LabelStyle::SizeMode::MapUnits
+                                              : LabelStyle::SizeMode::Screen;
+  style.haloEnabled = options.halo;
+  layer->setLabelStyle(style);
+
+  logVerbose(QStringLiteral("etiquetas de «%1»: %2").arg(layer->name(), style.summary()));
 }
 
 /**
@@ -933,6 +974,315 @@ qint64 countPaintedPixels(const QImage &image)
   }
 
   return painted;
+}
+
+/**
+ * Comprueba las etiquetas (`--check-labels`).
+ *
+ * La mayor parte de las comprobaciones se hacen sobre las ESTADISTICAS del
+ * etiquetado (cuantas etiquetas se colocan, cuantas se descartan y por que) en
+ * lugar de sobre los pixeles: asi la prueba mide la semantica de cada opcion
+ * —campo, rango de escala, distancia minima, repeticiones, tamano minimo— y
+ * funciona igual en cualquier plataforma. Las comprobaciones de pixeles solo se
+ * ejecutan si la plataforma dibuja texto, porque un motor de fuente sin contornos
+ * (la plataforma sin ventana) no pinta ningun glifo.
+ */
+int checkLabels(const QStringList &layerPaths, const QSize &size, bool asJson)
+{
+  if (layerPaths.isEmpty())
+  {
+    writeErr(QStringLiteral("Se necesita una capa: minigis --check-labels -l capa.shp"));
+    return ExitUsage;
+  }
+
+  const QString path = layerPaths.first();
+  if (!QFileInfo::exists(path))
+  {
+    writeErr(QStringLiteral("No existe el archivo: %1").arg(QDir::toNativeSeparators(path)));
+    return ExitFileNotFound;
+  }
+
+  Error error;
+  const std::shared_ptr<VectorLayer> layer = VectorLayer::open(path, &error);
+  if (!layer)
+  {
+    writeErr(error.toText());
+    return ExitOpenFailed;
+  }
+
+  attachGeometryStore(layer, 4326, true);
+
+  MapCanvas canvas;
+  canvas.setDestinationEpsg(4326);
+  canvas.resize(size);
+  canvas.addLayer(layer, true);
+
+  bool ok = true;
+  int executed = 0;
+  int omitted = 0;
+  const auto check = [&ok, &executed](const QString &name, bool passed, const QString &detail) {
+    ++executed;
+    writeOut(QStringLiteral("%1 %2%3")
+               .arg(passed ? QStringLiteral("OK  ") : QStringLiteral("FALLO"))
+               .arg(name, detail.isEmpty() ? QString() : QStringLiteral(" — ") + detail));
+    if (!passed)
+      ok = false;
+  };
+  const auto omit = [&omitted](const QString &name, const QString &why) {
+    ++omitted;
+    writeOut(QStringLiteral("OMITE %1 — %2").arg(name, why));
+  };
+
+  // Campos de la capa, para elegir dos que existan y uno que no.
+  QStringList fieldNames;
+  for (const VectorLayer::FieldInfo &field : layer->fields())
+    fieldNames << field.name;
+
+  if (fieldNames.size() < 2)
+  {
+    writeErr(QStringLiteral("La capa necesita al menos dos campos para esta prueba; tiene %1.")
+               .arg(fieldNames.size()));
+    return ExitRenderFailed;
+  }
+
+  const QString firstField = fieldNames.value(0);
+  const QString secondField = fieldNames.value(1);
+
+  /** Dibuja con la configuracion indicada y devuelve las estadisticas y la imagen. */
+  const auto render = [&](const LabelStyle &style, bool labelsVisible, QImage *image) {
+    layer->setLabelStyle(style);
+    canvas.setLabelsVisible(labelsVisible);
+    canvas.refreshMap();
+    const QImage frame = canvas.renderToImage(size, false);
+    if (image)
+      *image = frame;
+    return canvas.labelFrameStats();
+  };
+
+  LabelStyle base;
+  base.enabled = true;
+  base.fields = QStringList {firstField};
+  base.fontSize = 12.0;
+
+  const QImage withoutLabels = canvas.renderToImage(size, false);
+
+  // 1) Con un campo valido se etiqueta cada elemento visible.
+  LabelStyle style = base;
+  LabelRenderer::FrameStats stats = render(style, true, nullptr);
+  check(QStringLiteral("se etiqueta un elemento por campo y elemento visible"), stats.placed > 0,
+        QStringLiteral("%1 etiquetas colocadas con el campo «%2»").arg(stats.placed).arg(firstField));
+
+  // 2) Un campo que no existe no dibuja nada (y no lee atributos de mas).
+  style = base;
+  style.fields = QStringList {QStringLiteral("campo_que_no_existe_xyz")};
+  stats = render(style, true, nullptr);
+  check(QStringLiteral("un campo inexistente no etiqueta nada"), stats.placed == 0,
+        QStringLiteral("%1 etiquetas").arg(stats.placed));
+
+  // 3) Dos campos se combinan con el separador elegido.
+  style = base;
+  style.fields = QStringList {firstField, secondField};
+  style.separator = QStringLiteral(" | ");
+  stats = render(style, true, nullptr);
+  const qint64 twoFieldPlaced = stats.placed;
+  check(QStringLiteral("se pueden combinar varios campos"), twoFieldPlaced > 0,
+        QStringLiteral("%1 etiquetas con «%2 | %3»").arg(twoFieldPlaced).arg(firstField, secondField));
+
+  // 4) El interruptor global apaga todas las etiquetas.
+  stats = render(base, false, nullptr);
+  check(QStringLiteral("el interruptor global apaga las etiquetas"), stats.placed == 0,
+        QStringLiteral("%1 etiquetas").arg(stats.placed));
+
+  // 5) Fuera del rango de escala no se etiqueta: es lo que permite que las
+  //    etiquetas aparezcan solo al acercarse.
+  style = base;
+  style.minimumScale = canvas.mapUnitsPerPixel() * 0.5; // "mas alejado" que la mitad de la actual
+  stats = render(style, true, nullptr);
+  check(QStringLiteral("fuera del rango de escala no se etiqueta"), stats.placed == 0,
+        QStringLiteral("%1 etiquetas con la escala actual fuera del rango").arg(stats.placed));
+
+  // 5b) Y dentro del rango si se etiqueta.
+  style = base;
+  style.maximumScale = canvas.mapUnitsPerPixel() * 0.5; // "mas cercano" solo a partir de la mitad
+  stats = render(style, true, nullptr);
+  check(QStringLiteral("dentro del rango de escala si se etiqueta"), stats.placed > 0,
+        QStringLiteral("%1 etiquetas").arg(stats.placed));
+
+  // 6) Una distancia minima grande reduce el numero de etiquetas (evita solapes).
+  style = base;
+  style.minimumDistance = 3000.0; // mas ancha que el lienzo: solo cabe una
+  stats = render(style, true, nullptr);
+  const qint64 farApartPlaced = stats.placed;
+  check(QStringLiteral("la distancia minima descarta etiquetas que se solapan"),
+        farApartPlaced < twoFieldPlaced || stats.skippedCollision > 0,
+        QStringLiteral("%1 colocadas, %2 descartadas por solape").arg(farApartPlaced).arg(stats.skippedCollision));
+
+  // 7) El tamano minimo del elemento evita etiquetar lo que no se ve.
+  style = base;
+  style.minimumFeatureSize = 100000.0;
+  stats = render(style, true, nullptr);
+  check(QStringLiteral("el tamano minimo del elemento descarta elementos diminutos"),
+        stats.placed == 0 && stats.skippedSmall > 0,
+        QStringLiteral("%1 colocadas, %2 por tamano").arg(stats.placed).arg(stats.skippedSmall));
+
+  // 8) El limite de etiquetas acota el trabajo del cuadro.
+  style = base;
+  style.maximumLabels = 1;
+  stats = render(style, true, nullptr);
+  check(QStringLiteral("el limite de etiquetas acota el dibujado"), stats.placed <= 1,
+        QStringLiteral("%1 etiqueta con limite 1").arg(stats.placed));
+
+  // 9) El descarte de textos repetidos se nota en una capa con valores repetidos.
+  LabelStyle duplicateStyle = base;
+  duplicateStyle.fields = QStringList {secondField};
+  duplicateStyle.discardDuplicates = true;
+  const qint64 uniquePlaced = render(duplicateStyle, true, nullptr).placed;
+
+  duplicateStyle.discardDuplicates = false;
+  const qint64 repeatedPlaced = render(duplicateStyle, true, nullptr).placed;
+  check(QStringLiteral("el descarte de textos repetidos reduce las etiquetas"),
+        uniquePlaced <= repeatedPlaced, QStringLiteral("%1 sin repetir frente a %2 repitiendo")
+                                           .arg(uniquePlaced)
+                                           .arg(repeatedPlaced));
+
+  // 10) El tamano en unidades del mapa se interpreta A LA ESCALA ACTUAL: el mismo
+  //     tamano aparente debe dar el mismo resultado que en puntos de pantalla. Si no
+  //     coincidiera, el numero significaria otra cosa y el texto saldria enorme (que
+  //     es el fallo que se vio en uso real: manchas negras en lugar de letras).
+  {
+    QFont font;
+    font.setPointSizeF(base.fontSize);
+    const double pixelHeight = QFontMetricsF(font).height();
+
+    LabelStyle mapUnits = base;
+    mapUnits.sizeMode = LabelStyle::SizeMode::MapUnits;
+    mapUnits.fontSize = pixelHeight * canvas.mapUnitsPerPixel();
+    const LabelRenderer::FrameStats mapStats = render(mapUnits, true, nullptr);
+
+    check(QStringLiteral("el tamano en unidades del mapa equivale al de pantalla"), mapStats.placed > 0,
+          QStringLiteral("%1 etiquetas con %2 u.m. (≈ %3 px) frente a %4 con %5 pt")
+            .arg(mapStats.placed)
+            .arg(mapUnits.fontSize, 0, 'g', 4)
+            .arg(pixelHeight, 0, 'f', 1)
+            .arg(twoFieldPlaced)
+            .arg(base.fontSize));
+  }
+
+  // 11) Un tamano desproporcionado se recorta: por encima del limite el texto deja de
+  //     leerse y se ve como manchas, asi que se limita en lugar de dibujarlo.
+  {
+    LabelStyle absurd = base;
+    absurd.sizeMode = LabelStyle::SizeMode::MapUnits;
+    absurd.fontSize = 1.0e6; // con cualquier escala real, miles de pixeles
+    const LabelRenderer::FrameStats absurdStats = render(absurd, true, nullptr);
+
+    check(QStringLiteral("un tamano desproporcionado se recorta en lugar de dibujar manchas"),
+          absurdStats.sizeClamped > 0,
+          QStringLiteral("%1 etiquetas con el tamano recortado").arg(absurdStats.sizeClamped));
+  }
+
+  // 12) Los textos se cachean entre cuadros: al segundo cuadro no se vuelve a leer
+  //     el atributo de cada elemento (si no, desplazar el mapa releeria la capa).
+  layer->setLabelStyle(base);
+  canvas.refreshMap();
+  canvas.renderToImage(size, false);
+  const LabelRenderer::FrameStats first = canvas.labelFrameStats();
+  canvas.renderToImage(size, false);
+  const LabelRenderer::FrameStats second = canvas.labelFrameStats();
+  check(QStringLiteral("los textos se cachean entre cuadros"),
+        second.cacheHits > 0 && second.valueReads <= first.valueReads,
+        QStringLiteral("%1 lecturas y %2 aciertos de cache en el segundo cuadro")
+          .arg(second.valueReads)
+          .arg(second.cacheHits));
+
+  // --- Comprobaciones de pixeles: solo si la plataforma dibuja texto ---------
+  {
+    QImage probe(64, 24, QImage::Format_ARGB32_Premultiplied);
+    probe.fill(Qt::white);
+    QImage probeAfter = probe;
+    {
+      QPainter probePainter(&probeAfter);
+      probePainter.setPen(Qt::black);
+      probePainter.drawText(QPointF(2, 16), QStringLiteral("W"));
+    }
+
+    // Se compara antes y despues: contar pixeles "pintados" no serviria, porque el
+    // fondo blanco de la sonda ya difiere del color de fondo del lienzo.
+    if (countVisibleDifferences(probe, probeAfter, 8) == 0)
+    {
+      omit(QStringLiteral("las etiquetas anaden tinta al mapa"),
+           QStringLiteral("esta plataforma no dibuja texto (motor de fuente sin contornos)"));
+      omit(QStringLiteral("una fuente mayor dibuja mas tinta"),
+           QStringLiteral("esta plataforma no dibuja texto"));
+      omit(QStringLiteral("el halo cambia el dibujado del texto"),
+           QStringLiteral("esta plataforma no dibuja texto"));
+      omit(QStringLiteral("el paneo con etiquetas coincide con el redibujado"),
+           QStringLiteral("esta plataforma no dibuja texto"));
+    }
+    else
+    {
+      // La tinta que anaden las etiquetas se mide como DIFERENCIA respecto al mapa
+      // sin etiquetas: contar pixeles pintados no sirve, porque el texto cae sobre
+      // poligonos ya pintados y no cambiaria la cuenta.
+      QImage labelled;
+      render(base, true, &labelled);
+      const qint64 addedByLabels = countVisibleDifferences(labelled, withoutLabels, 8);
+      check(QStringLiteral("las etiquetas anaden tinta al mapa"), addedByLabels > 0,
+            QStringLiteral("%1 pixeles pintados por las etiquetas").arg(addedByLabels));
+
+      LabelStyle big = base;
+      big.fontSize = base.fontSize * 2.5;
+      QImage bigImage;
+      render(big, true, &bigImage);
+      const qint64 addedByBig = countVisibleDifferences(bigImage, withoutLabels, 8);
+      check(QStringLiteral("una fuente mayor dibuja mas tinta"), addedByBig > addedByLabels,
+            QStringLiteral("%1 pixeles con %2 pt frente a %3 con %4 pt")
+              .arg(addedByBig)
+              .arg(big.fontSize)
+              .arg(addedByLabels)
+              .arg(base.fontSize));
+
+      LabelStyle noHalo = base;
+      noHalo.haloEnabled = false;
+      QImage noHaloImage;
+      render(noHalo, true, &noHaloImage);
+      const qint64 withHalo = countVisibleDifferences(labelled, noHaloImage, 8);
+      check(QStringLiteral("el halo cambia el dibujado del texto"), withHalo > 0,
+            QStringLiteral("%1 pixeles distintos entre halo y sin halo").arg(withHalo));
+
+      // El invariante del lienzo, ahora con etiquetas: los textos se dibujan
+      // encima del cuadro reutilizado y no deben quedar duplicados ni desplazados.
+      layer->setLabelStyle(base);
+      canvas.setLabelsVisible(true);
+      canvas.refreshMap();
+      canvas.renderToImage(size, false);
+
+      const double unitsPerPixel = canvas.mapUnitsPerPixel();
+      const Rectangle extent = canvas.extent();
+      canvas.setExtent(Rectangle(extent.xMin() + 7.0 * unitsPerPixel, extent.yMin(),
+                                 extent.xMax() + 7.0 * unitsPerPixel, extent.yMax()));
+      const QImage reused = canvas.renderToImage(size, false);
+
+      canvas.refreshMap();
+      const QImage full = canvas.renderToImage(size, false);
+
+      const qint64 differences = countVisibleDifferences(reused, full, 8);
+      check(QStringLiteral("el paneo con etiquetas coincide con el redibujado"), differences == 0,
+            QStringLiteral("%1 pixeles distintos").arg(differences));
+    }
+  }
+
+  if (asJson)
+  {
+    QJsonObject root;
+    root.insert(QStringLiteral("ok"), ok);
+    root.insert(QStringLiteral("checks"), executed);
+    root.insert(QStringLiteral("omitted"), omitted);
+    root.insert(QStringLiteral("fields"), QJsonArray::fromStringList(fieldNames));
+    writeOut(QString::fromUtf8(QJsonDocument(root).toJson(QJsonDocument::Indented)).trimmed());
+  }
+
+  return ok ? ExitOk : ExitRenderFailed;
 }
 
 /**
@@ -1307,6 +1657,23 @@ int main(int argc, char *argv[])
                                               QStringLiteral("n"), QStringLiteral("600000"));
   const QCommandLineOption spatialFilterOption(QStringLiteral("spatial-filter"),
                                                QStringLiteral("Filtra en origen con el indice del archivo (util en capas que no caben en memoria)"));
+  const QCommandLineOption labelFieldOption(QStringLiteral("label-field"),
+                                            QStringLiteral("Etiqueta los elementos con estos campos (separados por comas)"),
+                                            QStringLiteral("campo[,campo]"));
+  const QCommandLineOption labelSizeOption(QStringLiteral("label-size"),
+                                           QStringLiteral("Tamano de la fuente de las etiquetas, en puntos"),
+                                           QStringLiteral("pt"), QStringLiteral("10"));
+  const QCommandLineOption labelMapSizeOption(
+    QStringLiteral("label-map-size"),
+    QStringLiteral("Tamano de la fuente en UNIDADES DEL MAPA (el texto crece al acercarse)"),
+    QStringLiteral("u.m."));
+  const QCommandLineOption noLabelsOption(QStringLiteral("no-labels"),
+                                          QStringLiteral("Abre las capas con las etiquetas desactivadas"));
+  const QCommandLineOption snapshotDialogOption(QStringLiteral("snapshot-dialog"),
+                                                QStringLiteral("Captura el dialogo de etiquetas a <archivo.png> y sale"),
+                                                QStringLiteral("archivo.png"));
+  const QCommandLineOption checkLabelsOption(QStringLiteral("check-labels"),
+                                             QStringLiteral("Comprueba el etiquetado (campos, escala, solapes, cache)"));
   const QCommandLineOption checkRefreshOption(QStringLiteral("check-refresh"),
                                               QStringLiteral("Comprueba que el mapa se redibuja al cambiar simbologia o visibilidad"));
   const QCommandLineOption withAttributesOption(QStringLiteral("with-attributes"),
@@ -1322,7 +1689,8 @@ int main(int argc, char *argv[])
                      layerOption, extentOption, sizeOption, crsOption, maxFeaturesOption, verboseOption,
                      benchOption, benchScenarioOption, benchBudgetOption, rendererOption, vertexBudgetOption,
                      spatialFilterOption, readBudgetOption, indexShpOption, withAttributesOption,
-                     checkRefreshOption});
+                     checkRefreshOption, checkLabelsOption, snapshotDialogOption, labelFieldOption, labelSizeOption,
+                     labelMapSizeOption, noLabelsOption});
   parser.addPositionalArgument(QStringLiteral("archivo"),
                               QStringLiteral("Capas a cargar (opcional, se puede repetir)"),
                               QStringLiteral("[archivo...]"));
@@ -1366,6 +1734,22 @@ int main(int argc, char *argv[])
     return ExitOk;
   }
 
+  // Opciones de etiquetado (se aplican a cada capa que se abra en los modos sin
+  // ventana y tambien a la interfaz, donde el dialogo las puede cambiar luego).
+  LabelOptions labelOptions;
+  if (parser.isSet(labelFieldOption) || parser.isSet(labelMapSizeOption))
+  {
+    labelOptions.parsed = true;
+    labelOptions.mapUnitsSize = parser.value(labelMapSizeOption).toDouble();
+    labelOptions.fields = parser.value(labelFieldOption).split(QLatin1Char(','), Qt::SkipEmptyParts);
+    for (QString &field : labelOptions.fields)
+      field = field.trimmed();
+    labelOptions.size = parser.value(labelSizeOption).toDouble();
+    labelOptions.enabled = !parser.isSet(noLabelsOption);
+    if (labelOptions.size <= 0.0)
+      labelOptions.size = 10.0;
+  }
+
   const QStringList layerPaths = collectLayerPaths(parser);
 
   // ---------------------------------------------------------------------
@@ -1386,8 +1770,59 @@ int main(int argc, char *argv[])
   // ---------------------------------------------------------------------
   // Comprobacion de redibujado (simbologia y visibilidad)
   // ---------------------------------------------------------------------
-  if (parser.isSet(checkRefreshOption))
+  // Captura del dialogo de etiquetas: permite revisar la interfaz sin abrirla a
+  // mano (util para comprobar el diseno y para las capturas de la documentacion).
+  if (parser.isSet(snapshotDialogOption))
   {
+    if (layerPaths.isEmpty())
+    {
+      writeErr(QStringLiteral("Se necesita una capa: minigis --snapshot-dialog d.png -l capa.shp"));
+      return ExitUsage;
+    }
+
+    Error error;
+    const std::shared_ptr<VectorLayer> layer = VectorLayer::open(layerPaths.first(), &error);
+    if (!layer)
+    {
+      writeErr(error.toText());
+      return ExitOpenFailed;
+    }
+
+    LabelStyle style = layer->labelStyle();
+    if (!style.enabled && !layer->fields().isEmpty())
+    {
+      style.enabled = true;
+      style.fields = QStringList {layer->fields().first().name};
+    }
+
+    applyLabelOptions(layer, labelOptions);
+    style = layer->labelStyle();
+
+    // Escala de referencia: la que tendria el mapa encuadrado en la ventana. El
+    // dialogo la necesita para traducir entre puntos y unidades del mapa.
+    const Rectangle layerExtent = layer->extentInEpsg(4326);
+    const double referenceScale =
+      layerExtent.isValid() ? layerExtent.width() / 900.0 : 1.0;
+
+    LabelDialog dialog(layer->name(), layer->fields(), style, referenceScale, nullptr);
+    dialog.resize(880, 720);
+    dialog.show();
+    QCoreApplication::processEvents();
+
+    const QString dialogPath = parser.value(snapshotDialogOption);
+    if (!dialog.grab().save(dialogPath))
+    {
+      writeErr(QStringLiteral("No se pudo escribir la imagen: %1").arg(QDir::toNativeSeparators(dialogPath)));
+      return ExitRenderFailed;
+    }
+
+    writeOut(QStringLiteral("Imagen escrita: %1").arg(QDir::toNativeSeparators(dialogPath)));
+    return ExitOk;
+  }
+
+  if (parser.isSet(checkLabelsOption) || parser.isSet(checkRefreshOption))
+  {
+    const bool labels = parser.isSet(checkLabelsOption);
     QSize checkSize(600, 400);
     if (!parseSize(parser.value(sizeOption), &checkSize))
     {
@@ -1402,7 +1837,8 @@ int main(int argc, char *argv[])
       return ExitUsage;
     }
 
-    return checkRefresh(layerPaths, checkSize, parser.isSet(jsonOption));
+    return labels ? checkLabels(layerPaths, checkSize, parser.isSet(jsonOption))
+                  : checkRefresh(layerPaths, checkSize, parser.isSet(jsonOption));
   }
 
   // ---------------------------------------------------------------------
@@ -1426,6 +1862,7 @@ int main(int argc, char *argv[])
     request.vertexBudget = parser.value(vertexBudgetOption).toLongLong();
     request.readBudget = parser.value(readBudgetOption).toLongLong();
     request.maxFeatures = parser.value(maxFeaturesOption).toLongLong();
+    request.labels = labelOptions;
     request.spatialFilter = parser.isSet(spatialFilterOption);
     request.asJson = parser.isSet(jsonOption);
 
@@ -1575,6 +2012,11 @@ int main(int argc, char *argv[])
         return ExitNoLayers;
       }
 
+      // Etiquetas pedidas por linea de comandos (la interfaz las puede cambiar
+      // despues con el dialogo).
+      for (const std::shared_ptr<VectorLayer> &layer : window.canvas()->layers())
+        applyLabelOptions(layer, labelOptions);
+
       // La tabla de atributos permite comprobar de un vistazo que los valores se
       // leen bien (que es justo lo que se rompio con las capas indexadas).
       if (parser.isSet(withAttributesOption))
@@ -1634,6 +2076,7 @@ int main(int argc, char *argv[])
         return ExitOpenFailed;
       }
 
+      applyLabelOptions(layer, labelOptions);
       attachGeometryStore(layer, destinationEpsg, useStore);
       canvas.addLayer(layer, opened == 0);
       ++opened;
@@ -1653,6 +2096,14 @@ int main(int argc, char *argv[])
 
     const QString outputPath = parser.value(snapshotOption);
     const QImage image = canvas.renderToImage(imageSize);
+    {
+      const LabelRenderer::FrameStats &labels = canvas.labelFrameStats();
+      logVerbose(QStringLiteral("etiquetas: %1 colocadas, %2 sin campo, %3 por solape, %4 repetidas, "
+                                "%5 por tamano, %6 candidatos, %7 lecturas de atributos, %8 ms, %9 sin contornos")
+                   .arg(labels.placed).arg(labels.skippedEmpty).arg(labels.skippedCollision)
+                   .arg(labels.skippedDuplicate).arg(labels.skippedSmall).arg(labels.candidates)
+                   .arg(labels.valueReads).arg(labels.paintMs).arg(labels.textFallbacks));
+    }
     if (image.isNull() || !image.save(outputPath, "PNG"))
     {
       writeErr(QStringLiteral("No se pudo escribir la imagen en %1").arg(QDir::toNativeSeparators(outputPath)));

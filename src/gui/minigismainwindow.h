@@ -74,6 +74,8 @@ private slots:
   void closeAllLayers();
   void zoomToCurrentLayer();
   void editCurrentLayerStyle();
+  /** Configura las etiquetas de la capa actual (campos, fuente, halo, escala). */
+  void editCurrentLayerLabels();
   void showAboutDialog();
   void showSystemInfo();
 
@@ -141,6 +143,8 @@ private:
   QAction *mZoomFullAction = nullptr;
   QAction *mZoomLayerAction = nullptr;
   QAction *mStyleAction = nullptr;
+  QAction *mLabelAction = nullptr;
+  QAction *mShowLabelsAction = nullptr;
   QAction *mAttributeAction = nullptr;
   QAction *mAboutAction = nullptr;
   QAction *mSystemInfoAction = nullptr;

@@ -129,6 +129,55 @@ void MapCanvas::refreshMap()
   update();
 }
 
+void MapCanvas::setLabelsVisible(bool visible)
+{
+  if (mLabelsVisible == visible)
+    return;
+
+  mLabelsVisible = visible;
+  // El cuadro cacheado no lleva etiquetas (se dibujan despues), pero el lienzo
+  // anterior si las mostraba: se descarta para no arrastrar nada.
+  refreshMap();
+}
+
+void MapCanvas::drawLabels(QImage &image, const MapToPixel &transform, const QSize &size, bool draft)
+{
+  LabelRenderer::Options options;
+  options.enabled = mLabelsVisible;
+  options.draft = draft;
+
+  if (!mLabelsVisible)
+  {
+    // Se dejan las estadisticas a cero, para que quien las consulte sepa que este
+    // cuadro no lleva etiquetas y no lea las del cuadro anterior.
+    mLabelRenderer.resetStats();
+    return;
+  }
+
+  std::vector<LabelRenderer::Layer> labelLayers;
+  labelLayers.reserve(mLayers.size());
+  for (const std::shared_ptr<VectorLayer> &layer : mLayers)
+  {
+    if (!layer || !layer->isVisible())
+      continue;
+
+    labelLayers.push_back(
+      LabelRenderer::Layer {layer.get(), layer->geometryStore().get(), &layer->labelStyle()});
+  }
+
+  if (labelLayers.empty())
+  {
+    mLabelRenderer.resetStats();
+    return;
+  }
+
+  QPainter labelPainter(&image);
+  labelPainter.setRenderHint(QPainter::Antialiasing, true);
+  labelPainter.setRenderHint(QPainter::TextAntialiasing, true);
+  mLabelRenderer.paint(labelPainter, labelLayers, transform, size, options);
+}
+
+
 quint64 MapCanvas::contentRevision() const
 {
   // Mezcla sencilla: basta con que dos estados distintos den numeros distintos.
@@ -485,8 +534,11 @@ QImage MapCanvas::renderToImage(const QSize &size, bool draft)
   const bool reused = reusePreviousFrame(image, size, draft, exposedRegion);
   if (reused && exposedRegion.isEmpty())
   {
+    // Cuadro reutilizado entero: la geometria ya esta, pero las etiquetas hay que
+    // dibujarlas igualmente (la cache no las guarda).
     mLastReuseMs = timer.elapsed();
-    mLastRenderMs = mLastReuseMs;
+    drawLabels(image, transform, size, draft);
+    mLastRenderMs = timer.elapsed();
     return image;
   }
 
@@ -557,7 +609,7 @@ QImage MapCanvas::renderToImage(const QSize &size, bool draft)
     mFastRenderer.lastStats().viewDependent || (mMaximumFeatures > 0);
 
   FrameCache &cache = mFrameCaches[draft ? 1 : 0];
-  cache.image = image;
+  cache.image = image; // comparte buffer: la cache se queda con la geometria limpia
   cache.extent = extent;
   cache.size = size;
   cache.epsg = mDestinationEpsg;
@@ -565,6 +617,8 @@ QImage MapCanvas::renderToImage(const QSize &size, bool draft)
   cache.viewDependent = frameViewDependent;
   cache.valid = true;
 
+  // Las etiquetas se dibujan despues de la geometria y sobre todo el lienzo.
+  drawLabels(image, transform, size, draft);
   mLastRenderMs = timer.elapsed();
   return image;
 }

@@ -43,6 +43,7 @@ signals:
   void removeLayerRequested(const std::shared_ptr<VectorLayer> &layer);
   void zoomToLayerRequested(const std::shared_ptr<VectorLayer> &layer);
   void styleRequested(const std::shared_ptr<VectorLayer> &layer);
+  void labelRequested(const std::shared_ptr<VectorLayer> &layer);
   void attributeTableRequested(const std::shared_ptr<VectorLayer> &layer);
   void visibilityChanged(const std::shared_ptr<VectorLayer> &layer, bool visible);
   void currentLayerChanged(const std::shared_ptr<VectorLayer> &layer);
@@ -59,6 +60,7 @@ private:
   QPushButton *mRemoveButton = nullptr;
   QPushButton *mZoomButton = nullptr;
   QPushButton *mStyleButton = nullptr;
+  QPushButton *mLabelButton = nullptr;
   QPushButton *mTableButton = nullptr;
 
   std::vector<std::shared_ptr<VectorLayer>> mLayers;

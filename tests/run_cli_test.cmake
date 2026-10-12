@@ -123,6 +123,29 @@ elseif(MODE STREQUAL "check-refresh")
     message(STATUS "minigis --check-refresh OK")
   endif()
 
+elseif(MODE STREQUAL "check-labels")
+  # Etiquetado: campos, escalas, solapes, repeticiones, cache de textos y el
+  # invariante del paneo con etiquetas dibujadas encima del cuadro reutilizado.
+  execute_process(
+    COMMAND "${MINIGIS_EXE}" --check-labels -l "${SAMPLE}" --size 600x400
+    RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+  if(NOT _rc EQUAL EXPECT_EXIT)
+    message(FATAL_ERROR "minigis --check-labels fallo (codigo ${_rc}, esperado ${EXPECT_EXIT})\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")
+  endif()
+
+  if(EXPECT_EXIT EQUAL 0)
+    if(_out MATCHES "FALLO")
+      message(FATAL_ERROR "El etiquetado no cumple su contrato:\n${_out}")
+    endif()
+    if(NOT _out MATCHES "se etiqueta un elemento por campo")
+      message(FATAL_ERROR "La comprobacion de campos no se ejecuto:\n${_out}")
+    endif()
+    if(NOT _out MATCHES "paneo con etiquetas")
+      message(FATAL_ERROR "La comprobacion de paneo con etiquetas no se ejecuto:\n${_out}")
+    endif()
+    message(STATUS "minigis --check-labels OK")
+  endif()
+
 else()
   message(FATAL_ERROR "MODE no soportado: ${MODE}")
 endif()

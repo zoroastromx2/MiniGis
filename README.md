@@ -224,6 +224,15 @@ En la interfaz:
   geometrías como la extensión con la que se encuadra la capa.
 * Tabla de atributos paginada y bajo demanda (máximo 100 000 filas mostradas).
 * Simbología: color de relleno/contorno, grosor, tamaño de punto y opacidad.
+* **Etiquetas por capa**: uno o varios campos, familia y tamaño de fuente, negrita/cursiva,
+  color, halo (color y grosor), margen de escala en el que aparecen, tamaño en puntos de
+  pantalla o en unidades del mapa, colocación respecto al elemento con desplazamiento,
+  distancia mínima entre etiquetas, tamaño mínimo del elemento, máximo de etiquetas por
+  cuadro, descarte de textos repetidos y prioridad (menú **Ver → Etiquetas de la capa…**,
+  botón **Etiquetas** del panel o **F7**; **Ver → Mostrar etiquetas** las apaga todas). El
+  diálogo indica en todo momento el tamaño real en píxeles y convierte el valor al cambiar
+  entre puntos de pantalla y unidades del mapa, para que el texto no cambie de tamaño al
+  cambiar de modo.
 * Localiza automáticamente `proj.db` y los datos de GDAL si no hay variables de entorno.
 * Errores accionables: cada fallo dice qué ha pasado y qué hacer (`minigis::Error`).
 
@@ -231,7 +240,9 @@ En la interfaz:
 
 * Ráster (GeoTIFF, etc.): GDAL ya está enlazado, así que añadir `GDALRasterBand::RasterIO`
   es el siguiente paso natural.
-* Edición de geometrías, guardado, simbología por categorías, etiquetado, servidores OGC.
+* Edición de geometrías, guardado, simbología por categorías, servidores OGC.
+* Etiquetas giradas o curvas siguiendo una línea, y control de prioridad por campo (la
+  prioridad es un valor por capa).
 * Reproyección del *render* con rejilla (*warp*): se transforman las geometrías, no las teselas.
 
 ---
@@ -279,6 +290,17 @@ bin\minigis.exe --index-shp "E:\datos\capas\nz-building-outlines.shp"
 :: comprobar que el mapa se redibuja al cambiar simbología o visibilidad, y que
 :: el paneo reutilizado (copiar el cuadro y repintar la franja) no deja costuras
 bin\minigis.exe --check-refresh -l data\sample\shapefiles\parcels.shp
+
+:: comprobar el etiquetado: campos, escalas, solapes, repeticiones y caché de textos
+bin\minigis.exe --check-labels -l data\sample\shapefiles\parcels.shp
+
+:: etiquetas desde la linea de ordenes (util para capturas y para el banco de pruebas)
+bin\minigis.exe --snapshot mapa.png -l capa.shp --label-field "nombre,uso" --label-size 11
+bin\minigis.exe --snapshot mapa.png -l capa.shp --label-field nombre --label-map-size 25
+bin\minigis.exe --snapshot mapa.png -l capa.shp --label-field nombre --no-labels
+
+:: capturar el dialogo de etiquetas (para revisar el diseno sin abrir la aplicacion)
+bin\minigis.exe --snapshot-dialog dialogo.png -l capa.shp --label-field nombre
 ```
 
 Con una capa pesada (12.000 polígonos, 2,2 M de vértices, 47,8 MB) el cuadro de paneo pasa de
