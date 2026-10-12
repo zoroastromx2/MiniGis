@@ -275,6 +275,10 @@ bin\minigis.exe --bench 24 --bench-budget 150 -l capa.gpkg --json
 
 :: diagnosticar el índice de envolventes de un shapefile (lo verifica contra GDAL)
 bin\minigis.exe --index-shp "E:\datos\capas\nz-building-outlines.shp"
+
+:: comprobar que el mapa se redibuja al cambiar simbología o visibilidad, y que
+:: el paneo reutilizado (copiar el cuadro y repintar la franja) no deja costuras
+bin\minigis.exe --check-refresh -l data\sample\shapefiles\parcels.shp
 ```
 
 Con una capa pesada (12.000 polígonos, 2,2 M de vértices, 47,8 MB) el cuadro de paneo pasa de

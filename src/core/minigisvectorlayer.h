@@ -86,10 +86,31 @@ public:
   QVector<QString> fieldValues(qint64 row) const;
 
   bool isVisible() const { return mVisible; }
-  void setVisible(bool visible) { mVisible = visible; }
+  void setVisible(bool visible)
+  {
+    if (mVisible == visible)
+      return;
+    mVisible = visible;
+    bumpRevision();
+  }
 
   const Style &style() const { return mStyle; }
-  void setStyle(const Style &style) { mStyle = style; }
+  void setStyle(const Style &style)
+  {
+    mStyle = style;
+    bumpRevision();
+  }
+
+  /**
+   * Numero que sube cada vez que cambia algo que afecta a como se dibuja la capa
+   * (simbologia, visibilidad o la aparicion del almacen indexado).
+   *
+   * El lienzo lo usa como parte de la clave de su cache de cuadro: asi es
+   * imposible que un cambio de estilo o de visibilidad se quede sin reflejar por
+   * reutilizar una imagen anterior. La alternativa (que cada sitio que cambia la
+   * apariencia se acuerde de invalidar la cache) ya fallo una vez.
+   */
+  quint64 revision() const { return mRevision; }
 
   /** Handle de la capa OGR (prestado) para recorrer elementos al renderizar. */
   OGRLayerH ogrLayerHandle() const { return mLayerHandle; }
@@ -100,7 +121,11 @@ public:
    * con el camino clasico de lectura directa.
    */
   std::shared_ptr<GeometryStore> geometryStore() const { return mGeometryStore; }
-  void setGeometryStore(const std::shared_ptr<GeometryStore> &store) { mGeometryStore = store; }
+  void setGeometryStore(const std::shared_ptr<GeometryStore> &store)
+  {
+    mGeometryStore = store;
+    bumpRevision();
+  }
 
   /** Texto corto para listados: "cities (12 elementos)". */
   QString displayName() const;
@@ -110,6 +135,7 @@ private:
 
   void readMetadata();
   void readFields();
+  void bumpRevision() { ++mRevision; }
 
   GDALDatasetH mDatasetHandle = nullptr;
   OGRLayerH mLayerHandle = nullptr;
@@ -123,6 +149,7 @@ private:
   Style mStyle;
   std::shared_ptr<GeometryStore> mGeometryStore;
   bool mVisible = true;
+  quint64 mRevision = 1;
   mutable qint64 mFeatureCount = -1; // -1 = pendiente de calcular
 };
 

@@ -75,14 +75,22 @@ public:
   void setDestinationEpsg(int epsg);
 
   /** Limite de elementos dibujados por capa (0 = sin limite). */
-  void setMaximumFeaturesPerLayer(qint64 maximum) { mMaximumFeatures = maximum; }
+  void setMaximumFeaturesPerLayer(qint64 maximum)
+  {
+    mMaximumFeatures = maximum;
+    invalidateFrameCache();
+  }
   qint64 maximumFeaturesPerLayer() const { return mMaximumFeatures; }
 
   void setRendererBackend(RendererBackend backend);
   RendererBackend rendererBackend() const { return mBackend; }
 
   /** Vertices maximos por cuadro en el camino acelerado (0 = sin limite). */
-  void setVertexBudget(qint64 budget) { mFastOptions.vertexBudget = budget; }
+  void setVertexBudget(qint64 budget)
+  {
+    mFastOptions.vertexBudget = budget;
+    invalidateFrameCache();
+  }
   qint64 vertexBudget() const { return mFastOptions.vertexBudget; }
 
   /**
@@ -121,6 +129,14 @@ public:
 
   /** Milisegundos del ultimo cuadro que reutilizo el anterior (0 si no lo hizo). */
   qint64 lastReuseMilliseconds() const { return mLastReuseMs; }
+
+  /**
+   * Redibuja el mapa descartando el cuadro cacheado. Se llama cuando cambia algo
+   * que afecta al dibujado (simbologia, visibilidad, opciones del motor). El
+   * lienzo ya detecta por si mismo esos cambios (revision de las capas), pero
+   * invalidadar aqui hace el redibujado inmediato y deja clara la intencion.
+   */
+  void refreshMap();
 
   /**
    * Imagen del estado actual; la usa el modo --snapshot, el banco de pruebas y
@@ -208,10 +224,27 @@ private:
     Rectangle extent;
     QSize size;
     int epsg = 0;
+    /** Revision del estado de las capas cuando se dibujo este cuadro. */
+    quint64 revision = 0;
+    /**
+     * True si el cuadro se dibujo con decisiones que dependen del encuadre exacto
+     * (muestreo de puntos o de envolventes). Un cuadro asi NO se puede reutilizar
+     * desplazandolo: la parte copiada y la nueva franja tendrian elementos
+     * distintos, y el mapa se veria incompleto o con densidad desigual.
+     */
+    bool viewDependent = false;
     bool valid = false;
   };
 
+  /**
+   * Numero que resume todo lo que afecta al dibujado: las opciones del motor y el
+   * estado (simbologia, visibilidad) de cada capa. Forma parte de la clave de la
+   * cache de cuadro, de modo que cualquier cambio obliga a redibujar.
+   */
+  quint64 contentRevision() const;
+
   FrameCache mFrameCaches[2]; // [0] calidad, [1] borrador
+  quint64 mOptionsRevision = 1;
   qint64 mLastReuseMs = 0;
 };
 

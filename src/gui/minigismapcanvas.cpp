@@ -77,8 +77,13 @@ void MapCanvas::setDraftMode(bool draft)
     return;
 
   mDraftMode = draft;
-  invalidateFrameCache();
   mFastOptions.draft = draft;
+
+  // No se invalidan las caches: cada nivel de calidad tiene la suya, de modo que
+  // el cuadro de borrador anterior sigue sirviendo para el siguiente cuadro de
+  // borrador (que es lo que hace fluido el arrastre) y el de calidad para el
+  // siguiente cuadro de calidad. Invalidar ambas al entrar y salir del modo
+  // borrador desperdiciaba justo la reutilizacion que se busca.
   update();
 }
 
@@ -111,10 +116,30 @@ Rectangle MapCanvas::snappedExtent(const Rectangle &extent) const
 
 void MapCanvas::invalidateFrameCache()
 {
+  ++mOptionsRevision;
   mFrameCaches[0].valid = false;
   mFrameCaches[0].image = QImage();
   mFrameCaches[1].valid = false;
   mFrameCaches[1].image = QImage();
+}
+
+void MapCanvas::refreshMap()
+{
+  invalidateFrameCache();
+  update();
+}
+
+quint64 MapCanvas::contentRevision() const
+{
+  // Mezcla sencilla: basta con que dos estados distintos den numeros distintos.
+  quint64 revision = mOptionsRevision * 1099511628211ULL;
+  for (const std::shared_ptr<VectorLayer> &layer : mLayers)
+  {
+    if (!layer)
+      continue;
+    revision ^= layer->revision() + 0x9E3779B97F4A7C15ULL + (revision << 6) + (revision >> 2);
+  }
+  return revision;
 }
 
 bool MapCanvas::reusePreviousFrame(QImage &image, const QSize &size, bool draft, QRegion &exposed)
@@ -127,6 +152,18 @@ bool MapCanvas::reusePreviousFrame(QImage &image, const QSize &size, bool draft,
     return false;
 
   if (cache.size != size || cache.epsg != mDestinationEpsg)
+    return false;
+
+  // Un cuadro dibujado con muestreo dependiente de la vista no se puede reutilizar
+  // desplazandolo (ver FrameCache::viewDependent): se redibuja entero.
+  if (cache.viewDependent)
+    return false;
+
+  // Si ha cambiado algo que afecta al dibujado (simbologia, visibilidad, opciones
+  // del motor), el cuadro guardado ya no representa el estado actual: se
+  // redibuja entero. Sin esta comprobacion, cambiar el estilo de una capa no se
+  // reflejaba en el mapa hasta mover o redimensionar la vista.
+  if (cache.revision != contentRevision())
     return false;
 
   if (!cache.extent.isValid() || !mExtent.isValid())
@@ -168,10 +205,19 @@ bool MapCanvas::reusePreviousFrame(QImage &image, const QSize &size, bool draft,
     return false;
 
   // Copia por filas (mismo formato y tamano: es un memcpy por linea).
-  const int destinationX = std::max(0, dx);
-  const int destinationY = std::max(0, dy);
-  const int sourceX = std::max(0, -dx);
-  const int sourceY = std::max(0, -dy);
+  //
+  // Signo del desplazamiento: para un punto fijo del mapa,
+  //     pixel_cacheado = pixel_nuevo + (nuevo.xMin - cache.xMin) * escala
+  // es decir, si xMin crece (la vista se desplaza hacia el este) el contenido
+  // aparece MAS A LA IZQUIERDA en el cuadro nuevo. Por tanto el pixel `p` del
+  // cuadro guardado va al pixel `p - dx`: el destino es el origen menos el
+  // desplazamiento. Invertir esto —copiar hacia el lado contrario— desplaza todo
+  // el contenido copiado el doble de lo debido y deja una costura vertical justo
+  // en el limite de la franja repintada.
+  const int destinationX = std::max(0, -dx);
+  const int destinationY = std::max(0, -dy);
+  const int sourceX = std::max(0, dx);
+  const int sourceY = std::max(0, dy);
   const int copyWidth = size.width() - std::abs(dx);
 
   for (int row = 0; row < size.height() - std::abs(dy); ++row)
@@ -181,9 +227,13 @@ bool MapCanvas::reusePreviousFrame(QImage &image, const QSize &size, bool draft,
                 static_cast<size_t>(copyWidth) * 4);
   }
 
-  // Zona que no cubre la copia: es lo unico que hay que volver a dibujar. Son
-  // dos franjas en forma de L, no su rectangulo envolvente.
-  const QRect covered = QRect(QPoint(dx, dy), size).intersected(QRect(QPoint(0, 0), size));
+  // Zona que cubre la copia: es EXACTAMENTE la que se acaba de escribir, y es lo
+  // que hay que restar para saber que franja queda por dibujar. Calcularla aparte
+  // (por ejemplo como el rectangulo desplazado) es un error facil y caro: al
+  // invertir el signo de la copia, el rectangulo desplazado dejo de coincidir con
+  // la zona realmente copiada y quedaba sin pintar una banda del ancho del
+  // desplazamiento (el mapa se veia incompleto al arrastrar).
+  const QRect covered(destinationX, destinationY, copyWidth, size.height() - std::abs(dy));
   exposed = QRegion(QRect(QPoint(0, 0), size)).subtracted(QRegion(covered));
   return true;
 }
@@ -449,7 +499,18 @@ QImage MapCanvas::renderToImage(const QSize &size, bool draft)
 
   QPainter painter(&image);
   if (reused)
-    painter.setClipRegion(exposedRegion);
+  {
+    // Cuando lo descubierto es un solo rectangulo (arrastre horizontal o vertical
+    // puro, que es el caso normal) se recorta con un rectangulo en lugar de con
+    // una region: Qt trata el recorte rectangular como un simple recorte de
+    // exploracion y el suavizado de los simbolos que caen dentro sale identico al
+    // del dibujado completo. Con region, algunos bordes suavizados cambian en un
+    // punado de pixeles.
+    if (exposedRegion.rectCount() == 1)
+      painter.setClipRect(exposedRegion.boundingRect());
+    else
+      painter.setClipRegion(exposedRegion);
+  }
 
   // Las capas se recorren en orden de apilado. Las que tienen almacen se agrupan
   // para dibujarlas de una vez; cuando aparece una capa sin almacen (todavia
@@ -488,12 +549,20 @@ QImage MapCanvas::renderToImage(const QSize &size, bool draft)
   if (reused)
     mLastReuseMs = timer.elapsed();
 
-  // El cuadro pasa a ser la referencia para el siguiente desplazamiento.
+  // El cuadro pasa a ser la referencia para el siguiente desplazamiento. Se guarda
+  // si el dibujado dependio del encuadre exacto: en ese caso no se podra reutilizar
+  // (y el limite de elementos del camino clasico tambien lo hace depender, porque
+  // trunca el dibujo segun lo que haya en la vista).
+  const bool frameViewDependent =
+    mFastRenderer.lastStats().viewDependent || (mMaximumFeatures > 0);
+
   FrameCache &cache = mFrameCaches[draft ? 1 : 0];
   cache.image = image;
   cache.extent = extent;
   cache.size = size;
   cache.epsg = mDestinationEpsg;
+  cache.revision = contentRevision();
+  cache.viewDependent = frameViewDependent;
   cache.valid = true;
 
   mLastRenderMs = timer.elapsed();

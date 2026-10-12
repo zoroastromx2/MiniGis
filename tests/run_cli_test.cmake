@@ -79,6 +79,50 @@ elseif(MODE STREQUAL "bench")
     message(STATUS "minigis --bench OK")
   endif()
 
+elseif(MODE STREQUAL "index-shp")
+  # El indice de envolventes debe coincidir con lo que devuelve GDAL y no debe
+  # dejar la capa sin atributos. Lo segundo es un contrato facil de romper: al
+  # indexar se ignoran temporalmente todos los campos (para no leer un DBF de
+  # gigabytes) y basta un `return` que se salte la restauracion para que la tabla
+  # de atributos muestre "(nulo)" en todas las filas.
+  execute_process(
+    COMMAND "${MINIGIS_EXE}" --index-shp "${SAMPLE}"
+    RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+  if(NOT _rc EQUAL EXPECT_EXIT)
+    message(FATAL_ERROR "minigis --index-shp fallo (codigo ${_rc}, esperado ${EXPECT_EXIT})\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")
+  endif()
+
+  if(EXPECT_EXIT EQUAL 0)
+    if(NOT _out MATCHES "0 discrepancias")
+      message(FATAL_ERROR "El indice de envolventes no coincide con GDAL:\n${_out}")
+    endif()
+    if(NOT _out MATCHES "Atributos tras indexar: 0 de")
+      message(FATAL_ERROR "La capa se quedo sin atributos tras indexarla:\n${_out}")
+    endif()
+    message(STATUS "minigis --index-shp OK")
+  endif()
+
+elseif(MODE STREQUAL "check-refresh")
+  # El mapa debe redibujarse al cambiar la simbologia o la visibilidad. El lienzo
+  # cachea el ultimo cuadro para reutilizarlo al desplazar, y una cache mal
+  # invalidada hacia que esos cambios no se vieran hasta mover la vista.
+  execute_process(
+    COMMAND "${MINIGIS_EXE}" --check-refresh -l "${SAMPLE}" --size 600x400
+    RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+  if(NOT _rc EQUAL EXPECT_EXIT)
+    message(FATAL_ERROR "minigis --check-refresh fallo (codigo ${_rc}, esperado ${EXPECT_EXIT})\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")
+  endif()
+
+  if(EXPECT_EXIT EQUAL 0)
+    if(_out MATCHES "FALLO")
+      message(FATAL_ERROR "El mapa no se redibuja al cambiar simbologia o visibilidad:\n${_out}")
+    endif()
+    if(NOT _out MATCHES "la capa oculta desaparece del mapa")
+      message(FATAL_ERROR "La comprobacion de visibilidad no se ejecuto:\n${_out}")
+    endif()
+    message(STATUS "minigis --check-refresh OK")
+  endif()
+
 else()
   message(FATAL_ERROR "MODE no soportado: ${MODE}")
 endif()

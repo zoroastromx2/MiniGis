@@ -71,4 +71,25 @@ if(MINIGIS_BENCH_DATASET)
   set_tests_properties(minigis.rendimiento PROPERTIES TIMEOUT 900 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endif()
 
+# Indice de envolventes: comprueba que las envolventes coinciden con GDAL y que
+# la capa conserva sus atributos despues de indexarla (regresion real: la tabla
+# de atributos mostraba "(nulo)" en todas las filas).
+add_test(NAME minigis.indice-envolventes
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DSAMPLE=${MINIGIS_SAMPLE_SHP}"
+          -DMODE=index-shp
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
+# Redibujado al cambiar simbologia o visibilidad: el lienzo cachea el ultimo
+# cuadro para el paneo, y esa cache no debe servir una imagen obsoleta.
+add_test(NAME minigis.redibujado
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DSAMPLE=${MINIGIS_SAMPLE_SHP}"
+          -DMODE=check-refresh
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
 set_tests_properties(minigis.bench PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+set_tests_properties(minigis.indice-envolventes PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+set_tests_properties(minigis.redibujado PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

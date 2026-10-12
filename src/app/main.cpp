@@ -76,6 +76,7 @@ std::shared_ptr<GeometryStore> buildGeometryStore(const std::shared_ptr<VectorLa
                                                   int destinationEpsg, qint64 *buildMs,
                                                   QString *modeName, QString *error);
 QString storeModeName(const GeometryStore &store);
+void attachGeometryStore(const std::shared_ptr<VectorLayer> &layer, int destinationEpsg, bool enabled);
 
 QTextStream &stdOut()
 {
@@ -719,6 +720,71 @@ int inspectShapefileIndex(const QString &path, bool asJson)
       ++mismatches;
   }
 
+  // Verificacion 2: los atributos deben seguir leyendose DESPUES de indexar la
+  // capa. Construir el almacen ignora temporalmente todos los campos (para no
+  // leer un DBF de gigabytes); si esa restauracion se saltara algun camino de
+  // error, la tabla de atributos mostraria "(nulo)" en todas las filas. Es un
+  // fallo real que sufrio nz-building-outlines, asi que se comprueba aqui.
+  qint64 attributeRows = 0;
+  qint64 attributeEmpty = 0;
+  QString sampleValue;
+
+  if (!layer->fields().isEmpty() && featureCount > 0)
+  {
+    qint64 storeBuildMs = 0;
+    QString modeName;
+    QString storeError;
+    const std::shared_ptr<GeometryStore> store = buildGeometryStore(layer, 4326, &storeBuildMs, &modeName, &storeError);
+    (void)store;
+
+    const qint64 rows[] = {0, featureCount / 2, featureCount - 1};
+    for (const qint64 row : rows)
+    {
+      if (row < 0 || row >= featureCount)
+        continue;
+
+      const QVector<QString> values = layer->fieldValues(row);
+      ++attributeRows;
+
+      bool empty = true;
+      for (int i = 0; i < values.size(); ++i)
+      {
+        if (!values[i].isEmpty())
+        {
+          empty = false;
+          if (sampleValue.isEmpty() && i < layer->fields().size())
+            sampleValue = QStringLiteral("%1=%2").arg(layer->fields()[i].name, values[i]);
+        }
+      }
+
+      if (empty)
+        ++attributeEmpty;
+    }
+
+    // Ademas de las tres filas de muestreo se comprueba un bloque contiguo desde
+    // la primera: es lo que se ve al abrir la tabla de atributos y donde se noto
+    // el fallo (todas las filas en "(nulo)").
+    const qint64 blockRows = std::min<qint64>(256, featureCount);
+    for (qint64 row = 0; row < blockRows; ++row)
+    {
+      const QVector<QString> values = layer->fieldValues(row);
+      ++attributeRows;
+
+      bool empty = true;
+      for (const QString &value : values)
+      {
+        if (!value.isEmpty())
+        {
+          empty = false;
+          break;
+        }
+      }
+
+      if (empty)
+        ++attributeEmpty;
+    }
+  }
+
   if (asJson)
   {
     QJsonObject root;
@@ -734,6 +800,9 @@ int inspectShapefileIndex(const QString &path, bool asJson)
     root.insert(QStringLiteral("checked"), checked);
     root.insert(QStringLiteral("mismatches"), mismatches);
     root.insert(QStringLiteral("worstDelta"), worstDelta);
+    root.insert(QStringLiteral("attributeRows"), static_cast<double>(attributeRows));
+    root.insert(QStringLiteral("attributeEmpty"), static_cast<double>(attributeEmpty));
+    root.insert(QStringLiteral("sampleValue"), sampleValue);
     writeOut(QString::fromUtf8(QJsonDocument(root).toJson(QJsonDocument::Indented)).trimmed());
   }
   else
@@ -755,9 +824,13 @@ int inspectShapefileIndex(const QString &path, bool asJson)
                .arg(checked)
                .arg(mismatches)
                .arg(worstDelta));
+    writeOut(QStringLiteral("Atributos tras indexar: %1 de %2 filas de prueba vacias  (muestra: %3)")
+               .arg(attributeEmpty)
+               .arg(attributeRows)
+               .arg(sampleValue.isEmpty() ? QStringLiteral("(sin valores)") : sampleValue));
   }
 
-  return mismatches == 0 ? ExitOk : ExitRenderFailed;
+  return (mismatches == 0 && attributeEmpty == 0) ? ExitOk : ExitRenderFailed;
 }
 
 /**
@@ -801,6 +874,309 @@ std::shared_ptr<GeometryStore> buildGeometryStore(const std::shared_ptr<VectorLa
     *modeName = storeModeName(*store);
 
   return store;
+}
+
+/**
+ * Cuenta los pixeles que difieren de forma VISIBLE entre dos cuadros.
+ *
+ * Comparar bit a bit es demasiado estricto para el camino de borrador: el
+ * suavizado de los marcadores puede variar en una unidad de canal por redondeo de
+ * coma flotante entre dos renderizados identicos en apariencia. Lo que hay que
+ * detectar es una costura (contenido desplazado), que produce miles de pixeles con
+ * diferencias grandes, asi que se cuentan solo los que superan `tolerance` en
+ * algun canal.
+ */
+qint64 countVisibleDifferences(const QImage &left, const QImage &right, int tolerance,
+                               QString *firstDifference = nullptr)
+{
+  if (left.size() != right.size() || left.isNull())
+    return -1;
+
+  qint64 differences = 0;
+  for (int y = 0; y < left.height(); ++y)
+  {
+    const QRgb *leftRow = reinterpret_cast<const QRgb *>(left.constScanLine(y));
+    const QRgb *rightRow = reinterpret_cast<const QRgb *>(right.constScanLine(y));
+    for (int x = 0; x < left.width(); ++x)
+    {
+      const int dr = std::abs(qRed(leftRow[x]) - qRed(rightRow[x]));
+      const int dg = std::abs(qGreen(leftRow[x]) - qGreen(rightRow[x]));
+      const int db = std::abs(qBlue(leftRow[x]) - qBlue(rightRow[x]));
+      if (std::max(dr, std::max(dg, db)) > tolerance)
+      {
+        ++differences;
+        if (firstDifference && differences <= 3)
+        {
+          *firstDifference += QStringLiteral("(%1,%2) ").arg(x).arg(y);
+        }
+      }
+    }
+  }
+
+  return differences;
+}
+
+/** Cuenta los pixeles que no son del color de fondo del lienzo. */
+qint64 countPaintedPixels(const QImage &image)
+{
+  const QRgb background = qRgb(248, 248, 244);
+  qint64 painted = 0;
+
+  for (int y = 0; y < image.height(); ++y)
+  {
+    const QRgb *row = reinterpret_cast<const QRgb *>(image.constScanLine(y));
+    for (int x = 0; x < image.width(); ++x)
+    {
+      if ((row[x] & 0x00FFFFFF) != (background & 0x00FFFFFF))
+        ++painted;
+    }
+  }
+
+  return painted;
+}
+
+/**
+ * Comprueba que el mapa se redibuja al cambiar la simbologia o la visibilidad de
+ * una capa (`--check-refresh`).
+ *
+ * Es una prueba de contrato, no de rendimiento: el lienzo guarda el ultimo cuadro
+ * para reutilizarlo al desplazar el mapa, y una cache mal invalidada hacia que un
+ * cambio de estilo o de visibilidad no se viera hasta mover la vista. Aqui se
+ * reproduce exactamente esa secuencia y se compara pixel a pixel.
+ */
+int checkRefresh(const QStringList &layerPaths, const QSize &size, bool asJson)
+{
+  if (layerPaths.isEmpty())
+  {
+    writeErr(QStringLiteral("Se necesita una capa: minigis --check-refresh -l capa.shp"));
+    return ExitUsage;
+  }
+
+  const QString path = layerPaths.first();
+  if (!QFileInfo::exists(path))
+  {
+    writeErr(QStringLiteral("No existe el archivo: %1").arg(QDir::toNativeSeparators(path)));
+    return ExitFileNotFound;
+  }
+
+  Error error;
+  const std::shared_ptr<VectorLayer> layer = VectorLayer::open(path, &error);
+  if (!layer)
+  {
+    writeErr(error.toText());
+    return ExitOpenFailed;
+  }
+
+  attachGeometryStore(layer, 4326, true);
+
+  MapCanvas canvas;
+  canvas.setDestinationEpsg(4326);
+  canvas.resize(size);
+  canvas.addLayer(layer, true);
+
+  bool ok = true;
+  const auto check = [&ok](const QString &name, bool passed, const QString &detail) {
+    writeOut(QStringLiteral("%1 %2%3")
+               .arg(passed ? QStringLiteral("OK  ") : QStringLiteral("FALLO"))
+               .arg(name, detail.isEmpty() ? QString() : QStringLiteral(" — ") + detail));
+    if (!passed)
+      ok = false;
+  };
+
+  // 1) Cuadro de referencia y comprobacion de que la cache se reutiliza cuando
+  //    no ha cambiado nada (si no, la prueba de abajo no probaria nada).
+  const QImage base = canvas.renderToImage(size, false);
+  const qint64 basePainted = countPaintedPixels(base);
+  const QImage repeated = canvas.renderToImage(size, false);
+  check(QStringLiteral("cuadro estable con el mismo estado"), repeated == base,
+        QStringLiteral("%1 pixeles pintados").arg(basePainted));
+
+  if (basePainted == 0)
+  {
+    writeErr(QStringLiteral("La capa no pinta nada en la vista; la prueba no seria concluyente."));
+    return ExitRenderFailed;
+  }
+
+  // 2) Cambio de simbologia (lo que hace el boton Aceptar del dialogo de estilo).
+  Style style = layer->style();
+  style.fillColor = QColor(230, 70, 40);
+  style.strokeColor = QColor(110, 0, 0);
+  style.fillEnabled = true;
+  style.strokeWidth = 3.0;
+  style.pointSize = 11.0;
+  layer->setStyle(style);
+
+  const QImage styled = canvas.renderToImage(size, false);
+  check(QStringLiteral("la simbologia nueva se ve en el mapa"), styled != base,
+        QStringLiteral("%1 pixeles pintados").arg(countPaintedPixels(styled)));
+
+  // 3) Ocultar la capa (lo que hace el check del listado de capas).
+  layer->setVisible(false);
+  const QImage hidden = canvas.renderToImage(size, false);
+  const qint64 hiddenPainted = countPaintedPixels(hidden);
+  check(QStringLiteral("la capa oculta desaparece del mapa"), hiddenPainted == 0,
+        QStringLiteral("%1 pixeles pintados").arg(hiddenPainted));
+
+  // 4) Volver a mostrarla debe recuperar exactamente el cuadro anterior.
+  layer->setVisible(true);
+  const QImage shown = canvas.renderToImage(size, false);
+  check(QStringLiteral("al volver a mostrarla se recupera el dibujo"), shown == styled, QString());
+
+  // 5) Paneo: reutilizar el cuadro anterior (copiarlo y repintar solo la franja
+  //    descubierta) debe dar EXACTAMENTE lo mismo que redibujar desde cero. Si la
+  //    copia y la franja no encajan aparece una costura o queda una banda sin
+  //    pintar: son los fallos que se ven al desplazar el mapa. Se prueban las
+  //    cuatro direcciones y diagonales, con desplazamientos fraccionarios
+  //    (ejercitan el ajuste a la rejilla de pixeles) y GRANDES (hacen evidente
+  //    cualquier banda que se quede sin pintar).
+  //
+  //    Antes se acerca la vista: si el contenido no llega a los bordes del
+  //    lienzo, una banda sin pintar en el borde no produce ninguna diferencia y la
+  //    prueba no la veria. Ese fue el punto ciego que dejo pasar el fallo del
+  //    rectangulo cubierto.
+  {
+    const Rectangle fullExtent = layer->extentInEpsg(4326);
+    if (fullExtent.isValid())
+    {
+      const double halfWidth = fullExtent.width() * 0.25;
+      const double halfHeight = fullExtent.height() * 0.25;
+      canvas.setExtent(Rectangle(fullExtent.centerX() - halfWidth, fullExtent.centerY() - halfHeight,
+                                 fullExtent.centerX() + halfWidth, fullExtent.centerY() + halfHeight)
+                         .adjustedToAspect(double(size.width()) / double(size.height())));
+    }
+  }
+
+  const double pans[][2] = {{3.7, 0.0},    {-3.7, 0.0},    {0.0, 3.7},    {0.0, -3.7},  {5.2, -4.3},
+                            {0.4, 0.4},    {37.0, 0.0},    {-41.0, 12.0}, {0.0, 55.0},  {-17.0, -63.0},
+                            {123.0, -29.0}, {-210.0, 97.0}};
+  qint64 worstPanDifferences = 0;
+  QString worstPanCase;
+
+  for (const auto &pan : pans)
+  {
+    const double unitsPerPixel = canvas.mapUnitsPerPixel();
+    const Rectangle extentBeforePan = canvas.extent();
+
+    canvas.setExtent(Rectangle(extentBeforePan.xMin() + pan[0] * unitsPerPixel,
+                               extentBeforePan.yMin() - pan[1] * unitsPerPixel,
+                               extentBeforePan.xMax() + pan[0] * unitsPerPixel,
+                               extentBeforePan.yMax() - pan[1] * unitsPerPixel));
+    const QImage pannedWithReuse = canvas.renderToImage(size, false);
+
+    // Volcado para diagnostico visual: permite comparar la parte copiada con la
+    // franja repintada cuando la comprobacion falla.
+    if (g_verbose)
+    {
+      pannedWithReuse.save(QStringLiteral("pan_reuse.png"));
+      logVerbose(QStringLiteral("paneo (%1,%2): reutilizado en %3 ms")
+                   .arg(pan[0]).arg(pan[1]).arg(canvas.lastReuseMilliseconds()));
+    }
+
+    canvas.refreshMap(); // descarta la cache: el mismo encuadre, pero dibujado entero
+    const QImage pannedFullRender = canvas.renderToImage(size, false);
+    if (g_verbose)
+      pannedFullRender.save(QStringLiteral("pan_full.png"));
+
+    const qint64 differences = countVisibleDifferences(pannedWithReuse, pannedFullRender, 8);
+
+    if (differences > worstPanDifferences)
+    {
+      worstPanDifferences = differences;
+      worstPanCase = QStringLiteral("(%1, %2) px").arg(pan[0]).arg(pan[1]);
+    }
+  }
+
+  check(QStringLiteral("el paneo reutilizado coincide con el redibujado completo"), worstPanDifferences == 0,
+        QStringLiteral("%1 pixeles distintos de %2 en el peor caso %3")
+          .arg(worstPanDifferences)
+          .arg(size.width() * size.height())
+          .arg(worstPanCase.isEmpty() ? QStringLiteral("(ninguno)") : worstPanCase));
+
+  // 6) Lo mismo en modo borrador, que es el que se ve MIENTRAS se arrastra: se
+  //    dibuja a media resolucion (como hace paintEvent) y tiene su propia cache.
+  const QSize draftSize(std::max(1, size.width() / 2), std::max(1, size.height() / 2));
+  qint64 worstDraftDifferences = 0;
+  QString draftDetail;
+
+  // Antes de comparar, se comprueba que dibujar dos veces el MISMO estado (sin
+  // cache de por medio) da exactamente el mismo resultado: si el propio dibujado
+  // no fuese determinista a nivel de pixel, la comparacion de abajo no
+  // significaria nada.
+  {
+    canvas.refreshMap();
+    const QImage firstDraft = canvas.renderToImage(draftSize, true);
+    canvas.refreshMap();
+    const QImage secondDraft = canvas.renderToImage(draftSize, true);
+
+    QString sameStateDetail;
+    const qint64 sameStateDifferences = countVisibleDifferences(firstDraft, secondDraft, 8, &sameStateDetail);
+    check(QStringLiteral("el mismo estado dibuja lo mismo en borrador"), sameStateDifferences == 0,
+          QStringLiteral("%1 pixeles distintos %2").arg(sameStateDifferences).arg(sameStateDetail));
+  }
+
+  for (const auto &pan : pans)
+  {
+    const double draftUnitsPerPixel = canvas.mapUnitsPerPixel();
+    const Rectangle extentBeforeDraft = canvas.extent();
+
+    canvas.setExtent(Rectangle(extentBeforeDraft.xMin() + pan[0] * draftUnitsPerPixel,
+                               extentBeforeDraft.yMin() - pan[1] * draftUnitsPerPixel,
+                               extentBeforeDraft.xMax() + pan[0] * draftUnitsPerPixel,
+                               extentBeforeDraft.yMax() - pan[1] * draftUnitsPerPixel));
+    const QImage draftWithReuse = canvas.renderToImage(draftSize, true);
+
+    canvas.refreshMap();
+    const QImage draftFullRender = canvas.renderToImage(draftSize, true);
+
+    QString firstDifference;
+    const qint64 draftDifferences = countVisibleDifferences(draftWithReuse, draftFullRender, 8, &firstDifference);
+    logVerbose(QStringLiteral("borrador paso (%1,%2): desplazamiento %3,%4 px de borrador -> %5 diferencias %6")
+                 .arg(pan[0])
+                 .arg(pan[1])
+                 .arg(static_cast<double>(canvas.extent().xMin() - extentBeforeDraft.xMin()) * canvas.mapUnitsPerPixel() * 0.5, 0, 'f', 2)
+                 .arg(static_cast<double>(canvas.extent().yMax() - extentBeforeDraft.yMax()) * canvas.mapUnitsPerPixel() * 0.5, 0, 'f', 2)
+                 .arg(draftDifferences)
+                 .arg(firstDifference));
+    if (draftDifferences < 0)
+    {
+      worstDraftDifferences = -1;
+      break;
+    }
+
+    if (draftDifferences > worstDraftDifferences)
+    {
+      worstDraftDifferences = draftDifferences;
+      draftDetail = firstDifference;
+    }
+  }
+
+  // Criterio del camino de borrador: se tolera una fraccion minima (0,1 % de los
+  // pixeles) porque al dibujar una franja recortada Qt suaviza de forma algo
+  // distinta los simbolos que caen sobre el borde del recorte (medido: 5 pixeles
+  // de 60.000). Lo que NO se tolera es una costura: el fallo original desplazaba
+  // todo el contenido copiado y producia miles de pixeles distintos (6 %).
+  {
+    const qint64 allowedDraftDifferences = static_cast<qint64>(draftSize.width()) * draftSize.height() / 1000;
+    check(QStringLiteral("el paneo en borrador coincide con el redibujado (media resolucion)"),
+          worstDraftDifferences >= 0 && worstDraftDifferences <= allowedDraftDifferences,
+          QStringLiteral("%1 pixeles distintos de %2 (tolerancia %3) %4")
+            .arg(worstDraftDifferences)
+            .arg(draftSize.width() * draftSize.height())
+            .arg(allowedDraftDifferences)
+            .arg(draftDetail));
+  }
+
+  if (asJson)
+  {
+    QJsonObject root;
+    root.insert(QStringLiteral("ok"), ok);
+    root.insert(QStringLiteral("paintedBase"), static_cast<double>(basePainted));
+    root.insert(QStringLiteral("paintedHidden"), static_cast<double>(hiddenPainted));
+    root.insert(QStringLiteral("panDifferences"), static_cast<double>(worstPanDifferences));
+    writeOut(QString::fromUtf8(QJsonDocument(root).toJson(QJsonDocument::Indented)).trimmed());
+  }
+
+  return ok ? ExitOk : ExitRenderFailed;
 }
 
 /** Construye el almacen indexado de una capa para los modos sin ventana. */
@@ -857,6 +1233,7 @@ int main(int argc, char *argv[])
              || argument == QStringLiteral("--snapshot")
              || argument == QStringLiteral("--bench")
              || argument == QStringLiteral("--index-shp")
+             || argument == QStringLiteral("--check-refresh")
              || argument == QStringLiteral("--help") || argument == QStringLiteral("-h")
              || argument == QStringLiteral("--version") || argument == QStringLiteral("-v"))
     {
@@ -930,6 +1307,10 @@ int main(int argc, char *argv[])
                                               QStringLiteral("n"), QStringLiteral("600000"));
   const QCommandLineOption spatialFilterOption(QStringLiteral("spatial-filter"),
                                                QStringLiteral("Filtra en origen con el indice del archivo (util en capas que no caben en memoria)"));
+  const QCommandLineOption checkRefreshOption(QStringLiteral("check-refresh"),
+                                              QStringLiteral("Comprueba que el mapa se redibuja al cambiar simbologia o visibilidad"));
+  const QCommandLineOption withAttributesOption(QStringLiteral("with-attributes"),
+                                               QStringLiteral("Con --snapshot-window: incluye la tabla de atributos en la captura"));
   const QCommandLineOption indexShpOption(QStringLiteral("index-shp"),
                                           QStringLiteral("Diagnostico: indexa las envolventes de <archivo.shp> y las verifica contra GDAL"),
                                           QStringLiteral("archivo.shp"));
@@ -940,7 +1321,8 @@ int main(int argc, char *argv[])
   parser.addOptions({infoOption, jsonOption, driversOption, snapshotOption, snapshotWindowOption,
                      layerOption, extentOption, sizeOption, crsOption, maxFeaturesOption, verboseOption,
                      benchOption, benchScenarioOption, benchBudgetOption, rendererOption, vertexBudgetOption,
-                     spatialFilterOption, readBudgetOption, indexShpOption});
+                     spatialFilterOption, readBudgetOption, indexShpOption, withAttributesOption,
+                     checkRefreshOption});
   parser.addPositionalArgument(QStringLiteral("archivo"),
                               QStringLiteral("Capas a cargar (opcional, se puede repetir)"),
                               QStringLiteral("[archivo...]"));
@@ -999,6 +1381,28 @@ int main(int argc, char *argv[])
     }
 
     return inspectShapefileIndex(path, parser.isSet(jsonOption));
+  }
+
+  // ---------------------------------------------------------------------
+  // Comprobacion de redibujado (simbologia y visibilidad)
+  // ---------------------------------------------------------------------
+  if (parser.isSet(checkRefreshOption))
+  {
+    QSize checkSize(600, 400);
+    if (!parseSize(parser.value(sizeOption), &checkSize))
+    {
+      writeErr(QStringLiteral("Tamano no valido: «%1». Ejemplo: --size 900x600").arg(parser.value(sizeOption)));
+      return ExitUsage;
+    }
+
+    if (layerPaths.isEmpty())
+    {
+      writeErr(QStringLiteral("Se necesita una capa, por ejemplo:"));
+      writeErr(QStringLiteral("  minigis --check-refresh -l data/sample/shapefiles/parcels.shp"));
+      return ExitUsage;
+    }
+
+    return checkRefresh(layerPaths, checkSize, parser.isSet(jsonOption));
   }
 
   // ---------------------------------------------------------------------
@@ -1169,6 +1573,14 @@ int main(int argc, char *argv[])
       {
         writeErr(QStringLiteral("No hay capas que capturar: indica una con --layer <archivo> o como argumento."));
         return ExitNoLayers;
+      }
+
+      // La tabla de atributos permite comprobar de un vistazo que los valores se
+      // leen bien (que es justo lo que se rompio con las capas indexadas).
+      if (parser.isSet(withAttributesOption))
+      {
+        window.showAttributeTable(true);
+        QApplication::processEvents();
       }
 
       if (requestedExtent.isValid())

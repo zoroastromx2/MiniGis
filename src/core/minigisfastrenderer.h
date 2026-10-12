@@ -106,6 +106,15 @@ public:
     /** Elementos dibujados como punto (envolvente) por ser sub-pixel. */
     qint64 dotFeatures = 0;
     bool envelopeMode = false;
+    /**
+     * True si el cuadro se ha dibujado con alguna decision que depende del
+     * ENCUADRE exacto (muestreo de puntos o de envolventes, o subida de nivel por
+     * presupuesto de vertices). Importa para el lienzo: reutilizar el cuadro
+     * anterior solo es valido si el dibujado nuevo es una traslacion pura del
+     * anterior, y con muestreo dependiente de la vista no lo es (la parte copiada
+     * tendria elementos que el dibujado nuevo no incluye, y al reves).
+     */
+    bool viewDependent = false;
   };
 
   struct Layer

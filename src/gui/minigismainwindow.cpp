@@ -529,7 +529,12 @@ void MainWindow::editCurrentLayerStyle()
   if (dialog.exec() == QDialog::Accepted)
   {
     layer->setStyle(dialog.style());
-    mCanvas->update();
+
+    // Redibujado inmediato: descarta el cuadro cacheado y repinta. El lienzo
+    // tambien detecta el cambio por la revision de la capa, pero invalidar aqui
+    // evita depender de ello.
+    mCanvas->refreshMap();
+
     statusBar()->showMessage(QStringLiteral("Simbologia actualizada en «%1».").arg(layer->name()), kStatusTimeoutMs);
   }
 }
@@ -578,7 +583,10 @@ void MainWindow::onLayerVisibilityChanged(const std::shared_ptr<VectorLayer> &la
     return;
 
   layer->setVisible(visible);
-  mCanvas->update();
+
+  // El mapa se actualiza en el acto: descarta el cuadro cacheado y repinta.
+  mCanvas->refreshMap();
+
   statusBar()->showMessage(QStringLiteral("Capa «%1» %2.")
                              .arg(layer->name(), visible ? QStringLiteral("visible") : QStringLiteral("oculta")),
                            kStatusTimeoutMs);

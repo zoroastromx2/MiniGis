@@ -509,6 +509,46 @@ uint8_t kindForOgrType(OGRwkbGeometryType type)
   }
 }
 
+/**
+ * Ignora temporalmente todos los campos de una capa y los restaura al salir.
+ *
+ * Por que hace falta un guardian: en cuanto se ignoran los campos, toda lectura
+ * de atributos devuelve nulos. Si la construccion del almacen sale por un camino
+ * de error (presupuesto de vertices superado, cancelacion, fallo de GDAL) sin
+ * restaurarlos, la capa se queda con los atributos vacios y la tabla de atributos
+ * muestra "(nulo)" en todas las filas. Es exactamente el fallo que sufrio
+ * nz-building-outlines: el intento en memoria se aborta a proposito en la
+ * comprobacion temprana, y aquel `return` se saltaba la restauracion.
+ *
+ * El destructor se ejecuta en TODAS las salidas.
+ */
+class IgnoredFieldsGuard
+{
+public:
+  IgnoredFieldsGuard(OGRLayer *layer, char **fields)
+    : mLayer(layer)
+    , mFields(fields)
+  {
+  }
+
+  ~IgnoredFieldsGuard()
+  {
+    if (!mFields)
+      return;
+
+    // NULL = volver a tener en cuenta todos los campos (documentado en OGR).
+    OGR_L_SetIgnoredFields(mLayer, nullptr);
+    CSLDestroy(mFields);
+  }
+
+  IgnoredFieldsGuard(const IgnoredFieldsGuard &) = delete;
+  IgnoredFieldsGuard &operator=(const IgnoredFieldsGuard &) = delete;
+
+private:
+  OGRLayer *mLayer = nullptr;
+  char **mFields = nullptr;
+};
+
 } // namespace
 
 std::shared_ptr<GeometryStore> GeometryStore::build(
@@ -565,7 +605,8 @@ std::shared_ptr<GeometryStore> GeometryStore::build(
   // caro cuando el DBF es enorme: en nz-addresses (2,43 M de elementos, DBF de
   // 1,47 GB) suponia 51 de los 52 s de la construccion. OGR permite ignorar
   // todos los campos y el driver del shapefile evita entonces leer el registro
-  // del DBF. Se restaura al terminar, para que la tabla de atributos funcione.
+  // del DBF. El guardian los restaura en cualquier salida, tambien en los
+  // abortos por presupuesto.
   char **ignoredFields = nullptr;
   if (OGRFeatureDefnH definition = OGR_L_GetLayerDefn(layer))
   {
@@ -583,6 +624,8 @@ std::shared_ptr<GeometryStore> GeometryStore::build(
     if (ignoredFields)
       OGR_L_SetIgnoredFields(layer, const_cast<const char **>(ignoredFields));
   }
+
+  IgnoredFieldsGuard ignoredFieldsGuard(layer, ignoredFields);
 
   const GIntBig declaredCount = layer->GetFeatureCount(1);
   const qint64 total = declaredCount > 0 ? static_cast<qint64>(declaredCount) : 0;
@@ -659,14 +702,6 @@ std::shared_ptr<GeometryStore> GeometryStore::build(
   }
 
   layer->ResetReading();
-
-  // Se vuelven a tener en cuenta todos los campos: la tabla de atributos y el
-  // resto de la aplicacion los necesitan.
-  if (ignoredFields)
-  {
-    OGR_L_SetIgnoredFields(layer, nullptr);
-    CSLDestroy(ignoredFields);
-  }
 
   if (builder.features.empty())
     return fail(QStringLiteral("La capa no contiene geometrias que se puedan indexar."));

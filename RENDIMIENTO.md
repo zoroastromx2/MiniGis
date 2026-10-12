@@ -362,6 +362,114 @@ además, volver atrás (arrastrar y deshacer) es instantáneo.
 - **No** se redibuja en cada evento de ratón: `update()` de Qt ya agrupa los eventos
   de pintado y el temporizador de calidad evita encadenar cuadros completos.
 
+### 5.5 Contrato de la caché de cuadro (y un fallo que costó caro)
+
+Reutilizar el cuadro anterior tiene una trampa: si el estado de las capas cambia
+(simbología nueva, capa oculta), el cuadro guardado deja de representar lo que hay que
+ver. Con la comprobación inicial —mismo tamaño, mismo SRC, mismo encuadre— el lienzo
+devolvía la imagen anterior **sin repintar**, así que cambiar el estilo de una capa o
+desmarcar su visibilidad no se reflejaba en el mapa hasta mover o redimensionar la
+vista.
+
+La corrección no depende de que cada sitio que cambia la apariencia se acuerde de
+invalidar la caché (ese fue justo el fallo): `VectorLayer` lleva un contador de
+**revisión** que sube al cambiar la simbología, la visibilidad o el almacén, y la caché
+guarda la revisión con la que se dibujó. Si no coincide, se redibuja entero. Además,
+`MapCanvas::refreshMap()` invalida y repinta de forma explícita, que es lo que llaman la
+ventana al aceptar el diálogo de estilo y al cambiar el check de visibilidad del
+listado de capas.
+
+Se añadió la prueba `--check-refresh` (y su equivalente en CTest, `minigis.redibujado`)
+porque este fallo es invisible para cualquier prueba de rendimiento:
+
+```bat
+minigis --check-refresh -l data/sample/shapefiles/parcels.shp
+  OK   cuadro estable con el mismo estado — 99229 pixeles pintados
+  OK   la simbologia nueva se ve en el mapa — 101143 pixeles pintados
+  OK   la capa oculta desaparece del mapa — 0 pixeles pintados
+  OK   al volver a mostrarla se recupera el dibujo
+```
+
+Compara los cuadros píxel a píxel: primero comprueba que con el mismo estado la caché
+sí se reutiliza (si no, la prueba no probaría nada), después cambia la simbología y
+exige que el cuadro cambie, luego oculta la capa y exige que no quede ni un píxel
+pintado, y por último la vuelve a mostrar y exige recuperar el cuadro anterior.
+Comprobado que **detecta el fallo**: quitando la revisión de la clave de caché, falla
+con `FALLO la simbologia nueva se ve en el mapa` y `FALLO la capa oculta desaparece del
+mapa` (mismo número de píxeles que el cuadro de referencia: la imagen vieja).
+
+Efecto secundario de revisar esto: `setDraftMode()` invalidaba las dos cachés al entrar
+y salir del modo borrador, lo que tiraba justo la reutilización que se busca. Ahora cada
+nivel de calidad conserva la suya, de modo que un arrastre encadena cuadros de borrador
+reutilizados.
+
+**Y dos fallos más graves, que aparecieron en uso real.** Los dos eran de la
+reutilización del cuadro, y los dos se escaparon por la misma razón: **se medían
+milisegundos, no píxeles**. Los bancos de prueba decían que el paneo iba más rápido
+—y era verdad—, pero nadie comprobaba que la imagen fuera correcta.
+
+**Fallo 1: la copia iba hacia el lado contrario.** Al desplazar el mapa aparecía una
+costura vertical, con la parte copiada y la franja repintada mostrando zonas distintas.
+Para un punto fijo del mapa,
+
+```
+pixel_cacheado = pixel_nuevo + (nuevo.xMin - cache.xMin) * escala
+```
+
+es decir, si `xMin` crece (la vista se mueve hacia el este) el contenido aparece **más a
+la izquierda** en el cuadro nuevo; el código copiaba hacia la derecha, de modo que todo
+el contenido copiado quedaba desplazado el doble de lo debido.
+
+**Fallo 2: la franja a repintar quedaba del lado contrario.** Al corregir el signo, el
+rectángulo "cubierto" seguía calculándose por separado (como el rectángulo desplazado)
+en lugar de a partir de la zona realmente copiada. Los dos rectángulos dejaron de
+coincidir: se copiaba una parte y se repintaba otra, y **quedaba sin pintar una banda
+del ancho del desplazamiento** (el mapa se veía incompleto al arrastrar, con una banda
+vacía a la derecha y abajo).
+
+**Fallo 3, estructural: el muestreo dependía del encuadre.** En el modo envolventes la
+nube de puntos se muestrea con un paso calculado a partir del número de elementos
+visibles, que cambia al desplazar. El cuadro copiado y la franja nueva contenían puntos
+distintos, así que la densidad no cuadraba (medido: 10.147 píxeles distintos de
+400.000). La reutilización solo es válida si el dibujado nuevo es una **traslación
+pura** del anterior, así que ahora el renderizador marca los cuadros que usan
+decisiones dependientes del encuadre (muestreo de puntos, muestreo de envolventes o
+subida de nivel por presupuesto de vértices) y el lienzo no los reutiliza. Además, el
+escalón de calidad del trazo se cuantiza (escalones de 1024 elementos) para que no
+oscile entre cuadros por unos pocos elementos de diferencia.
+
+**El invariante que faltaba.** La prueba de redibujado comprueba ahora que
+**reutilizar el cuadro anterior da exactamente lo mismo que redibujar desde cero**, en
+las cuatro direcciones y diagonales, con desplazamientos fraccionarios (ejercitan el
+ajuste a la rejilla de píxeles) y **grandes, de hasta 210 px** (hacen evidente cualquier
+banda sin pintar), en calidad y en borrador. Antes comprueba que el propio dibujado es
+determinista (dos dibujados del mismo estado dan lo mismo; si no, la comparación no
+significaría nada) y **acerca la vista**, porque si el contenido no llega a los bordes
+del lienzo una banda sin pintar en el borde no produce ninguna diferencia: ese fue
+exactamente el punto ciego que dejó pasar el fallo 2.
+
+```
+OK   el paneo reutilizado coincide con el redibujado completo — 0 pixeles distintos de 400000
+OK   el mismo estado dibuja lo mismo en borrador — 0 pixeles distintos
+OK   el paneo en borrador coincide con el redibujado (media resolucion) — 0 pixeles distintos de 100000
+```
+
+Medido con los fallos reintroducidos a propósito, para comprobar que la prueba los
+detecta: **15.240 píxeles distintos** con el signo invertido, **53.499** con el
+rectángulo cubierto mal calculado (22 % del lienzo: la banda vacía) y **10.147** con el
+muestreo dependiente del encuadre. En el camino de calidad la exigencia es exacta (0
+píxeles); en el de borrador se tolera un 0,1 % porque al dibujar una franja recortada Qt
+suaviza de forma ligeramente distinta los símbolos que caen justo sobre el borde del
+recorte (medido: 5 píxeles de 60.000 en una capa de puntos, imperceptibles y solo en el
+cuadro intermedio del arrastre). Una costura o una banda sin pintar producen miles de
+píxeles, así que ese margen no debilita la prueba.
+
+**Coste en rendimiento de las correcciones: ninguno apreciable.** La reutilización sigue
+activa donde es válida (escala de ciudad en la capa de edificios: 12 ms por cuadro, 83
+fps; capa sintética de 12.000 polígonos: 45 ms de calidad y 18 ms de borrador) y se
+desactiva solo en las vistas muestreadas, donde el coste dominante es la consulta al
+índice de todos modos (país completo: 69 ms, de los cuales 53 ms son la consulta).
+
 ---
 
 ## 6. Carga asíncrona y retroalimentación en la interfaz
@@ -741,6 +849,10 @@ JSON (`--json | jq .quality.median_ms`), que es mucho más estable que el p90.
 | `--renderer auto\|legacy\|fast` | elegir o comparar motores (en la app, `auto`) |
 | `--vertex-budget <n>` | presupuesto de vértices por cuadro (0 = sin límite) |
 | `--spatial-filter` | filtrar en origen con el índice del archivo (capas enormes) |
+| `--read-budget <n>` | geometrías leídas del archivo por cuadro en el modo envolventes |
+| `--index-shp <archivo.shp>` | diagnostica el índice de envolventes y verifica atributos y envolventes contra GDAL |
+| `--with-attributes` | incluye la tabla de atributos en la captura de `--snapshot-window` |
+| `--check-refresh` | comprueba que el mapa se redibuja al cambiar simbología o visibilidad, y que el paneo reutilizado no deja costuras ni bandas sin pintar |
 | `-V` | por cuadro: consulta, trazados, pintado, candidatos, vértices y nivel |
 | `QT_LOGGING_RULES="minigis.loading=true"` | traza de la carga en segundo plano |
 
@@ -827,7 +939,7 @@ minigis --index-shp "E:\datos\nz-building-outlines.shp"
   Verificacion       : 8 elementos comparados con GDAL, 0 discrepancias, diferencia maxima 0
 ```
 
-### 9.5 Dos fallos propios detectados en esta prueba
+### 9.5 Tres fallos propios detectados en esta prueba
 
 - El bucle de dibujado esperaba en `entryFirstRing` el indice del primer **anillo** y
   `acquireSubset` guardaba el del primer **vertice**: lectura fuera de los arrays
@@ -836,6 +948,20 @@ minigis --index-shp "E:\datos\nz-building-outlines.shp"
   Ahora se estima el total con los primeros 512 elementos y se aborta en
   milisegundos: la construccion del indice de la capa de edificios paso de **8,7 s a
   1,1 s**.
+- **La tabla de atributos mostraba "(nulo)" en todas las filas.** Para no leer un DBF
+  de 1,1 GB, la construccion del almacen ignora temporalmente todos los campos
+  (`OGR_L_SetIgnoredFields`) y los restaura al terminar; pero la comprobacion temprana
+  del punto anterior sale de la funcion con un `return` anticipado, y ese camino **no
+  restauraba nada**: la capa quedaba con todos los campos ignorados durante el resto
+  de la sesion. La restauracion se hizo con un guardian RAII (`IgnoredFieldsGuard`),
+  que se ejecuta en todas las salidas, y `--index-shp` comprueba ahora el contrato
+  leyendo 259 filas (tres de muestreo mas un bloque contiguo de 256, que es lo que se
+  ve al abrir la tabla).
+
+  Es un fallo que no aparece en ninguna prueba de rendimiento y si en el uso real, asi
+  que se anadio la prueba de CTest `minigis.indice-envolventes`, que falla si la capa
+  se queda sin atributos. Comprobado que **detecta el fallo**: reintroduciendolo a
+  proposito, la prueba informa de `Atributos tras indexar: 15 de 15 filas vacias`.
 
 ### 9.6 Limites de este modo
 

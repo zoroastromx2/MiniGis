@@ -234,6 +234,9 @@ void FastMapRenderer::paint(QPainter &painter, const std::vector<Layer> &layers,
         ? (static_cast<qint64>(mCandidates.size()) + options.pointBudget - 1) / options.pointBudget
         : 1;
 
+    if (pointStride > 1)
+      mStats.viewDependent = true;
+
     int level = store.levelForTolerance(wantedTolerance);
     mStats.level = level;
     mStats.tolerance = wantedTolerance;
@@ -272,6 +275,12 @@ void FastMapRenderer::paint(QPainter &painter, const std::vector<Layer> &layers,
                    subset->entryRingCount, mPositions, transform, 1);
         mStats.pathMs += timer.elapsed();
       }
+
+      // La nube de puntos se muestrea segun el numero de elementos de la vista, de
+      // modo que el cuadro no es una traslacion pura del anterior.
+      if (subset && subset->missingFeatures > 0
+          && static_cast<qint64>(subset->dotEntries.size()) < subset->missingFeatures)
+        mStats.viewDependent = true;
 
       if (subset && !subset->dotEntries.empty())
       {
@@ -331,6 +340,9 @@ void FastMapRenderer::paint(QPainter &painter, const std::vector<Layer> &layers,
         if (fits || level >= maximumLevel)
           break;
 
+        // La subida de nivel depende del numero de vertices de la vista, no solo de
+        // la escala: el cuadro deja de ser una traslacion pura del anterior.
+        mStats.viewDependent = true;
         ++level;
       }
     }
@@ -343,9 +355,14 @@ void FastMapRenderer::paint(QPainter &painter, const std::vector<Layer> &layers,
 
     // Escalon de calidad del contorno: hairline cuando hay muchos elementos o
     // cuando se esta interactuando (ver Options::hairlineFeatureThreshold).
+    // La decision se cuantiza (escalones de 1024 elementos) para que no dependa del
+    // encuadre exacto: al desplazar el mapa el numero de elementos visibles cambia
+    // un poco y, si la decision oscilara entre cuadros, la parte copiada del cuadro
+    // anterior y la franja nueva se dibujarian con estilos distintos.
+    const qint64 quantizedFeatures = (batch.features / 1024) * 1024;
     const bool hairlineStroke =
       options.draft || (options.hairlineFeatureThreshold > 0
-                        && batch.features >= options.hairlineFeatureThreshold);
+                        && quantizedFeatures >= options.hairlineFeatureThreshold);
 
     if (!batch.polygonChunks.empty())
     {
