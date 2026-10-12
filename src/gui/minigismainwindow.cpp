@@ -7,6 +7,7 @@
 #include "minigismapcanvas.h"
 #include "minigisstyledialog.h"
 #include "minigisvectorlayer.h"
+#include "minigisvectorloader.h"
 
 #include <QAction>
 #include <QApplication>
@@ -14,16 +15,20 @@
 #include <QDir>
 #include <QDockWidget>
 #include <QFileDialog>
+#include <QEventLoop>
 #include <QFileInfo>
 #include <QHeaderView>
 #include <QLabel>
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QProgressBar>
 #include <QSettings>
 #include <QStatusBar>
 #include <QTableView>
+#include <QTimer>
 #include <QToolBar>
+#include <QToolButton>
 
 #include <algorithm>
 
@@ -69,6 +74,14 @@ MainWindow::MainWindow(QWidget *parent, bool restoreSettings)
   connect(mCanvas, &MapCanvas::scaleChanged, this, &MainWindow::onScaleChanged);
   connect(mCanvas, &MapCanvas::filesDropped, this, [this](const QStringList &paths) { loadPaths(paths); });
   connect(mCanvas, &MapCanvas::statusMessage, this, &MainWindow::onStatusMessage);
+
+  // Carga en segundo plano: abrir y leer una capa pesada ya no bloquea la
+  // ventana, y el progreso se puede mostrar mientras tanto.
+  mLoader = new VectorLayerLoader(this);
+  connect(mLoader, &VectorLayerLoader::progressChanged, this, &MainWindow::onLoadProgress);
+  connect(mLoader, &VectorLayerLoader::layerReady, this, &MainWindow::onLayerLoaded);
+  connect(mLoader, &VectorLayerLoader::layerFailed, this, &MainWindow::onLayerLoadFailed);
+  connect(mLoader, &VectorLayerLoader::finished, this, &MainWindow::onLoadFinished);
 
   readSettings();
   updateRecentFilesMenu();
@@ -245,10 +258,119 @@ void MainWindow::createStatusBar()
   mRenderLabel->setMinimumWidth(110);
   mRenderLabel->setToolTip(QStringLiteral("Tiempo del ultimo renderizado completo"));
 
+  // Indicador de carga: barra de progreso porcentual y boton para abortar. Ambos
+  // viven en la barra de estado y solo aparecen mientras hay una carga en curso.
+  mLoadLabel = new QLabel(this);
+  mLoadLabel->setMinimumWidth(260);
+
+  mLoadProgress = new QProgressBar(this);
+  mLoadProgress->setRange(0, 100);
+  mLoadProgress->setValue(0);
+  mLoadProgress->setFixedWidth(160);
+  mLoadProgress->setTextVisible(true);
+  mLoadProgress->setToolTip(QStringLiteral("Progreso de la lectura y del indice de dibujo"));
+
+  mCancelLoadButton = new QToolButton(this);
+  mCancelLoadButton->setText(QStringLiteral("Cancelar"));
+  mCancelLoadButton->setToolTip(QStringLiteral("Interrumpe la carga en curso"));
+  connect(mCancelLoadButton, &QToolButton::clicked, this, [this]() {
+    if (mLoader)
+      mLoader->cancel();
+  });
+
+  statusBar()->addWidget(mLoadLabel);
+  statusBar()->addWidget(mLoadProgress);
+  statusBar()->addWidget(mCancelLoadButton);
   statusBar()->addPermanentWidget(mRenderLabel);
   statusBar()->addPermanentWidget(mCrsLabel);
   statusBar()->addPermanentWidget(mScaleLabel);
   statusBar()->addPermanentWidget(mCoordinateLabel);
+
+  setLoadIndicatorVisible(false);
+}
+
+void MainWindow::setLoadIndicatorVisible(bool visible)
+{
+  mLoadLabel->setVisible(visible);
+  mLoadProgress->setVisible(visible);
+  mCancelLoadButton->setVisible(visible);
+}
+
+bool MainWindow::isLoading() const
+{
+  return mLoader && mLoader->isRunning();
+}
+
+bool MainWindow::waitForLoading(int timeoutMs)
+{
+  if (!isLoading())
+    return true;
+
+  // Bucle de eventos anidado: la carga sigue en su hilo y sus senales se
+  // entregan aqui, de modo que la incorporacion de capas al lienzo se hace
+  // igual que en la aplicacion interactiva.
+  QEventLoop loop;
+  QTimer timeout;
+  timeout.setSingleShot(true);
+
+  const QMetaObject::Connection finishedConnection =
+    connect(mLoader, &VectorLayerLoader::finished, &loop, &QEventLoop::quit);
+  connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+  timeout.start(timeoutMs);
+  loop.exec();
+  disconnect(finishedConnection);
+
+  return !isLoading();
+}
+
+void MainWindow::onLoadProgress(int percent, const QString &message)
+{
+  setLoadIndicatorVisible(true);
+  mLoadProgress->setValue(std::clamp(percent, 0, 100));
+  mLoadLabel->setText(message);
+  mLoadLabel->setToolTip(message);
+  updateWindowTitle();
+}
+
+void MainWindow::onLayerLoaded(const std::shared_ptr<VectorLayer> &layer, bool first)
+{
+  if (!layer)
+    return;
+
+  // El lienzo encuadra la primera capa de la tanda (o la primera de todas).
+  const bool zoomToExtent = first || mCanvas->layers().empty();
+  mCanvas->addLayer(layer, zoomToExtent);
+  mLastDirectory = QFileInfo(layer->sourcePath()).absolutePath();
+  addRecentFile(layer->sourcePath());
+  updateCrsLabel();
+
+  statusBar()->showMessage(QStringLiteral("Capa «%1» cargada: %2 elementos (%3)")
+                             .arg(layer->name())
+                             .arg(layer->featureCount())
+                             .arg(layer->crsDescription()),
+                           kStatusTimeoutMs);
+}
+
+void MainWindow::onLayerLoadFailed(const QString &path, const QString &message, const QString &hint)
+{
+  Error error {message, hint};
+  showError(QStringLiteral("No se pudo abrir «%1»").arg(QFileInfo(path).fileName()), error);
+}
+
+void MainWindow::onLoadFinished(int loaded, int failed, bool cancelled)
+{
+  setLoadIndicatorVisible(false);
+  updateWindowTitle();
+
+  QString summary;
+  if (cancelled)
+    summary = QStringLiteral("Carga cancelada. Se han cargado %1 capa(s).").arg(loaded);
+  else if (failed > 0)
+    summary = QStringLiteral("Carga terminada: %1 capa(s) cargada(s), %2 con error.").arg(loaded).arg(failed);
+  else
+    summary = QStringLiteral("Carga terminada: %1 capa(s).").arg(loaded);
+
+  statusBar()->showMessage(summary, kStatusTimeoutMs);
 }
 
 std::shared_ptr<VectorLayer> MainWindow::currentLayer() const
@@ -283,14 +405,25 @@ bool MainWindow::openLayer(const QString &path, bool zoomToExtent)
 
 int MainWindow::loadPaths(const QStringList &paths)
 {
-  int opened = 0;
-  for (const QString &path : paths)
+  if (paths.isEmpty())
+    return 0;
+
+  // A partir de aqui la carga es asincrona: se devuelve cuantas se han encolado
+  // y la interfaz se actualiza desde las senales del cargador (barra de progreso
+  // y, por cada capa lista, su incorporacion al lienzo).
+  if (mLoader->isRunning())
   {
-    // La primera capa encuadra su extension; el resto se superpone.
-    if (openLayer(path, opened == 0))
-      ++opened;
+    statusBar()->showMessage(QStringLiteral("Ya hay una carga en curso; espera o pulsa Cancelar."),
+                             kStatusTimeoutMs);
+    return 0;
   }
-  return opened;
+
+  mLoader->setDestinationEpsg(mCanvas->destinationEpsg());
+  setLoadIndicatorVisible(true);
+  mLoadProgress->setValue(0);
+  mLoadLabel->setText(QStringLiteral("Preparando la carga de %1 archivo(s)...").arg(paths.size()));
+  mLoader->start(paths);
+  return paths.size();
 }
 
 void MainWindow::openLayerDialog()
@@ -320,7 +453,9 @@ void MainWindow::openRecentLayer()
     return;
   }
 
-  openLayer(path, true);
+  // Se carga en segundo plano, igual que el resto de aperturas, para que una
+  // capa pesada no bloquee la ventana al abrirla desde «Recientes».
+  loadPaths(QStringList {path});
 }
 
 void MainWindow::loadSampleData()

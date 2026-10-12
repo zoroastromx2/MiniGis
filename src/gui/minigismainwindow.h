@@ -9,7 +9,9 @@ class QAction;
 class QDockWidget;
 class QLabel;
 class QMenu;
+class QProgressBar;
 class QTableView;
+class QToolButton;
 
 namespace minigis
 {
@@ -20,6 +22,7 @@ class LayerPanel;
 class MapCanvas;
 class Rectangle;
 class VectorLayer;
+class VectorLayerLoader;
 
 /**
  * Ventana principal (equivalente simplificado a QgisApp).
@@ -48,6 +51,16 @@ public:
   /** Abre varias capas (linea de comandos o arrastrar y soltar). Devuelve cuantas se abrieron. */
   int loadPaths(const QStringList &paths);
 
+  /** True mientras haya una carga en segundo plano en curso. */
+  bool isLoading() const;
+
+  /**
+   * Espera a que termine la carga en curso procesando eventos (bucle de eventos
+   * anidado, no una espera bloqueante): los modos de captura lo usan para
+   * trabajar con el mismo camino asincrono que la aplicacion real.
+   */
+  bool waitForLoading(int timeoutMs = 120000);
+
   void showAttributeTable(bool visible);
 
 protected:
@@ -73,6 +86,12 @@ private slots:
   void onScaleChanged(double mapUnitsPerPixel);
   void onStatusMessage(const QString &message, int timeoutMs);
 
+  // Carga en segundo plano.
+  void onLoadProgress(int percent, const QString &message);
+  void onLayerLoaded(const std::shared_ptr<VectorLayer> &layer, bool first);
+  void onLayerLoadFailed(const QString &path, const QString &message, const QString &hint);
+  void onLoadFinished(int loaded, int failed, bool cancelled);
+
 private:
   void createActions();
   void createMenusAndToolBar();
@@ -92,17 +111,24 @@ private:
   std::shared_ptr<VectorLayer> currentLayer() const;
   void showError(const QString &title, const Error &error);
 
+  /** Muestra u oculta el indicador de carga de la barra de estado. */
+  void setLoadIndicatorVisible(bool visible);
+
   MapCanvas *mCanvas = nullptr;
   LayerPanel *mLayerPanel = nullptr;
   AttributeTableModel *mAttributeModel = nullptr;
   QTableView *mAttributeView = nullptr;
   QDockWidget *mLayerDock = nullptr;
   QDockWidget *mAttributeDock = nullptr;
+  VectorLayerLoader *mLoader = nullptr;
 
   QLabel *mCoordinateLabel = nullptr;
   QLabel *mScaleLabel = nullptr;
   QLabel *mCrsLabel = nullptr;
   QLabel *mRenderLabel = nullptr;
+  QLabel *mLoadLabel = nullptr;
+  QProgressBar *mLoadProgress = nullptr;
+  QToolButton *mCancelLoadButton = nullptr;
 
   QMenu *mRecentMenu = nullptr;
   QAction *mOpenAction = nullptr;

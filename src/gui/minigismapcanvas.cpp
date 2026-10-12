@@ -1,17 +1,21 @@
 #include "minigismapcanvas.h"
 
+#include "minigisgeometrystore.h"
 #include "minigisvectorlayer.h"
 
 #include <QDragEnterEvent>
 #include <QDropEvent>
+#include <QRegion>
 #include <QElapsedTimer>
 #include <QKeyEvent>
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QTimer>
 #include <QWheelEvent>
 
 #include <algorithm>
+#include <cstring>
 #include <cmath>
 
 namespace minigis
@@ -21,6 +25,13 @@ namespace
 
 constexpr double kZoomStep = 1.25;
 constexpr int kStatusTimeoutMs = 4000;
+
+/**
+ * Tiempo de calma antes de volver a la calidad completa. Mientras el usuario
+ * arrastra o gira la rueda se dibuja en modo borrador; al parar, este tiempo
+ * despues, se pide un cuadro definitivo.
+ */
+constexpr int kQualityDelayMs = 140;
 
 } // namespace
 
@@ -35,6 +46,146 @@ MapCanvas::MapCanvas(QWidget *parent)
   setCursor(Qt::CrossCursor);
   setAutoFillBackground(false);
   mRenderer.setDestinationEpsg(mDestinationEpsg);
+
+  // Un solo disparo: cada gesto reinicia la cuenta, de modo que solo se
+  // renderiza en calidad cuando el usuario ha dejado de interactuar.
+  mQualityTimer = new QTimer(this);
+  mQualityTimer->setSingleShot(true);
+  mQualityTimer->setInterval(kQualityDelayMs);
+  connect(mQualityTimer, &QTimer::timeout, this, [this]() {
+    if (!mDraftMode)
+      return;
+    setDraftMode(false);
+  });
+}
+
+MapCanvas::~MapCanvas() = default;
+
+void MapCanvas::setRendererBackend(RendererBackend backend)
+{
+  if (mBackend == backend)
+    return;
+
+  mBackend = backend;
+  invalidateFrameCache();
+  update();
+}
+
+void MapCanvas::setDraftMode(bool draft)
+{
+  if (mDraftMode == draft)
+    return;
+
+  mDraftMode = draft;
+  invalidateFrameCache();
+  mFastOptions.draft = draft;
+  update();
+}
+
+void MapCanvas::beginInteraction()
+{
+  if (!mDraftMode)
+    setDraftMode(true);
+
+  if (mQualityTimer)
+    mQualityTimer->start();
+}
+
+Rectangle MapCanvas::snappedExtent(const Rectangle &extent) const
+{
+  if (!extent.isValid() || size().isEmpty())
+    return extent;
+
+  const MapToPixel transform(extent, size());
+  const double scale = transform.pixelsPerMapUnit();
+  if (!transform.isValid() || scale <= 0.0)
+    return extent;
+
+  // Se alinea xMin/yMin a la rejilla de pixeles: asi el desplazamiento entre dos
+  // cuadros es un numero entero de pixeles y la copia del cuadro anterior encaja
+  // sin costuras (ademas evita que los simbolos "vibren" al arrastrar).
+  const double xMin = std::round(extent.xMin() * scale) / scale;
+  const double yMin = std::round(extent.yMin() * scale) / scale;
+  return Rectangle(xMin, yMin, xMin + extent.width(), yMin + extent.height());
+}
+
+void MapCanvas::invalidateFrameCache()
+{
+  mFrameCaches[0].valid = false;
+  mFrameCaches[0].image = QImage();
+  mFrameCaches[1].valid = false;
+  mFrameCaches[1].image = QImage();
+}
+
+bool MapCanvas::reusePreviousFrame(QImage &image, const QSize &size, bool draft, QRegion &exposed)
+{
+  exposed = QRegion(QRect(QPoint(0, 0), size));
+
+  FrameCache &cache = mFrameCaches[draft ? 1 : 0];
+
+  if (!cache.valid || cache.image.isNull())
+    return false;
+
+  if (cache.size != size || cache.epsg != mDestinationEpsg)
+    return false;
+
+  if (!cache.extent.isValid() || !mExtent.isValid())
+    return false;
+
+  // Solo vale para desplazamientos puros: misma escala (mismo ancho y alto).
+  const double widthRatio = mExtent.width() / cache.extent.width();
+  const double heightRatio = mExtent.height() / cache.extent.height();
+  if (std::abs(widthRatio - 1.0) > 1e-9 || std::abs(heightRatio - 1.0) > 1e-9)
+    return false;
+
+  const MapToPixel transform(mExtent, size);
+  if (!transform.isValid())
+    return false;
+
+  const double scale = transform.pixelsPerMapUnit();
+  const double rawShiftX = (mExtent.xMin() - cache.extent.xMin()) * scale;
+  const double rawShiftY = (cache.extent.yMax() - mExtent.yMax()) * scale;
+
+  const double shiftX = std::round(rawShiftX);
+  const double shiftY = std::round(rawShiftY);
+
+  // Si el desplazamiento no cae en pixeles enteros, reutilizar dejaria costuras.
+  if (std::abs(rawShiftX - shiftX) > 0.25 || std::abs(rawShiftY - shiftY) > 0.25)
+    return false;
+
+  const int dx = static_cast<int>(shiftX);
+  const int dy = static_cast<int>(shiftY);
+
+  if (dx == 0 && dy == 0)
+  {
+    // Mismo encuadre: el cuadro anterior sigue siendo valido tal cual.
+    image = cache.image;
+    exposed = QRegion();
+    return true;
+  }
+
+  if (std::abs(dx) >= size.width() || std::abs(dy) >= size.height())
+    return false;
+
+  // Copia por filas (mismo formato y tamano: es un memcpy por linea).
+  const int destinationX = std::max(0, dx);
+  const int destinationY = std::max(0, dy);
+  const int sourceX = std::max(0, -dx);
+  const int sourceY = std::max(0, -dy);
+  const int copyWidth = size.width() - std::abs(dx);
+
+  for (int row = 0; row < size.height() - std::abs(dy); ++row)
+  {
+    std::memcpy(image.scanLine(destinationY + row) + destinationX * 4,
+                cache.image.constScanLine(sourceY + row) + sourceX * 4,
+                static_cast<size_t>(copyWidth) * 4);
+  }
+
+  // Zona que no cubre la copia: es lo unico que hay que volver a dibujar. Son
+  // dos franjas en forma de L, no su rectangulo envolvente.
+  const QRect covered = QRect(QPoint(dx, dy), size).intersected(QRect(QPoint(0, 0), size));
+  exposed = QRegion(QRect(QPoint(0, 0), size)).subtracted(QRegion(covered));
+  return true;
 }
 
 std::shared_ptr<VectorLayer> MapCanvas::addLayer(const std::shared_ptr<VectorLayer> &layer, bool zoomToExtent)
@@ -53,6 +204,7 @@ std::shared_ptr<VectorLayer> MapCanvas::addLayer(const std::shared_ptr<VectorLay
     }
   }
 
+  invalidateFrameCache();
   mLayers.push_back(layer);
   mCurrentLayer = layer;
 
@@ -74,6 +226,7 @@ bool MapCanvas::removeLayer(const std::shared_ptr<VectorLayer> &layer)
   if (it == mLayers.end())
     return false;
 
+  invalidateFrameCache();
   mLayers.erase(it);
   if (mCurrentLayer == layer)
     mCurrentLayer = mLayers.empty() ? nullptr : mLayers.back();
@@ -89,6 +242,7 @@ void MapCanvas::clearLayers()
   if (mLayers.empty())
     return;
 
+  invalidateFrameCache();
   mLayers.clear();
   mCurrentLayer.reset();
   mExtent.setNull();
@@ -115,6 +269,7 @@ void MapCanvas::setCurrentLayer(const std::shared_ptr<VectorLayer> &layer)
 void MapCanvas::setDestinationEpsg(int epsg)
 {
   mDestinationEpsg = epsg;
+  invalidateFrameCache();
   mRenderer.setDestinationEpsg(epsg);
   update();
 }
@@ -234,20 +389,113 @@ double MapCanvas::mapUnitsPerPixel() const
   const MapToPixel transform(mExtent, size());
   return transform.isValid() ? transform.mapUnitsPerPixel() : 1.0;
 }
-QImage MapCanvas::renderToImage(const QSize &size)
+QImage MapCanvas::renderToImage(const QSize &size, bool draft)
 {
   QElapsedTimer timer;
   timer.start();
-
-  mRenderer.setLayers(mLayers);
-  mRenderer.setDestinationEpsg(mDestinationEpsg);
-  mRenderer.setMaximumFeaturesPerLayer(mMaximumFeatures);
+  mLastReuseMs = 0;
 
   Rectangle extent = mExtent;
   if (!extent.isValid())
     extent = adjustedExtent(layersExtent());
 
-  const QImage image = mRenderer.render(extent, size, QColor(248, 248, 244));
+  QImage image(size, QImage::Format_ARGB32_Premultiplied);
+  image.fill(QColor(248, 248, 244));
+
+  if (size.isEmpty() || !extent.isValid())
+  {
+    mLastRenderMs = timer.elapsed();
+    return image;
+  }
+
+  // La extension se ajusta a la rejilla de pixeles: asi el desplazamiento entre
+  // cuadros es entero y el cuadro anterior se puede copiar tal cual. El ajuste
+  // es de menos de un pixel (invisible) y ademas evita que los simbolos
+  // "vibren" al arrastrar.
+  if (extent == mExtent)
+  {
+    const Rectangle snapped = snappedExtent(extent);
+    if (snapped.isValid() && snapped != extent)
+    {
+      extent = snapped;
+      mExtent = snapped;
+    }
+  }
+
+  const MapToPixel transform(extent, size);
+  if (!transform.isValid())
+  {
+    mLastRenderMs = timer.elapsed();
+    return image;
+  }
+
+  // Reutilizacion del cuadro anterior: si solo se ha desplazado el mapa a la
+  // misma escala, se copia y solo se vuelve a dibujar la franja descubierta.
+  QRegion exposedRegion(QRect(QPoint(0, 0), size));
+  const bool reused = reusePreviousFrame(image, size, draft, exposedRegion);
+  if (reused && exposedRegion.isEmpty())
+  {
+    mLastReuseMs = timer.elapsed();
+    mLastRenderMs = mLastReuseMs;
+    return image;
+  }
+
+  mRenderer.setLayers(mLayers);
+  mRenderer.setDestinationEpsg(mDestinationEpsg);
+  mRenderer.setMaximumFeaturesPerLayer(mMaximumFeatures);
+
+  FastMapRenderer::Options options = mFastOptions;
+  options.draft = draft;
+
+  QPainter painter(&image);
+  if (reused)
+    painter.setClipRegion(exposedRegion);
+
+  // Las capas se recorren en orden de apilado. Las que tienen almacen se agrupan
+  // para dibujarlas de una vez; cuando aparece una capa sin almacen (todavia
+  // cargando) se vuelca el grupo y se dibuja esa capa con el camino clasico.
+  std::vector<FastMapRenderer::Layer> fastGroup;
+  const auto flushFastGroup = [&]() {
+    if (fastGroup.empty())
+      return;
+    mFastRenderer.paint(painter, fastGroup, extent, size, options);
+    fastGroup.clear();
+  };
+
+  for (const std::shared_ptr<VectorLayer> &layer : mLayers)
+  {
+    if (!layer || !layer->isVisible())
+      continue;
+
+    const std::shared_ptr<GeometryStore> store = layer->geometryStore();
+    const bool storeUsable = (mBackend != RendererBackend::Legacy) && store
+                             && (store->destinationEpsg() == mDestinationEpsg);
+
+    if (storeUsable)
+    {
+      fastGroup.push_back(FastMapRenderer::Layer {store.get(), &layer->style(), true});
+      continue;
+    }
+
+    flushFastGroup();
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    mRenderer.paintLayerInto(painter, transform, *layer);
+  }
+
+  flushFastGroup();
+  painter.end();
+
+  if (reused)
+    mLastReuseMs = timer.elapsed();
+
+  // El cuadro pasa a ser la referencia para el siguiente desplazamiento.
+  FrameCache &cache = mFrameCaches[draft ? 1 : 0];
+  cache.image = image;
+  cache.extent = extent;
+  cache.size = size;
+  cache.epsg = mDestinationEpsg;
+  cache.valid = true;
+
   mLastRenderMs = timer.elapsed();
   return image;
 }
@@ -257,7 +505,21 @@ void MapCanvas::paintEvent(QPaintEvent *event)
   Q_UNUSED(event)
 
   QPainter painter(this);
-  painter.drawImage(0, 0, renderToImage(size()));
+
+  if (mDraftMode && width() > 16 && height() > 16)
+  {
+    // Cuadro de borrador: se renderiza a media resolucion y se estira a la
+    // ventana. Son cuatro veces menos pixeles que rellenar, y el ojo apenas lo
+    // nota mientras el mapa se mueve.
+    const QSize half(std::max(1, width() / 2), std::max(1, height() / 2));
+    const QImage frame = renderToImage(half, true);
+    painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
+    painter.drawImage(rect(), frame);
+  }
+  else
+  {
+    painter.drawImage(0, 0, renderToImage(size(), false));
+  }
 
   if (mLayers.empty())
     paintEmptyState(painter);
@@ -300,6 +562,7 @@ void MapCanvas::resizeEvent(QResizeEvent *event)
   }
 
   mLastSize = size();
+  invalidateFrameCache();
   QWidget::resizeEvent(event);
 }
 
@@ -313,6 +576,7 @@ void MapCanvas::wheelEvent(QWheelEvent *event)
   }
 
   const double steps = double(delta) / 120.0;
+  beginInteraction();
   zoomBy(std::pow(kZoomStep, -steps), event->position());
   event->accept();
 }
@@ -340,6 +604,10 @@ void MapCanvas::mouseMoveEvent(QMouseEvent *event)
   {
     const double unitsPerPixel = mapUnitsPerPixel();
     const QPointF delta = position - mDragOrigin;
+
+    // Se dibuja en modo borrador mientras dura el arrastre; al soltar, el
+    // temporizador de calidad pide el cuadro definitivo.
+    beginInteraction();
 
     // Al arrastrar hacia la derecha el mapa se mueve con el raton.
     setExtent(Rectangle(mDragStartExtent.xMin() - delta.x() * unitsPerPixel,

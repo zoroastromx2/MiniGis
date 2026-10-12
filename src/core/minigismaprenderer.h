@@ -32,6 +32,17 @@ public:
   QPointF transform(const QPointF &mapPoint) const { return transform(mapPoint.x(), mapPoint.y()); }
   QPointF toMap(const QPointF &pixel) const;
 
+  /**
+   * Variante en linea que evita construir un QPointF por vertice. Se usa en los
+   * bucles que proyectan millones de vertices por cuadro (el compilador puede
+   * convertir el resto en una simple multiplicacion y suma).
+   */
+  void projectInline(double x, double y, double &pixelX, double &pixelY) const
+  {
+    pixelX = mTopLeft.x() + (x - mExtent.xMin()) * mScale;
+    pixelY = mTopLeft.y() + (mExtent.yMax() - y) * mScale;
+  }
+
   /** Pixeles por unidad de mapa (escala de dibujo: a mayor valor, mas cerca). */
   double pixelsPerMapUnit() const { return mScale; }
 
@@ -63,10 +74,37 @@ public:
   void setDestinationEpsg(int epsg) { mDestinationEpsg = epsg; }
   int destinationEpsg() const { return mDestinationEpsg; }
 
-  /** Limite de elementos por capa; 0 = sin limite. */
+  /**
+   * Limite de elementos por capa; 0 = sin limite.
+   *
+   * Nota: con la lectura directa el limite se aplica DESPUES de descartar por
+   * filtro espacial, de modo que cuenta elementos dibujables, no leidos.
+   */
   void setMaximumFeaturesPerLayer(qint64 maximum) { mMaximumFeatures = maximum; }
 
+  /**
+   * Filtra en origen con el indice espacial del archivo (OGR_L_SetSpatialFilterRect).
+   *
+   * Sirve para capas demasiado grandes para caber en memoria (donde no se puede
+   * construir el GeometryStore): el driver descarta los elementos que no cortan
+   * la vista antes de leerlos, apoyandose en el R-tree del GeoPackage o en el
+   * indice del shapefile. El coste es que el filtro limita el recorrido del
+   * cursor, asi que el limite de elementos y el orden de lectura cambian
+   * respecto al comportamiento historico; por eso es opcional y por defecto
+   * esta desactivado (el camino clasico sin filtro sigue siendo reproducible
+   * para comparar medidas).
+   */
+  void setUseSpatialFilter(bool enabled) { mUseSpatialFilter = enabled; }
+  bool useSpatialFilter() const { return mUseSpatialFilter; }
+
   QImage render(const Rectangle &extent, const QSize &size, const QColor &background) const;
+
+  /**
+   * Dibuja una sola capa sobre un QPainter ya existente. Lo usa el lienzo para
+   * intercalar, respetando el orden de apilado, capas con almacen indexado
+   * (camino acelerado) y capas que aun se estan preparando (este camino).
+   */
+  void paintLayerInto(QPainter &painter, const MapToPixel &transform, const VectorLayer &layer) const;
 
   /** Extension combinada de las capas visibles. */
   Rectangle fullExtent() const;
@@ -77,6 +115,7 @@ private:
   std::vector<std::shared_ptr<VectorLayer>> mLayers;
   int mDestinationEpsg = 4326;
   qint64 mMaximumFeatures = 0;
+  bool mUseSpatialFilter = false;
 };
 
 } // namespace minigis

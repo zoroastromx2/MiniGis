@@ -56,6 +56,29 @@ elseif(MODE STREQUAL "snapshot")
     message(STATUS "minigis --snapshot OK: ${OUT} (${_size} bytes)")
   endif()
 
+elseif(MODE STREQUAL "bench")
+  # Contrato del banco de pruebas: salida JSON estable y presupuesto respetado.
+  # Es la base de la puerta de regresion de rendimiento en CI.
+  execute_process(
+    COMMAND "${MINIGIS_EXE}" --bench "${FRAMES}" --bench-scenario "${SCENARIO}"
+            --json --bench-budget "${BUDGET}" --layer "${SAMPLE}" --size 900x600
+    RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+  if(NOT _rc EQUAL EXPECT_EXIT)
+    message(FATAL_ERROR "minigis --bench fallo (codigo ${_rc}, esperado ${EXPECT_EXIT})\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")
+  endif()
+
+  if(EXPECT_EXIT EQUAL 0)
+    foreach(_key IN ITEMS "\"quality\"" "\"draft\"" "\"median_ms\"" "\"p90_ms\"" "\"store\"" "\"budget_ok\"")
+      if(NOT _out MATCHES "${_key}")
+        message(FATAL_ERROR "La salida JSON de --bench no contiene ${_key}:\n${_out}")
+      endif()
+    endforeach()
+    if(NOT _out MATCHES "\"budget_ok\": true")
+      message(FATAL_ERROR "El presupuesto de --bench no se cumplio:\n${_out}")
+    endif()
+    message(STATUS "minigis --bench OK")
+  endif()
+
 else()
   message(FATAL_ERROR "MODE no soportado: ${MODE}")
 endif()

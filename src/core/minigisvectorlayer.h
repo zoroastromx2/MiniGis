@@ -17,6 +17,8 @@ class OGRSpatialReference;
 namespace minigis
 {
 
+class GeometryStore;
+
 /**
  * Capa vectorial abierta con GDAL/OGR (equivalente minimo a QgsVectorLayer).
  *
@@ -85,6 +87,14 @@ public:
   /** Handle de la capa OGR (prestado) para recorrer elementos al renderizar. */
   OGRLayerH ogrLayerHandle() const { return mLayerHandle; }
 
+  /**
+   * Almacen de geometrias indexado y simplificado. Lo construye el cargador (en
+   * segundo plano) al abrir la capa; mientras es nulo, el lienzo dibuja la capa
+   * con el camino clasico de lectura directa.
+   */
+  std::shared_ptr<GeometryStore> geometryStore() const { return mGeometryStore; }
+  void setGeometryStore(const std::shared_ptr<GeometryStore> &store) { mGeometryStore = store; }
+
   /** Texto corto para listados: "cities (12 elementos)". */
   QString displayName() const;
 
@@ -104,6 +114,7 @@ private:
   QVector<FieldInfo> mFields;
   Rectangle mExtent;
   Style mStyle;
+  std::shared_ptr<GeometryStore> mGeometryStore;
   bool mVisible = true;
   mutable qint64 mFeatureCount = -1; // -1 = pendiente de calcular
 };

@@ -12,8 +12,14 @@ set(MINIGIS_CORE_SRCS
   minigisstyle.cpp
   minigisvectorlayer.h
   minigisvectorlayer.cpp
+  minigisgeometrystore.h
+  minigisgeometrystore.cpp
+  minigisvectorloader.h
+  minigisvectorloader.cpp
   minigismaprenderer.h
   minigismaprenderer.cpp
+  minigisfastrenderer.h
+  minigisfastrenderer.cpp
 )
 
 add_library(minigis_core STATIC ${MINIGIS_CORE_SRCS})
@@ -21,10 +27,13 @@ add_library(MiniGIS::core ALIAS minigis_core)
 
 target_include_directories(minigis_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 
+target_link_libraries(minigis_core PRIVATE MiniGIS::optimizations)
+
 target_link_libraries(minigis_core
   PUBLIC
     Qt6::Core
     Qt6::Gui
+    Qt6::Concurrent
     ${MINIGIS_GDAL_TARGET}
 )
 

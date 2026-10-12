@@ -220,6 +220,11 @@ QImage MapRenderer::render(const Rectangle &extent, const QSize &size, const QCo
   return image;
 }
 
+void MapRenderer::paintLayerInto(QPainter &painter, const MapToPixel &transform, const VectorLayer &layer) const
+{
+  paintLayer(painter, transform, layer);
+}
+
 void MapRenderer::paintLayer(QPainter &painter, const MapToPixel &transform, const VectorLayer &layer) const
 {
   OGRLayerH layerHandle = layer.ogrLayerHandle();
@@ -247,6 +252,20 @@ void MapRenderer::paintLayer(QPainter &painter, const MapToPixel &transform, con
   std::unique_ptr<OGRCoordinateTransformation> transformation;
   if (hasDestination && sourceClone && !sourceClone->IsSame(&destination))
     transformation.reset(OGRCreateCoordinateTransformation(sourceClone.get(), &destination));
+
+  // Filtro en origen: el driver descarta los elementos que no cortan la vista
+  // antes de leerlos (R-tree del GeoPackage, indice del shapefile...). Solo se
+  // aplica cuando la capa y la vista comparten SRC: el filtro se expresa en las
+  // unidades de la capa y no se reproyecta aqui.
+  if (mUseSpatialFilter && !transformation)
+  {
+    OGR_L_SetSpatialFilterRect(layerHandle, transform.extent().xMin(), transform.extent().yMin(),
+                               transform.extent().xMax(), transform.extent().yMax());
+  }
+  else
+  {
+    OGR_L_SetSpatialFilter(layerHandle, nullptr);
+  }
 
   OGR_L_ResetReading(layerHandle);
 

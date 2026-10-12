@@ -132,7 +132,7 @@ list(REMOVE_ITEM CMAKE_FIND_ROOT_PATH
      "${_minigis_vcpkg_prefix}/debug")
 set(VCPKG_CMAKE_FIND_ROOT_PATH "")
 
-find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Widgets)
+find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Widgets Concurrent)
 qt_standard_project_setup(REQUIRES 6.5)
 
 set(CMAKE_PREFIX_PATH "${_minigis_prefix_path_backup}")
@@ -209,6 +209,77 @@ else()
   add_compile_options(-Wall -Wextra)
 endif()
 
+# --- Optimizacion de las rutas calientes (Windows / MSVC) -----------------
+# El renderizado vectorial pasa el tiempo en bucles cortos sobre buffers de
+# coordenadas (proyeccion de vertices y simplificacion), asi que estas banderas
+# afectan de lleno al rendimiento de dibujado. Se aplican como una interfaz que
+# enlazan los objetivos, y solo en configuraciones optimizadas.
+#
+#   /O2        ya lo activa CMAKE_BUILD_TYPE=Release (no se repite aqui)
+#   /GL /LTCG  optimizacion en tiempo de enlace: permite incorporar (inline) el
+#              codigo de minigis_core dentro del ejecutable y eliminar las
+#              llamadas que cruzan la unidad de compilacion, que es donde
+#              estaban parte de los bucles de proyeccion.
+#   /arch:AVX2 permite vectorizar los bucles de coordenadas. Solo si el parque
+#              de equipos lo soporta: AVX2 es de 2013 en adelante.
+#   /fp:fast   relaja el modelo de coma flotante (reordenacion, sin NaN/Inf
+#              estrictos). Aceptable para dibujar, no para calculo geodetico
+#              de precision: por eso es opcional.
+option(MINIGIS_LTO "Optimizacion en tiempo de enlace (/GL /LTCG) en Release" ON)
+option(MINIGIS_AVX2 "Vectorizacion con /arch:AVX2 (requiere CPU con AVX2)" OFF)
+option(MINIGIS_FAST_MATH "Relajar coma flotante con /fp:fast (menos estricto)" OFF)
+
+add_library(minigis_optimizations INTERFACE)
+add_library(MiniGIS::optimizations ALIAS minigis_optimizations)
+
+if(MSVC)
+  target_compile_options(minigis_optimizations INTERFACE
+    $<$<CONFIG:Release,RelWithDebInfo,MinSizeRel>:/Oi /Gy /Zc:inline>)
+
+  if(MINIGIS_LTO)
+    target_compile_options(minigis_optimizations INTERFACE
+      $<$<CONFIG:Release,RelWithDebInfo,MinSizeRel>:/GL>)
+    target_link_options(minigis_optimizations INTERFACE
+      $<$<CONFIG:Release,RelWithDebInfo,MinSizeRel>:/LTCG /OPT:REF /OPT:ICF>)
+  endif()
+
+  if(MINIGIS_AVX2)
+    target_compile_options(minigis_optimizations INTERFACE
+      $<$<CONFIG:Release,RelWithDebInfo,MinSizeRel>:/arch:AVX2>)
+  endif()
+
+  if(MINIGIS_FAST_MATH)
+    target_compile_options(minigis_optimizations INTERFACE
+      $<$<CONFIG:Release,RelWithDebInfo,MinSizeRel>:/fp:fast>)
+  endif()
+else()
+  include(CheckIPOSupported)
+  if(MINIGIS_LTO)
+    check_ipo_supported(RESULT _minigis_ipo_ok OUTPUT _minigis_ipo_error)
+    if(_minigis_ipo_ok)
+      set_property(TARGET minigis_optimizations PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    else()
+      message(STATUS "MiniGIS: LTO no disponible (${_minigis_ipo_error})")
+    endif()
+  endif()
+
+  if(MINIGIS_FAST_MATH)
+    target_compile_options(minigis_optimizations INTERFACE
+      $<$<CONFIG:Release,RelWithDebInfo,MinSizeRel>:-ffast-math>)
+  endif()
+endif()
+
+# PGO (optimizacion guiada por perfil): no se puede automatizar en una sola
+# configuracion, pero estas son las dos fases. La de instrumentacion compila y
+# ejecuta el banco de pruebas (--bench) para recoger un perfil real de dibujado:
+#
+#   cmake --preset windows-msvc-release -DCMAKE_CXX_FLAGS="/GENPROFILE" \
+#         -DCMAKE_EXE_LINKER_FLAGS="/LTCG:PGINSTRUMENT" -DMINIGIS_LTO=OFF
+#   ninja && minigis --bench 60 --bench-scenario mixed -l mapa.gpkg --size 1600x900
+#   cmake --preset windows-msvc-release -DCMAKE_CXX_FLAGS="/USEPROFILE" \
+#         -DCMAKE_EXE_LINKER_FLAGS="/LTCG:PGOptimize"
+#   ninja
+
 # --- MSVC localizado: prefijo de /showIncludes ----------------------------
 # Con Ninja, las dependencias de cabeceras se obtienen espiando la salida de
 # /showIncludes. Si el compilador esta en otro idioma (por ejemplo es-ES:
@@ -274,6 +345,7 @@ message(STATUS " GDAL       : ${_minigis_gdal_version}  -> ${MINIGIS_GDAL_TARGET
 message(STATUS " vcpkg      : ${VCPKG_INSTALLED_DIR}  triplet=${VCPKG_TARGET_TRIPLET}  manifest=${VCPKG_MANIFEST_MODE}")
 message(STATUS " DLLs vcpkg : ${MINIGIS_VCPKG_BIN_DIR}")
 message(STATUS " Ejecutable : ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
+message(STATUS " Optimizacion: LTO=${MINIGIS_LTO} AVX2=${MINIGIS_AVX2} fp:fast=${MINIGIS_FAST_MATH}")
 message(STATUS "==================================================================")
 message(STATUS "")
 

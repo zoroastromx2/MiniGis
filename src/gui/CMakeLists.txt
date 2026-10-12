@@ -26,6 +26,8 @@ target_link_libraries(minigis_gui
     Qt6::Core
     Qt6::Gui
     Qt6::Widgets
+  PRIVATE
+    MiniGIS::optimizations
 )
 
 set_target_properties(minigis_gui PROPERTIES AUTOMOC ON)

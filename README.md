@@ -248,6 +248,35 @@ ctest --preset windows-msvc-debug --output-on-failure
 * `minigis.snapshot` — renderiza el shapefile a PNG (plataforma `offscreen`) y verifica que la
   imagen no está vacía.
 * `minigis.salida-por-error-de-archivo` — un archivo inexistente debe devolver el código 2.
+* `minigis.bench` — contrato del banco de pruebas de rendimiento (`--bench --json`).
+
+### 8.1 Rendimiento
+
+El despliegue vectorial está optimizado y **medido**: índice espacial en memoria, simplificación
+por nivel de zoom, dibujado por lotes, modo borrador durante los gestos, reutilización del cuadro
+anterior y carga en segundo plano con barra de progreso. El análisis completo, las medidas y el
+trabajo pendiente están en **[RENDIMIENTO.md](RENDIMIENTO.md)**.
+
+```bat
+:: medir el paneo/zoom sin abrir ventana (40 cuadros, con desglose por fase)
+bin\minigis.exe --bench 40 --bench-scenario mixed -l capa.gpkg --size 1200x800 -V
+
+:: comparar con el motor clásico de lectura directa
+bin\minigis.exe --bench 40 --renderer legacy -l capa.gpkg --size 1200x800
+
+:: puerta de regresión: falla con código 6 si el p90 supera el presupuesto
+bin\minigis.exe --bench 24 --bench-budget 150 -l capa.gpkg --json
+```
+
+Con una capa pesada (12.000 polígonos, 2,2 M de vértices, 47,8 MB) el cuadro de paneo pasa de
+2.616 ms a 45 ms, y el cuadro de borrador que se ve al arrastrar, a 18 ms (56 fps). Activar la
+puerta de rendimiento en CTest:
+
+```bat
+cmake --preset windows-msvc-release -DMINIGIS_BENCH_DATASET=C:/datos/capa.gpkg ^
+      -DMINIGIS_BENCH_BUDGET_MS=150
+ctest --preset windows-msvc-release -R minigis.rendimiento
+```
 
 ---
 

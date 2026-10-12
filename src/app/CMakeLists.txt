@@ -19,6 +19,8 @@ target_link_libraries(minigis
     Qt6::Gui
     Qt6::Widgets
     ${MINIGIS_GDAL_TARGET}
+    # Banderas de optimizacion (LTO, AVX2, fp:fast) tambien en el enlazado final.
+    MiniGIS::optimizations
 )
 
 set_target_properties(minigis PROPERTIES
