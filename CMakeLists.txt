@@ -20,8 +20,8 @@ include(MiniGisRuntime)
 set(MINIGIS_COPY_DLLS_SCRIPT "${MINIGIS_CMAKE_DIR}/MiniGisCopyDlls.cmake")
 
 project(MiniGIS
-        VERSION 0.1.0
-        DESCRIPTION "Visor SIG minimo (Qt 6 + GDAL) para cargar shapefiles"
+        VERSION 0.2.0
+        DESCRIPTION "Visor SIG minimo (Qt 6 + GDAL) para capas vectoriales y raster"
         LANGUAGES CXX)
 
 # --- Opciones -------------------------------------------------------------
