@@ -9,24 +9,26 @@
     {
       "name": "windows-base",
       "hidden": true,
-      "description": "Base comun: Ninja + MSVC 2022 x64 + Qt 6.10.3 oficial + GDAL de vcpkg (arbol ya compilado)",
+      "description": "Base comun: Ninja + MSVC 2022 x64 + Qt 6.8.3 oficial + GDAL de vcpkg (arbol ya compilado)",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/${presetName}",
       "cacheVariables": {
-        "CMAKE_TOOLCHAIN_FILE": "E:/vcpkg/scripts/buildsystems/vcpkg.cmake",
-        "MINIGIS_VCPKG_ROOT": "E:/vcpkg",
+        "CMAKE_TOOLCHAIN_FILE": "D:/VCPKG/scripts/buildsystems/vcpkg.cmake",
+        "MINIGIS_VCPKG_ROOT": "D:/VCPKG",
         "VCPKG_TARGET_TRIPLET": "x64-windows",
-        "VCPKG_INSTALLED_DIR": "E:/vcpkg/installed",
+        "VCPKG_INSTALLED_DIR": "D:/VCPKG/installed",
         "MINIGIS_USE_VCPKG_MANIFEST": "OFF",
-        "Qt6_DIR": "D:/QtWin/6.10.3/msvc2022_64/lib/cmake/Qt6",
-        "CMAKE_PREFIX_PATH": "D:/QtWin/6.10.3/msvc2022_64",
+        "Qt6_DIR": "D:/Qt/6.8.3/msvc2022_64/lib/cmake/Qt6",
+        "CMAKE_PREFIX_PATH": "D:/Qt/6.8.3/msvc2022_64",
+        "CMAKE_RC_COMPILER": "D:/Windows Kits/10/bin/10.0.26100.0/x64/rc.exe",
+        "CMAKE_MT": "D:/Windows Kits/10/bin/10.0.26100.0/x64/mt.exe",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
         "MINIGIS_BUILD_TESTS": "ON",
         "MINIGIS_COPY_RUNTIME_DLLS": "ON",
         "MINIGIS_DEPLOY_QT_RUNTIME": "ON"
       },
       "environment": {
-        "VCPKG_ROOT": "E:/vcpkg",
+        "VCPKG_ROOT": "D:/VCPKG",
         "VSLANG": "1033"
       }
     },
@@ -52,7 +54,7 @@
       "name": "windows-msvc-release",
       "inherits": "windows-base",
       "displayName": "Windows MSVC 2022 x64 - Release",
-      "description": "Binario optimizado para repartir",
+      "description": "Binario optimizado para repartir y para medir rendimiento",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release"
       }
@@ -88,6 +90,14 @@
       "name": "windows-msvc-reldbg",
       "configurePreset": "windows-msvc-reldbg",
       "displayName": "Probar RelWithDebInfo",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "windows-msvc-release",
+      "configurePreset": "windows-msvc-release",
+      "displayName": "Probar Release",
       "output": {
         "outputOnFailure": true
       }

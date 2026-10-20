@@ -1,12 +1,11 @@
 #include "minigislayerpanel.h"
 
-#include "minigisstyle.h"
+#include "minigisrasterlayer.h"
 #include "minigisvectorlayer.h"
 
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QLabel>
-#include <QLocale>
 #include <QPushButton>
 #include <QStyle>
 #include <QTreeWidget>
@@ -20,9 +19,11 @@ namespace
 
 constexpr int kLayerIndexRole = Qt::UserRole + 1;
 
-QString formatFeatureCount(qint64 count)
+bool sameEntry(const LayerEntry &left, const LayerEntry &right)
 {
-  return QLocale().toString(count);
+  if (left.kind != right.kind)
+    return false;
+  return left.kind == LayerEntry::Kind::Vector ? left.vector == right.vector : left.raster == right.raster;
 }
 
 } // namespace
@@ -37,8 +38,8 @@ void LayerPanel::buildUi()
 {
   mTree = new QTreeWidget(this);
   mTree->setColumnCount(ColumnCount);
-  mTree->setHeaderLabels({QStringLiteral("Capa"), QStringLiteral("Geometria"),
-                          QStringLiteral("Elementos"), QStringLiteral("SRC")});
+  mTree->setHeaderLabels({QStringLiteral("Capa"), QStringLiteral("Tipo"),
+                          QStringLiteral("Tamano"), QStringLiteral("SRC")});
   mTree->setRootIsDecorated(false);
   mTree->setAlternatingRowColors(true);
   mTree->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -56,7 +57,7 @@ void LayerPanel::buildUi()
 
   auto *addButton = new QPushButton(widgetStyle->standardIcon(QStyle::SP_DialogOpenButton),
                                     QStringLiteral("Abrir"), this);
-  addButton->setToolTip(QStringLiteral("Abrir un archivo vectorial (Ctrl+O)"));
+  addButton->setToolTip(QStringLiteral("Abrir una capa vectorial o raster (Ctrl+O)"));
   mRemoveButton = new QPushButton(widgetStyle->standardIcon(QStyle::SP_TrashIcon),
                                   QStringLiteral("Quitar"), this);
   mRemoveButton->setToolTip(QStringLiteral("Quitar la capa seleccionada del mapa"));
@@ -64,11 +65,11 @@ void LayerPanel::buildUi()
                                 QStringLiteral("Zoom"), this);
   mZoomButton->setToolTip(QStringLiteral("Encuadrar la capa seleccionada"));
   mStyleButton = new QPushButton(QStringLiteral("Estilo"), this);
-  mStyleButton->setToolTip(QStringLiteral("Cambiar el color y el grosor de la capa seleccionada"));
+  mStyleButton->setToolTip(QStringLiteral("Cambiar la simbologia (o el contraste) de la capa seleccionada"));
   mLabelButton = new QPushButton(QStringLiteral("Etiquetas"), this);
-  mLabelButton->setToolTip(QStringLiteral("Configurar las etiquetas de la capa seleccionada (F7)"));
+  mLabelButton->setToolTip(QStringLiteral("Configurar las etiquetas de la capa vectorial (F7)"));
   mTableButton = new QPushButton(QStringLiteral("Tabla"), this);
-  mTableButton->setToolTip(QStringLiteral("Ver la tabla de atributos de la capa seleccionada (F6)"));
+  mTableButton->setToolTip(QStringLiteral("Ver la tabla de atributos de la capa vectorial (F6)"));
 
   auto *buttonsRow = new QHBoxLayout;
   buttonsRow->setContentsMargins(0, 0, 0, 0);
@@ -81,7 +82,9 @@ void LayerPanel::buildUi()
   buttonsRow->addStretch(1);
 
   auto *emptyHint = new QLabel(
-    QStringLiteral("Cada fila es una capa cargada. La casilla controla su visibilidad."), this);
+    QStringLiteral("Cada fila es una capa cargada. La casilla controla su visibilidad; "
+                   "el raster se dibuja debajo del vectorial."),
+    this);
   emptyHint->setWordWrap(true);
   emptyHint->setStyleSheet(QStringLiteral("color: palette(mid);"));
 
@@ -93,66 +96,74 @@ void LayerPanel::buildUi()
 
   connect(addButton, &QPushButton::clicked, this, &LayerPanel::addLayerRequested);
   connect(mRemoveButton, &QPushButton::clicked, this, [this] {
-    if (const std::shared_ptr<VectorLayer> layer = selectedLayer())
-      emit removeLayerRequested(layer);
+    const LayerEntry entry = entryForItem(mTree->currentItem());
+    if (entry.vector || entry.raster)
+      emit removeLayerRequested(entry);
   });
   connect(mZoomButton, &QPushButton::clicked, this, [this] {
-    if (const std::shared_ptr<VectorLayer> layer = selectedLayer())
-      emit zoomToLayerRequested(layer);
+    const LayerEntry entry = entryForItem(mTree->currentItem());
+    if (entry.vector || entry.raster)
+      emit zoomToLayerRequested(entry);
   });
   connect(mStyleButton, &QPushButton::clicked, this, [this] {
-    if (const std::shared_ptr<VectorLayer> layer = selectedLayer())
-      emit styleRequested(layer);
+    const LayerEntry entry = entryForItem(mTree->currentItem());
+    if (entry.vector || entry.raster)
+      emit styleRequested(entry);
   });
   connect(mLabelButton, &QPushButton::clicked, this, [this] {
-    if (const std::shared_ptr<VectorLayer> layer = selectedLayer())
-      emit labelRequested(layer);
+    const LayerEntry entry = entryForItem(mTree->currentItem());
+    if (entry.vector)
+      emit labelRequested(entry);
   });
   connect(mTableButton, &QPushButton::clicked, this, [this] {
-    if (const std::shared_ptr<VectorLayer> layer = selectedLayer())
-      emit attributeTableRequested(layer);
+    const LayerEntry entry = entryForItem(mTree->currentItem());
+    if (entry.vector)
+      emit attributeTableRequested(entry);
   });
 }
 
-void LayerPanel::setLayers(const std::vector<std::shared_ptr<VectorLayer>> &layers,
-                           const std::shared_ptr<VectorLayer> &current)
+void LayerPanel::setLayers(const std::vector<LayerEntry> &layers, const LayerEntry *current)
 {
   mLayers = layers;
-  mCurrent = current;
 
   mUpdating = true;
   mTree->clear();
 
-  for (size_t i = 0; i < mLayers.size(); ++i)
+  for (size_t index = 0; index < mLayers.size(); ++index)
   {
-    const std::shared_ptr<VectorLayer> &layer = mLayers[i];
-    if (!layer)
-      continue;
+    const LayerEntry &entry = mLayers[index];
 
     auto *item = new QTreeWidgetItem(mTree);
-    item->setText(ColumnName, layer->name());
-    item->setToolTip(ColumnName, layer->sourcePath());
-    item->setText(ColumnGeometry, Style::kindName(layer->geometryKind()));
-    item->setToolTip(ColumnGeometry, layer->geometryTypeName());
-    item->setText(ColumnFeatures, formatFeatureCount(layer->featureCount()));
-    item->setText(ColumnCrs, layer->crsDescription());
-    item->setCheckState(ColumnName, layer->isVisible() ? Qt::Checked : Qt::Unchecked);
-    item->setData(ColumnName, kLayerIndexRole, static_cast<int>(i));
+    item->setText(ColumnName, entry.name);
+    item->setToolTip(ColumnName, entry.sourcePath);
+    item->setText(ColumnGeometry, entry.kindText);
+    item->setText(ColumnFeatures, entry.countText);
+    item->setText(ColumnCrs, entry.crsText);
+    item->setCheckState(ColumnName, entry.visible ? Qt::Checked : Qt::Unchecked);
+    item->setData(ColumnName, kLayerIndexRole, static_cast<int>(index));
 
-    if (layer == mCurrent)
+    if (current && sameEntry(entry, *current))
       mTree->setCurrentItem(item);
   }
 
-  const bool hasSelection = mTree->currentItem() != nullptr;
+  mUpdating = false;
+  updateButtons();
+}
+
+void LayerPanel::updateButtons()
+{
+  const LayerEntry entry = entryForItem(mTree->currentItem());
+  const bool hasSelection = entry.vector != nullptr || entry.raster != nullptr;
+  const bool isVector = entry.kind == LayerEntry::Kind::Vector && entry.vector != nullptr;
+
   mRemoveButton->setEnabled(hasSelection);
   mZoomButton->setEnabled(hasSelection);
   mStyleButton->setEnabled(hasSelection);
-  mTableButton->setEnabled(hasSelection);
-
-  mUpdating = false;
+  mLabelButton->setEnabled(isVector);
+  mTableButton->setEnabled(isVector);
 }
 
-std::shared_ptr<VectorLayer> LayerPanel::layerForItem(QTreeWidgetItem *item) const
+LayerEntry LayerPanel::entryForItem(QTreeWidgetItem *item) const
 {
   if (!item)
     return {};
@@ -168,21 +179,14 @@ std::shared_ptr<VectorLayer> LayerPanel::layerForItem(QTreeWidgetItem *item) con
   return mLayers[static_cast<size_t>(index)];
 }
 
-std::shared_ptr<VectorLayer> LayerPanel::selectedLayer() const
-{
-  return layerForItem(mTree->currentItem());
-}
-
 void LayerPanel::onItemChanged(QTreeWidgetItem *item, int column)
 {
   if (mUpdating || column != ColumnName)
     return;
 
-  const std::shared_ptr<VectorLayer> layer = layerForItem(item);
-  if (!layer)
-    return;
-
-  emit visibilityChanged(layer, item->checkState(ColumnName) == Qt::Checked);
+  const LayerEntry entry = entryForItem(item);
+  if (entry.vector || entry.raster)
+    emit visibilityChanged(entry, item->checkState(ColumnName) == Qt::Checked);
 }
 
 void LayerPanel::onSelectionChanged()
@@ -190,20 +194,18 @@ void LayerPanel::onSelectionChanged()
   if (mUpdating)
     return;
 
-  const bool hasSelection = mTree->currentItem() != nullptr;
-  mRemoveButton->setEnabled(hasSelection);
-  mZoomButton->setEnabled(hasSelection);
-  mStyleButton->setEnabled(hasSelection);
-  mTableButton->setEnabled(hasSelection);
+  updateButtons();
 
-  if (const std::shared_ptr<VectorLayer> layer = selectedLayer())
-    emit currentLayerChanged(layer);
+  const LayerEntry entry = entryForItem(mTree->currentItem());
+  if (entry.vector || entry.raster)
+    emit currentLayerChanged(entry);
 }
 
 void LayerPanel::onItemDoubleClicked(QTreeWidgetItem *item, int /*column*/)
 {
-  if (const std::shared_ptr<VectorLayer> layer = layerForItem(item))
-    emit zoomToLayerRequested(layer);
+  const LayerEntry entry = entryForItem(item);
+  if (entry.vector || entry.raster)
+    emit zoomToLayerRequested(entry);
 }
 
 } // namespace minigis

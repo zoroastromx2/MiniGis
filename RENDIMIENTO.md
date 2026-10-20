@@ -37,6 +37,10 @@ capas reales de Nueva Zelanda (**3,24 M de edificios** y **2,43 M de direcciones
 que antes tardaban 70 segundos por cuadro (o quedaban directamente inutilizables) y
 ahora responden en 13 ms a escala de ciudad y 76 ms con el país entero en pantalla.
 
+La **sección 13** documenta la capa ráster añadida después (GeoTIFF y cualquier formato
+de GDAL): lectura por ventana, warp cacheado, contraste por LUT y las medidas que la
+acompañan. El análisis vectorial de las secciones 1–12 se conserva tal cual.
+
 ---
 
 ## 2. Diagnóstico medido
@@ -1193,3 +1197,95 @@ src/app/main.cpp                   --bench, --bench-scenario, --bench-budget, --
 tests/CMakeLists.txt               pruebas minigis.bench y minigis.rendimiento
 tests/run_cli_test.cmake           modo bench (contrato JSON + presupuesto)
 ```
+
+---
+
+## 13. Capa ráster (GeoTIFF y otros formatos de GDAL)
+
+Añadida después del trabajo vectorial, con su propia especificación
+(`SPEC-raster.md`) y su propio contrato de pruebas. El vectorial no cambió: el ráster
+se dibuja **debajo** de las capas vectoriales y su caché entra en la misma revisión de
+contenido que ya usaba el lienzo.
+
+### 13.1 Enfoque
+
+| Decisión | Por qué |
+|---|---|
+| Leer **solo la ventana visible**, al tamaño del lienzo | Un 4096x4096 Byte son 16 MB; copiarlo a memoria por cuadro no escala. Leer 1200x800 cuesta ~1 MB y usa los overviews de GDAL |
+| `GDALAutoCreateWarpedVRT` **cacheado por capa y SRC de destino** | Crear el warp por cuadro costaría más que dibujar; el SRC del lienzo cambia poco |
+| `INIT_DEST=NO_DATA` en el warp **solo si el origen declara NoData** | Las esquinas fuera de la huella proyectada deben salir transparentes, no negras (el DEM lo cumple; una ortofoto sin NoData no puede) |
+| LUT de 256 entradas por banda para Byte | El estiramiento se resuelve con una tabla, sin ramas por píxel |
+| Estadísticas de contraste de una **muestra decimada** (máx. 512x512, ventana central de 2048x2048) | Percentiles estables en milisegundos; nunca se recorre el ráster completo al abrirlo |
+| Modo borrador a media resolución | El gesto se mantiene fluido; el cuadro de calidad llega al parar (el mismo patrón del vectorial) |
+| El ráster participa en la reutilización de cuadro (es una traslación pura) | El paneo copia la imagen anterior y repinta la franja; la revisión de la capa invalida la caché al cambiar contraste, bandas u opacidad |
+
+El renderizador cuenta los **bytes leídos por cuadro**, y `--check-raster` comprueba que
+no se pasa del límite del lienzo (`ancho x alto x bandas x 4`).
+
+### 13.2 Medidas (Release, este equipo, 1200x800)
+
+GeoTIFF de **4096x4096** Byte con overviews 2–16, 24 cuadros de paneo/zoom mixto
+(`--bench 24 --bench-scenario mixed --json -l terrain_big.tif`), tres ejecuciones:
+
+| | Mediana | p90 | Máximo | Bytes/cuadro |
+|---|---|---|---|---|
+| Calidad | **4 ms** | **5 ms** | 7 ms | 731 KB |
+| Borrador (600x400) | **< 1 ms** | **< 1 ms** | 1 ms | — |
+
+El objetivo del spec era p90 ≤ 100 ms (calidad) y ≤ 45 ms (borrador): el margen es de
+más de un orden de magnitud porque el ráster solo se lee, no se rasteriza geometría.
+
+Contrato de `--check-raster` con los tres GeoTIFF de ejemplo (900x600):
+
+| Comprobación | Medida |
+|---|---|
+| Cuadrantes de la ortofoto en su sitio | 4/4 colores exactos |
+| Extensión del ráster | error máximo **1,0 px** |
+| Reproyección del DEM UTM→4326 | error **1,0 px** en la esquina |
+| NoData transparente | 25/25 píxeles de fondo |
+| Estiramiento por percentiles vs mín-máx | rango **201** frente a **2** (el píxel 1000 no aplana el relieve) |
+| Paleta | 3/3 clases exactas; 0 píxeles negros de NoData |
+| Cambio de estilo | 411 000 píxeles distintos, sin mover la vista |
+| Paneo reutilizado vs redibujado | **0 píxeles** distintos de 540 000 |
+| Lectura por cuadro | 1,2 MB (límite 6,2 MB) |
+
+El primer cuadro de una capa reproyectada incluye crear el warp (~30 ms una sola vez);
+los siguientes solo leen.
+
+### 13.3 Límites conocidos
+
+- **Sin NoData no hay transparencia en las esquinas**: al reproyectar una ortofoto sin
+  banda alfa, el área fuera de su huella sale negra (el warp no puede distinguirla del
+  negro real). Con NoData (el DEM) sale transparente.
+- **Sin overviews** el recorte a la resolución del lienzo sigue leyendo el ráster
+  completo: el objetivo de rendimiento se mide con overviews.
+- **Geotransformación con rotación**: el renderizador omite esos rásters (los datos de
+  trabajo son norte-arriba); no hay aviso en la interfaz todavía.
+- **Sin rampas de color ni hillshade**: un DEM se ve en grises con estiramiento; las
+  rampas multicolor y el sombreado quedan como trabajo futuro.
+- El SRC del lienzo sigue fijo en EPSG:4326 desde la interfaz (`--crs` existe en la CLI).
+
+### 13.4 Reproducir
+
+```bat
+:: generar los datos pequeños (versionados) y el grande de medidas (build\perf)
+"D:\OSGeo4w\apps\Python312\python.exe" scripts\make_sample_rasters.py
+"D:\OSGeo4w\apps\Python312\python.exe" scripts\make_sample_rasters.py --big build\perf
+
+:: contrato completo del dibujado raster
+bin\minigis.exe --check-raster -l data\sample\rasters\ortho_rgb.tif ^
+        -l data\sample\rasters\dem_utm30.tif -l data\sample\rasters\landcover.tif
+
+:: medida
+bin\minigis.exe --bench 24 --bench-scenario mixed --json ^
+        -l build\perf\terrain_big.tif --size 1200x800
+
+:: puerta de regresion en CTest
+cmake --preset windows-msvc-release ^
+      -DMINIGIS_RASTER_BENCH_DATASET=C:/datos/terrain.tif -DMINIGIS_BENCH_BUDGET_MS=100
+ctest --preset windows-msvc-release -R minigis.rendimiento-raster
+```
+
+Pruebas nuevas en CTest: `minigis.raster-info`, `minigis.raster-dibujo`,
+`minigis.raster-dialogo`, `minigis.raster-ventana` y la puerta opcional
+`minigis.rendimiento-raster`. Total: 13 pruebas (14 con la puerta activada).

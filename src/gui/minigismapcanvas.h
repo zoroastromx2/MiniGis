@@ -11,11 +11,13 @@
 #include "minigisfastrenderer.h"
 #include "minigislabelrenderer.h"
 #include "minigismaprenderer.h"
+#include "minigisrasterrenderer.h"
 #include "minigisrectangle.h"
 
 namespace minigis
 {
 
+class RasterLayer;
 class VectorLayer;
 
 /**
@@ -58,6 +60,21 @@ public:
   const std::vector<std::shared_ptr<VectorLayer>> &layers() const { return mLayers; }
   bool contains(const std::shared_ptr<VectorLayer> &layer) const;
 
+  /**
+   * Capas raster. Se dibujan siempre debajo de las vectoriales y en su propio
+   * orden de carga; el panel las presenta en esa misma semantica (primera fila,
+   * fondo del mapa).
+   */
+  std::shared_ptr<RasterLayer> addRasterLayer(const std::shared_ptr<RasterLayer> &layer,
+                                              bool zoomToExtent = false);
+  bool removeRasterLayer(const std::shared_ptr<RasterLayer> &layer);
+  void clearRasterLayers();
+  const std::vector<std::shared_ptr<RasterLayer>> &rasterLayers() const { return mRasterLayers; }
+  bool containsRaster(const std::shared_ptr<RasterLayer> &layer) const;
+
+  /** Estadisticas del ultimo cuadro raster (bytes leidos, pixeles pintados). */
+  const RasterRenderer::FrameStats &rasterFrameStats() const { return mRasterRenderer.lastStats(); }
+
   std::shared_ptr<VectorLayer> currentLayer() const { return mCurrentLayer; }
   void setCurrentLayer(const std::shared_ptr<VectorLayer> &layer);
 
@@ -66,6 +83,7 @@ public:
 
   void zoomToFullExtent();
   void zoomToLayer(const std::shared_ptr<VectorLayer> &layer);
+  void zoomToLayer(const std::shared_ptr<RasterLayer> &layer);
   void zoomIn();
   void zoomOut();
   void zoomBy(double factor, const QPointF &anchorPixel = QPointF());
@@ -209,9 +227,11 @@ private:
   void invalidateFrameCache();
 
   std::vector<std::shared_ptr<VectorLayer>> mLayers;
+  std::vector<std::shared_ptr<RasterLayer>> mRasterLayers;
   std::shared_ptr<VectorLayer> mCurrentLayer;
   MapRenderer mRenderer;
   FastMapRenderer mFastRenderer;
+  RasterRenderer mRasterRenderer;
   LabelRenderer mLabelRenderer;
   FastMapRenderer::Options mFastOptions;
   bool mLabelsVisible = true;

@@ -4,9 +4,12 @@
 #include "minigiserror.h"
 #include "minigisgdalinit.h"
 #include "minigisgeometrystore.h"
+#include "minigislayerkind.h"
 #include "minigislayerpanel.h"
 #include "minigismapcanvas.h"
 #include "minigislabeldialog.h"
+#include "minigisrasterlayer.h"
+#include "minigisrasterstyledialog.h"
 #include "minigisstyledialog.h"
 #include "minigisvectorlayer.h"
 #include "minigisvectorloader.h"
@@ -42,10 +45,13 @@ namespace
 constexpr int kMaximumRecentFiles = 8;
 constexpr int kStatusTimeoutMs = 5000;
 
-/** Formatos vectoriales que ofrece el dialogo de apertura. */
+/** Formatos que ofrece el dialogo de apertura: vectoriales y raster. */
 const char *kOpenFilter =
-  "Capas vectoriales (*.shp *.geojson *.json *.gpkg *.kml *.gml *.gpx *.csv *.tab *.mif *.fgb *.sqlite *.db);;"
-  "Shapefile (*.shp);;GeoJSON (*.geojson *.json);;GeoPackage (*.gpkg);;Todos los archivos (*)";
+  "Capas (*.shp *.geojson *.json *.gpkg *.kml *.gml *.gpx *.csv *.tab *.mif *.fgb *.sqlite *.db "
+  "*.tif *.tiff *.img *.vrt *.jp2 *.png *.jpg *.jpeg *.bmp);;"
+  "Vectoriales (*.shp *.geojson *.json *.gpkg *.kml *.gml *.gpx *.csv *.tab *.mif *.fgb *.sqlite *.db);;"
+  "Raster (*.tif *.tiff *.img *.vrt *.jp2 *.png *.jpg *.jpeg *.bmp);;"
+  "Shapefile (*.shp);;GeoTIFF (*.tif *.tiff);;Todos los archivos (*)";
 
 QString formatNumber(double value, int precision = 6)
 {
@@ -225,22 +231,62 @@ void MainWindow::createDocks()
   connect(mLayerPanel, &LayerPanel::addLayerRequested, this, &MainWindow::openLayerDialog);
   connect(mLayerPanel, &LayerPanel::currentLayerChanged, this, &MainWindow::onLayerPanelCurrentChanged);
   connect(mLayerPanel, &LayerPanel::visibilityChanged, this, &MainWindow::onLayerVisibilityChanged);
-  connect(mLayerPanel, &LayerPanel::removeLayerRequested, this, [this](const std::shared_ptr<VectorLayer> &layer) {
-    mCanvas->removeLayer(layer);
+  connect(mLayerPanel, &LayerPanel::removeLayerRequested, this, [this](const LayerEntry &entry) {
+    if (entry.kind == LayerEntry::Kind::Raster && entry.raster)
+    {
+      if (mCurrentRaster == entry.raster)
+        mCurrentRaster.reset();
+      mCanvas->removeRasterLayer(entry.raster);
+    }
+    else if (entry.vector)
+    {
+      mCanvas->removeLayer(entry.vector);
+    }
   });
-  connect(mLayerPanel, &LayerPanel::zoomToLayerRequested, mCanvas, &MapCanvas::zoomToLayer);
-  connect(mLayerPanel, &LayerPanel::styleRequested, this, [this](const std::shared_ptr<VectorLayer> &layer) {
-    mCanvas->setCurrentLayer(layer);
-    editCurrentLayerStyle();
+  // Zoom por tipo: `MapCanvas::zoomToLayer` esta sobrecargado y la eleccion
+  // depende de la clase de la entrada seleccionada.
+  connect(mLayerPanel, &LayerPanel::zoomToLayerRequested, this, [this](const LayerEntry &entry) {
+    if (entry.kind == LayerEntry::Kind::Raster && entry.raster)
+    {
+      mCurrentRaster = entry.raster;
+      mCanvas->setCurrentLayer(nullptr);
+      mCanvas->zoomToLayer(entry.raster);
+    }
+    else if (entry.vector)
+    {
+      mCurrentRaster.reset();
+      mCanvas->zoomToLayer(entry.vector);
+    }
   });
-  connect(mLayerPanel, &LayerPanel::labelRequested, this, [this](const std::shared_ptr<VectorLayer> &layer) {
-    if (layer)
-      mCanvas->setCurrentLayer(layer);
-    editCurrentLayerLabels();
+  connect(mLayerPanel, &LayerPanel::styleRequested, this, [this](const LayerEntry &entry) {
+    if (entry.kind == LayerEntry::Kind::Raster && entry.raster)
+    {
+      mCurrentRaster = entry.raster;
+      mCanvas->setCurrentLayer(nullptr);
+      editCurrentLayerStyle();
+    }
+    else if (entry.vector)
+    {
+      mCurrentRaster.reset();
+      mCanvas->setCurrentLayer(entry.vector);
+      editCurrentLayerStyle();
+    }
   });
-  connect(mLayerPanel, &LayerPanel::attributeTableRequested, this, [this](const std::shared_ptr<VectorLayer> &layer) {
-    mCanvas->setCurrentLayer(layer);
-    showAttributeTable(true);
+  connect(mLayerPanel, &LayerPanel::labelRequested, this, [this](const LayerEntry &entry) {
+    if (entry.vector)
+    {
+      mCurrentRaster.reset();
+      mCanvas->setCurrentLayer(entry.vector);
+      editCurrentLayerLabels();
+    }
+  });
+  connect(mLayerPanel, &LayerPanel::attributeTableRequested, this, [this](const LayerEntry &entry) {
+    if (entry.vector)
+    {
+      mCurrentRaster.reset();
+      mCanvas->setCurrentLayer(entry.vector);
+      showAttributeTable(true);
+    }
   });
 
   mAttributeDock = new QDockWidget(QStringLiteral("Tabla de atributos"), this);
@@ -366,6 +412,7 @@ void MainWindow::onLayerLoaded(const std::shared_ptr<VectorLayer> &layer, bool f
 
   // El lienzo encuadra la primera capa de la tanda (o la primera de todas).
   const bool zoomToExtent = first || mCanvas->layers().empty();
+  mCurrentRaster.reset();
   mCanvas->addLayer(layer, zoomToExtent);
   mLastDirectory = QFileInfo(layer->sourcePath()).absolutePath();
   addRecentFile(layer->sourcePath());
@@ -423,6 +470,17 @@ bool MainWindow::openLayer(const QString &path, bool zoomToExtent)
     return false;
 
   Error error;
+  const LayerKind kind = detectLayerKind(path, &error);
+
+  if (kind == LayerKind::Raster)
+    return openRasterLayer(path, zoomToExtent);
+
+  if (kind == LayerKind::Unknown)
+  {
+    showError(QStringLiteral("No se pudo abrir la capa"), error);
+    return false;
+  }
+
   const std::shared_ptr<VectorLayer> layer = VectorLayer::open(path, &error);
   if (!layer)
   {
@@ -430,6 +488,7 @@ bool MainWindow::openLayer(const QString &path, bool zoomToExtent)
     return false;
   }
 
+  mCurrentRaster.reset();
   mLastDirectory = QFileInfo(path).absolutePath();
   mCanvas->addLayer(layer, zoomToExtent);
   addRecentFile(path);
@@ -442,14 +501,42 @@ bool MainWindow::openLayer(const QString &path, bool zoomToExtent)
   return true;
 }
 
+bool MainWindow::openRasterLayer(const QString &path, bool zoomToExtent)
+{
+  Error error;
+  const std::shared_ptr<RasterLayer> raster = RasterLayer::open(path, &error);
+  if (!raster)
+  {
+    showError(QStringLiteral("No se pudo abrir el raster"), error);
+    return false;
+  }
+
+  const bool firstLayer = mCanvas->layers().empty() && mCanvas->rasterLayers().empty();
+
+  mLastDirectory = QFileInfo(path).absolutePath();
+  mCurrentRaster = raster;
+  mCanvas->setCurrentLayer(nullptr);
+  mCanvas->addRasterLayer(raster, zoomToExtent || firstLayer);
+  addRecentFile(path);
+
+  statusBar()->showMessage(QStringLiteral("Raster «%1» cargado: %2x%3, %4 bandas (%5)")
+                             .arg(raster->name())
+                             .arg(raster->width())
+                             .arg(raster->height())
+                             .arg(raster->bandCount())
+                             .arg(raster->crsDescription()),
+                           kStatusTimeoutMs);
+  return true;
+}
+
 int MainWindow::loadPaths(const QStringList &paths)
 {
   if (paths.isEmpty())
     return 0;
 
-  // A partir de aqui la carga es asincrona: se devuelve cuantas se han encolado
-  // y la interfaz se actualiza desde las senales del cargador (barra de progreso
-  // y, por cada capa lista, su incorporacion al lienzo).
+  // La carga vectorial es asincrona (abrir y leer una capa pesada no debe
+  // bloquear la ventana); el raster se abre y se dibuja en el hilo de la GUI,
+  // que es donde vive su dataset de GDAL.
   if (mLoader->isRunning())
   {
     statusBar()->showMessage(QStringLiteral("Ya hay una carga en curso; espera o pulsa Cancelar."),
@@ -457,18 +544,52 @@ int MainWindow::loadPaths(const QStringList &paths)
     return 0;
   }
 
-  mLoader->setDestinationEpsg(mCanvas->destinationEpsg());
-  setLoadIndicatorVisible(true);
-  mLoadProgress->setValue(0);
-  mLoadLabel->setText(QStringLiteral("Preparando la carga de %1 archivo(s)...").arg(paths.size()));
-  mLoader->start(paths);
-  return paths.size();
+  QStringList vectorPaths;
+  int queued = 0;
+
+  for (const QString &path : paths)
+  {
+    Error error;
+    const LayerKind kind = detectLayerKind(path, &error);
+
+    if (kind == LayerKind::Raster)
+    {
+      if (openRasterLayer(path, mCanvas->layers().empty() && mCanvas->rasterLayers().empty()))
+        ++queued;
+      continue;
+    }
+
+    if (kind == LayerKind::Vector)
+    {
+      vectorPaths << path;
+      continue;
+    }
+
+    showError(QStringLiteral("No se pudo abrir «%1»").arg(QFileInfo(path).fileName()), error);
+  }
+
+  if (!vectorPaths.isEmpty())
+  {
+    mLoader->setDestinationEpsg(mCanvas->destinationEpsg());
+    setLoadIndicatorVisible(true);
+    mLoadProgress->setValue(0);
+    mLoadLabel->setText(QStringLiteral("Preparando la carga de %1 archivo(s)...").arg(vectorPaths.size()));
+    mLoader->start(vectorPaths);
+    queued += vectorPaths.size();
+  }
+  else
+  {
+    setLoadIndicatorVisible(false);
+    updateWindowTitle();
+  }
+
+  return queued;
 }
 
 void MainWindow::openLayerDialog()
 {
   const QStringList files = QFileDialog::getOpenFileNames(
-    this, QStringLiteral("Abrir capa vectorial"), mLastDirectory, QString::fromUtf8(kOpenFilter));
+    this, QStringLiteral("Abrir capa"), mLastDirectory, QString::fromUtf8(kOpenFilter));
 
   if (!files.isEmpty())
     loadPaths(files);
@@ -525,17 +646,31 @@ void MainWindow::loadSampleData()
 
 void MainWindow::closeCurrentLayer()
 {
+  if (mCurrentRaster)
+  {
+    mCanvas->removeRasterLayer(mCurrentRaster);
+    mCurrentRaster.reset();
+    return;
+  }
+
   if (const std::shared_ptr<VectorLayer> layer = currentLayer())
     mCanvas->removeLayer(layer);
 }
 
 void MainWindow::closeAllLayers()
 {
+  mCurrentRaster.reset();
   mCanvas->clearLayers();
 }
 
 void MainWindow::zoomToCurrentLayer()
 {
+  if (mCurrentRaster)
+  {
+    mCanvas->zoomToLayer(mCurrentRaster);
+    return;
+  }
+
   if (const std::shared_ptr<VectorLayer> layer = currentLayer())
     mCanvas->zoomToLayer(layer);
   else
@@ -544,6 +679,12 @@ void MainWindow::zoomToCurrentLayer()
 
 void MainWindow::editCurrentLayerStyle()
 {
+  if (mCurrentRaster)
+  {
+    editCurrentRasterStyle();
+    return;
+  }
+
   const std::shared_ptr<VectorLayer> layer = currentLayer();
   if (!layer)
   {
@@ -565,8 +706,33 @@ void MainWindow::editCurrentLayerStyle()
   }
 }
 
+void MainWindow::editCurrentRasterStyle()
+{
+  if (!mCurrentRaster)
+    return;
+
+  RasterStyleDialog dialog(mCurrentRaster->name(), mCurrentRaster->bandLabels(), mCurrentRaster->style(), this);
+  if (dialog.exec() == QDialog::Accepted)
+  {
+    mCurrentRaster->setStyle(dialog.style());
+
+    // Redibujado inmediato: el lienzo tambien lo detecta por la revision, pero
+    // invalidar aqui hace que el cambio se vea sin mover la vista.
+    mCanvas->refreshMap();
+
+    statusBar()->showMessage(QStringLiteral("Estilo del raster «%1» actualizado.").arg(mCurrentRaster->name()),
+                             kStatusTimeoutMs);
+  }
+}
+
 void MainWindow::editCurrentLayerLabels()
 {
+  if (mCurrentRaster)
+  {
+    statusBar()->showMessage(QStringLiteral("Las etiquetas solo se aplican a capas vectoriales."), kStatusTimeoutMs);
+    return;
+  }
+
   const std::shared_ptr<VectorLayer> layer = currentLayer();
   if (!layer)
   {
@@ -613,6 +779,13 @@ void MainWindow::showAttributeTable(bool visible)
   if (!mAttributeDock)
     return;
 
+  if (visible && mCurrentRaster)
+  {
+    statusBar()->showMessage(QStringLiteral("La tabla de atributos solo existe para capas vectoriales."),
+                             kStatusTimeoutMs);
+    return;
+  }
+
   mAttributeDock->setVisible(visible);
   if (visible)
   {
@@ -638,26 +811,67 @@ void MainWindow::onCurrentLayerChanged()
   updateCrsLabel();
 }
 
-void MainWindow::onLayerPanelCurrentChanged(const std::shared_ptr<VectorLayer> &layer)
+void MainWindow::onLayerPanelCurrentChanged(const LayerEntry &entry)
 {
-  if (mUpdatingUi || !layer || mCanvas->currentLayer() == layer)
+  if (mUpdatingUi)
     return;
 
-  mCanvas->setCurrentLayer(layer);
+  if (entry.kind == LayerEntry::Kind::Raster)
+  {
+    if (!entry.raster || mCurrentRaster == entry.raster)
+      return;
+
+    mCurrentRaster = entry.raster;
+    if (mCanvas->currentLayer())
+      mCanvas->setCurrentLayer(nullptr);
+
+    syncLayerPanel();
+    replaceAttributeModel();
+    updateWindowTitle();
+    updateCrsLabel();
+    return;
+  }
+
+  if (!entry.vector)
+    return;
+
+  mCurrentRaster.reset();
+  if (mCanvas->currentLayer() != entry.vector)
+  {
+    mCanvas->setCurrentLayer(entry.vector);
+  }
+  else
+  {
+    syncLayerPanel();
+    updateWindowTitle();
+    updateCrsLabel();
+  }
 }
 
-void MainWindow::onLayerVisibilityChanged(const std::shared_ptr<VectorLayer> &layer, bool visible)
+void MainWindow::onLayerVisibilityChanged(const LayerEntry &entry, bool visible)
 {
-  if (!layer)
-    return;
+  QString name;
 
-  layer->setVisible(visible);
+  if (entry.kind == LayerEntry::Kind::Raster && entry.raster)
+  {
+    entry.raster->setVisible(visible);
+    name = entry.raster->name();
+  }
+  else if (entry.vector)
+  {
+    entry.vector->setVisible(visible);
+    name = entry.vector->name();
+  }
+  else
+  {
+    return;
+  }
 
   // El mapa se actualiza en el acto: descarta el cuadro cacheado y repinta.
   mCanvas->refreshMap();
 
   statusBar()->showMessage(QStringLiteral("Capa «%1» %2.")
-                             .arg(layer->name(), visible ? QStringLiteral("visible") : QStringLiteral("oculta")),
+                             .arg(name, visible ? QStringLiteral("visible") : QStringLiteral("oculta")),
                            kStatusTimeoutMs);
 }
 
@@ -694,7 +908,67 @@ void MainWindow::syncLayerPanel()
     return;
 
   mUpdatingUi = true;
-  mLayerPanel->setLayers(mCanvas->layers(), mCanvas->currentLayer());
+
+  // Orden de apilado: primero los rasters (fondo), despues las vectoriales.
+  std::vector<LayerEntry> entries;
+  entries.reserve(mCanvas->rasterLayers().size() + mCanvas->layers().size());
+
+  for (const std::shared_ptr<RasterLayer> &raster : mCanvas->rasterLayers())
+  {
+    if (!raster)
+      continue;
+
+    LayerEntry entry;
+    entry.kind = LayerEntry::Kind::Raster;
+    entry.raster = raster;
+    entry.name = raster->name();
+    entry.sourcePath = raster->sourcePath();
+    entry.kindText = raster->bandCount() == 1
+                       ? QStringLiteral("Raster (1 banda)")
+                       : QStringLiteral("Raster (%1 bandas)").arg(raster->bandCount());
+    entry.countText = QStringLiteral("%1x%2").arg(raster->width()).arg(raster->height());
+    entry.crsText = raster->crsDescription();
+    entry.visible = raster->isVisible();
+    entries.push_back(entry);
+  }
+
+  for (const std::shared_ptr<VectorLayer> &layer : mCanvas->layers())
+  {
+    if (!layer)
+      continue;
+
+    LayerEntry entry;
+    entry.kind = LayerEntry::Kind::Vector;
+    entry.vector = layer;
+    entry.name = layer->name();
+    entry.sourcePath = layer->sourcePath();
+    entry.kindText = Style::kindName(layer->geometryKind());
+    entry.countText = QString::number(layer->featureCount());
+    entry.crsText = layer->crsDescription();
+    entry.visible = layer->isVisible();
+    entries.push_back(entry);
+  }
+
+  // Si la capa raster activa ya no esta (la quitaron), se deja de marcar.
+  if (mCurrentRaster && !mCanvas->containsRaster(mCurrentRaster))
+    mCurrentRaster.reset();
+
+  const LayerEntry *current = nullptr;
+  for (const LayerEntry &entry : entries)
+  {
+    if (mCurrentRaster && entry.raster == mCurrentRaster)
+    {
+      current = &entry;
+      break;
+    }
+    if (!mCurrentRaster && entry.vector && entry.vector == mCanvas->currentLayer())
+    {
+      current = &entry;
+      break;
+    }
+  }
+
+  mLayerPanel->setLayers(entries, current);
   mUpdatingUi = false;
 }
 
@@ -731,26 +1005,50 @@ void MainWindow::replaceAttributeModel()
 
 void MainWindow::updateWindowTitle()
 {
+  const std::shared_ptr<RasterLayer> raster = mCurrentRaster;
   const std::shared_ptr<VectorLayer> layer = currentLayer();
-  const int layerCount = static_cast<int>(mCanvas->layers().size());
+  const int layerCount = static_cast<int>(mCanvas->layers().size() + mCanvas->rasterLayers().size());
 
   QString title = QStringLiteral("MiniGIS %1").arg(QString::fromUtf8(MINIGIS_VERSION));
-  if (layer)
+  if (raster)
+  {
+    title += QStringLiteral(" — %1 (%2x%3, %4 bandas) — %5 capa(s)")
+               .arg(raster->name())
+               .arg(raster->width())
+               .arg(raster->height())
+               .arg(raster->bandCount())
+               .arg(layerCount);
+  }
+  else if (layer)
+  {
     title += QStringLiteral(" — %1 (%2 elementos) — %3 capa(s)").arg(layer->name()).arg(layer->featureCount()).arg(layerCount);
+  }
   else if (layerCount > 0)
+  {
     title += QStringLiteral(" — %1 capa(s)").arg(layerCount);
+  }
 
   setWindowTitle(title);
 
-  const bool hasLayer = layer != nullptr;
-  mCloseAction->setEnabled(hasLayer);
-  mStyleAction->setEnabled(hasLayer);
-  mLabelAction->setEnabled(hasLayer);
-  mZoomLayerAction->setEnabled(hasLayer);
+  const bool hasCurrent = raster != nullptr || layer != nullptr;
+  mCloseAction->setEnabled(hasCurrent);
+  mStyleAction->setEnabled(hasCurrent);
+  mZoomLayerAction->setEnabled(hasCurrent);
+
+  // Etiquetas y tabla de atributos solo tienen sentido en capas vectoriales.
+  const bool hasVector = layer != nullptr && raster == nullptr;
+  mLabelAction->setEnabled(hasVector);
+  mAttributeAction->setEnabled(hasVector);
 }
 
 void MainWindow::updateCrsLabel()
 {
+  if (mCurrentRaster)
+  {
+    mCrsLabel->setText(QStringLiteral("SRC: %1").arg(mCurrentRaster->crsDescription()));
+    return;
+  }
+
   const std::shared_ptr<VectorLayer> layer = currentLayer();
   if (!layer)
   {

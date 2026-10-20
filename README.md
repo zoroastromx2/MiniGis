@@ -1,8 +1,9 @@
 # MiniGIS
 
-Visor SIG mínimo en **C++ con Qt 6 y GDAL**: carga un *shapefile* (o GeoJSON, GeoPackage,
-KML…), lo dibuja, permite hacer zoom y paneo, consultar la tabla de atributos y cambiar la
-simbología básica.
+Visor SIG mínimo en **C++ con Qt 6 y GDAL**: carga capas vectoriales (shapefile, GeoJSON,
+GeoPackage, KML…) y **ráster** (GeoTIFF y cualquier formato que abra GDAL), las dibuja, permite
+hacer zoom y paneo, consultar la tabla de atributos, cambiar la simbología básica y ajustar el
+contraste de los rásters.
 
 El objetivo del proyecto es tener un programa pequeño, comprensible y **depurable paso a paso
 en Qt Creator**, construido con las mismas convenciones que usa QGIS: CMake, vcpkg en modo
@@ -37,13 +38,18 @@ externa igual que cualquier otra aplicación SIG.
 
 | Componente | Ruta | Versión |
 |---|---|---|
-| Qt (oficial) | `D:\QtWin\6.10.3\msvc2022_64` | 6.10.3 |
-| Qt Creator | `D:\QtWin\Tools\QtCreator\bin\qtcreator.exe` | 20.0.2 |
+| Qt (oficial) | `D:\Qt\6.8.3\msvc2022_64` | 6.8.3 |
+| Qt Creator | `D:\Qt\Tools\QtCreator\bin\qtcreator.exe` | 19.0.2 |
 | Compilador | `C:\Program Files\Microsoft Visual Studio\2022\Community` | MSVC 19.44 (x64) |
-| CMake | `C:\Develop\4.4.2\bin\cmake.exe` | 4.4.4 |
-| Ninja | `D:\QtWin\Tools\Ninja\ninja.exe` | — |
-| vcpkg | `E:\vcpkg` | GDAL 3.12.4 (`x64-windows`), release **y** debug |
+| CMake | `C:\Strawberry\c\bin\cmake.exe` (el del `PATH`) | 3.29.2 (el kit trae 3.30.5 en `D:\Qt\Tools\CMake_64`) |
+| Ninja | `C:\Strawberry\c\bin\ninja.exe` | 1.12.0 |
+| vcpkg | `D:\VCPKG` | GDAL 3.12.4 (`x64-windows`), release **y** debug |
+| Windows SDK (rc/mt) | `D:\Windows Kits\10\bin\10.0.26100.0\x64` | 10.0.26100 (fijado en los presets; el 28000 rompe el enlace) |
 | Datos de ejemplo | `data\sample\shapefiles` (generados con `ogr2ogr`) | — |
+
+> Estas son las rutas de este equipo. Si cambian, edita `scripts\env.bat` (el
+> único sitio con rutas absolutas para los scripts) y las variables de
+> `CMakePresets.json`.
 
 ---
 
@@ -61,20 +67,25 @@ MiniGIS/
 ├── src/
 │   ├── core/                   # datos y render (equivalente a qgis_core)
 │   │   ├── minigisgdalinit.*   # registro de drivers, PROJ_DATA/GDAL_DATA
+│   │   ├── minigislayerkind.*  # detección vectorial/ráster por contenido
 │   │   ├── minigisvectorlayer.*# capa vectorial sobre GDAL/OGR
+│   │   ├── minigisrasterlayer.*# capa ráster: metadatos, extensión, warp cacheado
+│   │   ├── minigisrasterrenderer.* # dibujo por ventana, LUT, NoData, paleta
+│   │   ├── minigisrasterstyle.h# bandas, estiramiento, muestreo, opacidad
 │   │   ├── minigismaprenderer.*# render a QImage + reproyección al vuelo
 │   │   ├── minigisrectangle.*  # extensión/zoom
 │   │   ├── minigisstyle.*      # simbología
 │   │   └── minigiserror.h      # error = mensaje + acción sugerida
 │   ├── gui/                    # widgets (equivalente a qgis_gui)
 │   │   ├── minigismapcanvas.*  # lienzo: zoom, paneo, arrastrar y soltar
-│   │   ├── minigislayerpanel.* # árbol de capas
+│   │   ├── minigislayerpanel.* # árbol de capas (vectorial y ráster)
 │   │   ├── minigisattributetablemodel.*
 │   │   ├── minigisstyledialog.*
+│   │   ├── minigisrasterstyledialog.* # contraste, bandas y opacidad del ráster
 │   │   └── minigismainwindow.*
 │   └── app/main.cpp            # GUI + modos de línea de comandos
 ├── tests/                      # pruebas de humo con CTest
-├── data/sample/                # GeoJSON origen + shapefiles generados
+├── data/sample/                # GeoJSON origen, shapefiles y GeoTIFF de ejemplo
 └── scripts/                    # env / configure / build / run / deploy / datos
 ```
 
@@ -85,7 +96,7 @@ MiniGIS/
 ### 4.1 Con los scripts (lo más rápido)
 
 ```bat
-scripts\make_sample_data.bat              :: genera los shapefiles de ejemplo
+scripts\make_sample_data.bat              :: genera los shapefiles y GeoTIFF de ejemplo
 scripts\configure.bat windows-msvc-debug  :: configurar (Debug)
 scripts\build.bat     windows-msvc-debug  :: compilar
 scripts\run.bat       windows-msvc-debug  :: ejecutar
@@ -106,18 +117,25 @@ Presets disponibles:
 ### 4.2 Configuración manual equivalente
 
 ```bat
+:: desde una consola "x64 Native Tools" de VS 2022 (o tras vcvars64.bat)
 cmake -S . -B build\manual -G Ninja ^
-  -DCMAKE_BUILD_TYPE=Debug ^
-  -DCMAKE_TOOLCHAIN_FILE=E:/vcpkg/scripts/buildsystems/vcpkg.cmake ^
+  -DCMAKE_BUILD_TYPE=Release ^
+  "-DCMAKE_RC_COMPILER=D:/Windows Kits/10/bin/10.0.26100.0/x64/rc.exe" ^
+  "-DCMAKE_MT=D:/Windows Kits/10/bin/10.0.26100.0/x64/mt.exe" ^
+  -DCMAKE_TOOLCHAIN_FILE=D:/VCPKG/scripts/buildsystems/vcpkg.cmake ^
   -DVCPKG_TARGET_TRIPLET=x64-windows ^
-  -DVCPKG_INSTALLED_DIR=E:/vcpkg/installed ^
-  -DQt6_DIR=D:/QtWin/6.10.3/msvc2022_64/lib/cmake/Qt6 ^
-  -DCMAKE_PREFIX_PATH=D:/QtWin/6.10.3/msvc2022_64
+  -DVCPKG_INSTALLED_DIR=D:/VCPKG/installed ^
+  -DQt6_DIR=D:/Qt/6.8.3/msvc2022_64/lib/cmake/Qt6 ^
+  -DCMAKE_PREFIX_PATH=D:/Qt/6.8.3/msvc2022_64
 cmake --build build\manual
 ```
 
+> El `rc.exe`/`mt.exe` explícitos son necesarios aquí: el del SDK 10.0.28000
+> hace fallar el enlace con `LNK1327: invalid option: -ologo`. Los presets ya
+> los fijan.
+
 > **Nota (importante) sobre vcpkg.** Por defecto se usa el **árbol ya compilado**
-> (`E:\vcpkg\installed`, `MINIGIS_USE_VCPKG_MANIFEST=OFF`). Activar el modo manifiesto
+> (`D:\VCPKG\installed`, `MINIGIS_USE_VCPKG_MANIFEST=OFF`). Activar el modo manifiesto
 > (`-DMINIGIS_USE_VCPKG_MANIFEST=ON`) haría que vcpkg **recompilase GDAL y su cadena** en un
 > árbol propio del proyecto; además, si se apuntase al árbol compartido, vcpkg **eliminaría**
 > paquetes ajenos al manifiesto (por ejemplo `qtbase` o `qgis-o2`). Por eso el modo manifiesto
@@ -127,15 +145,15 @@ cmake --build build\manual
 
 ## 5. Depurar en Qt Creator
 
-1. **Abre el proyecto**: `File > Open File or Project…` → `E:\AAA\Proyecto nuevo\MiniGIS\CMakeLists.txt`.
+1. **Abre el proyecto**: `File > Open File or Project…` → `D:\AAA\MiniGIS\MiniGisCode\CMakeLists.txt`.
 2. **Selecciona el preset**: en `Projects > Build & Run > CMake`, elige
-   `windows-msvc-debug` (Qt Creator 20 los muestra en la lista de *presets*). Si prefieres
+   `windows-msvc-debug` (Qt Creator los muestra en la lista de *presets*). Si prefieres
    configurar a mano, usa:
    * *Generator*: `Ninja`
-   * *CMake tool*: `D:\QtWin\Tools\CMake_64\bin\cmake.exe` (o `C:\Develop\4.4.2\bin\cmake.exe`)
-   * *Kit*: `Desktop Qt 6.10.3 MSVC2022 64bit`
+   * *CMake tool*: `C:\Strawberry\c\bin\cmake.exe` (o `D:\Qt\Tools\CMake_64\bin\cmake.exe`)
+   * *Kit*: el de Qt 6.8.3 MSVC2022 64bit
    * Variables de CMake: las del apartado 4.2.
-3. **Kit**: `Desktop Qt 6.10.3 MSVC2022 64bit`. El compilador debe ser el de
+3. **Kit**: `Qt 6.8.3 MSVC2022 64bit`. El compilador debe ser el de
    `C:\Program Files\Microsoft Visual Studio\2022\Community` (MSVC 19.44), que es el que
    detecta vcpkg.
 4. **Entorno de ejecución**: el proyecto **no necesita que toques `PATH`**. Tras compilar,
@@ -145,7 +163,7 @@ cmake --build build\manual
    ventana. Si aun así quieres tenerlo a mano al depurar, añade en `Projects > Run >
    Environment`:
    ```
-   D:\QtWin\6.10.3\msvc2022_64\bin;E:\vcpkg\installed\x64-windows\bin
+   D:\Qt\6.8.3\msvc2022_64\bin;D:\VCPKG\installed\x64-windows\bin
    ```
 5. **Punto de entrada**: `src\app\main.cpp`. Pon un punto de ruptura en
    `MainWindow::openLayer` (`src\gui\minigismainwindow.cpp`) y abre un `.shp` con `Ctrl+O`:
@@ -171,8 +189,8 @@ minigis [opciones] [archivos...]
 
 | Opción | Descripción |
 |---|---|
-| `archivos...` / `-l, --layer <archivo>` | Capas a cargar (se pueden repetir) |
-| `-i, --info` | Resumen de las capas (nombre, driver, geometría, elementos, extensión, SRC, campos) |
+| `archivos...` / `-l, --layer <archivo>` | Capas vectoriales o ráster a cargar (se pueden repetir) |
+| `-i, --info` | Resumen de las capas (vectoriales y ráster: bandas, tamaño, SRC, NoData, paleta) |
 | `--json` | Salida JSON (junto a `--info`), pensada para scripts |
 | `--list-drivers` | Drivers vectoriales disponibles en GDAL |
 | `--snapshot <archivo.png>` | Renderiza el mapa a PNG sin abrir ventana |
@@ -180,7 +198,12 @@ minigis [opciones] [archivos...]
 | `--extent <xmin,ymin,xmax,ymax>` | Extensión inicial del mapa |
 | `--size <AnchoxAlto>` | Tamaño de la imagen (por defecto `1200x800`) |
 | `--crs <EPSG:xxxx>` | SRC de destino del dibujo (por defecto `EPSG:4326`) |
-| `--max-features <n>` | Límite de elementos dibujados por capa (`0` = sin límite) |
+| `--max-features <n>` | Límite de elementos dibujados por capa vectorial (`0` = sin límite) |
+| `--raster-stretch <none\|minmax\|percentclip>` | Estiramiento de contraste de los rásters (por defecto percentiles 2–98) |
+| `--raster-bands <R,G,B \| 1>` | Bandas que usan los rásters (una sola = escala de grises) |
+| `--raster-opacity <0-100>` | Opacidad de los rásters |
+| `--check-raster` | Comprueba el dibujado ráster: cuadrantes, extensión, warp, NoData, contraste, paleta, paneo |
+| `--snapshot-raster-dialog <archivo.png>` | Captura el diálogo de estilo ráster y sale |
 | `-V, --verbose` | Trazas en `stderr` (los datos siguen limpios en `stdout`) |
 | `-h, --help` / `-v, --version` | Ayuda con ejemplos / versiones de Qt, GDAL y PROJ y rutas de datos |
 
@@ -201,16 +224,25 @@ Ejemplos:
 minigis data\sample\shapefiles\cities.shp
 minigis --info --json -l data\sample\shapefiles\parcels.shp
 minigis --snapshot mapa.png -l data\sample\shapefiles\parcels_utm30.shp --size 1600x900
-minigis --info --layer data\sample\shapefiles\cities.shp | findstr /i "SRC"
+
+:: raster: la ortofoto debajo de las parcelas, el DEM reproyectado a 4326
+minigis --snapshot mapa.png -l data\sample\rasters\ortho_rgb.tif ^
+        -l data\sample\shapefiles\parcels.shp
+minigis --snapshot dem.png -l data\sample\rasters\dem_utm30.tif --crs EPSG:4326
+minigis --snapshot paleta.png -l data\sample\rasters\landcover.tif --raster-stretch none
+
+:: contrato del dibujado raster (lo que ejecutan las pruebas de CTest)
+minigis --check-raster -l data\sample\rasters\ortho_rgb.tif ^
+        -l data\sample\rasters\dem_utm30.tif -l data\sample\rasters\landcover.tif
 ```
 
 En la interfaz:
 
-* `Ctrl+O` abrir capa · `Ctrl+W` cerrar capa · `Ctrl+Q` salir
+* `Ctrl+O` abrir capa (vectorial o ráster) · `Ctrl+W` cerrar capa · `Ctrl+Q` salir
 * `Ctrl+ +` / `Ctrl+ -` zoom · `Ctrl+Shift+F` extensión completa · `Ctrl+Shift+L` zoom a la capa
 * rueda del ratón = zoom anclado al cursor · arrastrar con el botón izquierdo = paneo
-* `F6` tabla de atributos · `Ctrl+Shift+Y` simbología
-* arrastrar un `.shp` desde el Explorador y soltarlo sobre el mapa
+* `F6` tabla de atributos · `Ctrl+Shift+Y` simbología (en un ráster, diálogo de contraste)
+* arrastrar un `.shp` o un `.tif` desde el Explorador y soltarlo sobre el mapa
 
 ---
 
@@ -222,6 +254,11 @@ En la interfaz:
 * Dibuja puntos, líneas y polígonos **con huecos**; reproyecta al vuelo si el SRC de la capa
   difiere del de destino (por ejemplo, un shapefile UTM sobre un mapa en EPSG:4326), tanto las
   geometrías como la extensión con la que se encuadra la capa.
+* **Ráster de solo lectura**: abre cualquier formato que GDAL reconozca como ráster (probado con
+  GeoTIFF), lo dibuja **debajo del vectorial**, lo reproyecta al SRC del lienzo (warp cacheado por
+  capa y SRC), respeta NoData y banda alfa, usa la paleta del archivo y permite elegir bandas,
+  estiramiento de contraste (percentiles 2–98, mín-máx o ninguno), remuestreo y opacidad por capa.
+  La lectura por cuadro se limita a la ventana visible, a la resolución del lienzo.
 * Tabla de atributos paginada y bajo demanda (máximo 100 000 filas mostradas).
 * Simbología: color de relleno/contorno, grosor, tamaño de punto y opacidad.
 * **Etiquetas por capa**: uno o varios campos, familia y tamaño de fuente, negrita/cursiva,
@@ -238,12 +275,14 @@ En la interfaz:
 
 **No hace (todavía)**
 
-* Ráster (GeoTIFF, etc.): GDAL ya está enlazado, así que añadir `GDALRasterBand::RasterIO`
-  es el siguiente paso natural.
+* Ráster: edición, mosaicos, hillshade, rampas de color para DEM y ráster por encima del
+  vectorial. Un ráster **sin NoData** reproyectado deja negras las esquinas fuera de su huella
+  (con NoData salen transparentes).
 * Edición de geometrías, guardado, simbología por categorías, servidores OGC.
 * Etiquetas giradas o curvas siguiendo una línea, y control de prioridad por campo (la
   prioridad es un valor por capa).
-* Reproyección del *render* con rejilla (*warp*): se transforman las geometrías, no las teselas.
+* Reproyección del *render* vectorial con rejilla (*warp*): se transforman las geometrías; el
+  ráster sí se reproyecta con GDAL.
 
 ---
 
@@ -260,6 +299,12 @@ ctest --preset windows-msvc-debug --output-on-failure
   imagen no está vacía.
 * `minigis.salida-por-error-de-archivo` — un archivo inexistente debe devolver el código 2.
 * `minigis.bench` — contrato del banco de pruebas de rendimiento (`--bench --json`).
+* `minigis.raster-info` — `--info --json` describe la ortofoto y el DEM (tipo, tamaño, bandas, SRC).
+* `minigis.raster-dibujo` — `--check-raster` con las tres capas: cuadrantes, extensión, warp,
+  NoData, contraste, paleta, redibujado, paneo reutilizado y lectura acotada.
+* `minigis.raster-dialogo` — captura del diálogo de estilo ráster.
+* `minigis.raster-ventana` — captura de la interfaz con ráster y vectorial.
+* `minigis.rendimiento-raster` — puerta opcional de rendimiento con `MINIGIS_RASTER_BENCH_DATASET`.
 
 ### 8.1 Rendimiento
 
@@ -301,6 +346,30 @@ bin\minigis.exe --snapshot mapa.png -l capa.shp --label-field nombre --no-labels
 
 :: capturar el dialogo de etiquetas (para revisar el diseno sin abrir la aplicacion)
 bin\minigis.exe --snapshot-dialog dialogo.png -l capa.shp --label-field nombre
+
+:: contrato del dibujado raster: cuadrantes, extension, warp, NoData, contraste,
+:: paleta, redibujado, paneo reutilizado y lectura acotada al lienzo
+bin\minigis.exe --check-raster -l data\sample\rasters\ortho_rgb.tif ^
+        -l data\sample\rasters\dem_utm30.tif -l data\sample\rasters\landcover.tif
+
+:: medir el dibujado raster (JSON con el bloque "raster": bytes leidos y pixeles)
+bin\minigis.exe --bench 24 --bench-scenario mixed --json ^
+        -l build\perf\terrain_big.tif --size 1200x800
+
+:: capturar el dialogo de estilo raster
+bin\minigis.exe --snapshot-raster-dialog dialogo.png -l data\sample\rasters\dem_utm30.tif
+```
+
+El ráster se dibuja leyendo **solo la ventana visible**, a la resolución del lienzo, con una LUT
+de contraste y el warp cacheado por SRC: un GeoTIFF de 4096×4096 con overviews tarda **4 ms de
+mediana (p90 5 ms)** por cuadro a 1200×800, y menos de 1 ms en el cuadro de borrador a media
+resolución. La puerta opcional de rendimiento raster:
+
+```bat
+cmake --preset windows-msvc-release ^
+      -DMINIGIS_RASTER_BENCH_DATASET=C:/datos/terrain.tif ^
+      -DMINIGIS_BENCH_BUDGET_MS=100
+ctest --preset windows-msvc-release -R minigis.rendimiento-raster
 ```
 
 Con una capa pesada (12.000 polígonos, 2,2 M de vértices, 47,8 MB) el cuadro de paneo pasa de
@@ -319,18 +388,19 @@ ctest --preset windows-msvc-release -R minigis.rendimiento
 
 | Síntoma | Causa y solución |
 |---|---|
-| `No se encuentra Qt` o Qt equivocado (vcpkg) | Fija el kit: `-DQt6_DIR=D:/QtWin/6.10.3/msvc2022_64/lib/cmake/Qt6`. MiniGIS fija además las herramientas (`Qt6CoreTools`…) al mismo Qt para que vcpkg no mezcle su `qtbase` |
-| Al configurar con el kit aparece `Qt6: 6.11.1 (E:/vcpkg/...)` o `Unknown CMake command "_qt_internal_should_include_targets"` | El toolchain de vcpkg antepone su árbol a `CMAKE_PREFIX_PATH`, y **Qt Creator inyecta un *provider* de `find_package` que busca justo ahí**, así que encontraba el `qtbase` de vcpkg y reescribía `Qt6_DIR`. MiniGIS lo evita: detecta el Qt del kit, descarta las variables `Qt6*_DIR` cacheadas que apunten a vcpkg y **excluye ese árbol de `CMAKE_PREFIX_PATH` y `CMAKE_FIND_ROOT_PATH` durante la búsqueda de Qt**. Basta con volver a configurar (Qt Creator → *Run CMake*); si ves el aviso `"debug_and_release" set to "OFF"` al cambiar de Qt, borra `build/<kit>` para partir de cero |
+| `No se encuentra Qt` o Qt equivocado (vcpkg) | Fija el kit: `-DQt6_DIR=D:/Qt/6.8.3/msvc2022_64/lib/cmake/Qt6`. MiniGIS fija además las herramientas (`Qt6CoreTools`…) al mismo Qt para que vcpkg no mezcle su `qtbase` |
+| Al configurar con el kit aparece `Qt6: 6.11.1 (D:/VCPKG/...)` o `Unknown CMake command "_qt_internal_should_include_targets"` | El toolchain de vcpkg antepone su árbol a `CMAKE_PREFIX_PATH`, y **Qt Creator inyecta un *provider* de `find_package` que busca justo ahí**, así que encontraba el `qtbase` de vcpkg y reescribía `Qt6_DIR`. MiniGIS lo evita: detecta el Qt del kit, descarta las variables `Qt6*_DIR` cacheadas que apunten a vcpkg y **excluye ese árbol de `CMAKE_PREFIX_PATH` y `CMAKE_FIND_ROOT_PATH` durante la búsqueda de Qt**. Basta con volver a configurar (Qt Creator → *Run CMake*); si ves el aviso `"debug_and_release" set to "OFF"` al cambiar de Qt, borra `build/<kit>` para partir de cero |
+| `LNK1327: error durante la ejecución de rc.exe` / `RC1106: invalid option: -ologo` | El `rc.exe` del SDK 10.0.28000 no acepta la opción que le pasa el enlazador. Los presets fijan el de `D:/Windows Kits/10/bin/10.0.26100.0/x64`; en una configuración manual añade `-DCMAKE_RC_COMPILER` y `-DCMAKE_MT` como en 4.2 |
 | `Target ... "gdal.dll" is not a directory` al copiar DLLs | Ocurría con CMake 3.30 (el del kit): la opción `-t` de `copy_if_different` no existe ahí. Ya se usa la forma `origenes... destino`, compatible con todas las versiones |
 | `Could not find the Qt platform plugin "windows"` (o `"offscreen"`) al ejecutar | Los plugins de plataforma se copian **siempre** junto al ejecutable (antes dependían de `windeployqt`, que no existe si Qt sale de vcpkg). Si aun así falta, comprueba `build\<kit>\bin\platforms\` y recompila |
 | Error `Mezcla de versiones de Qt: Qt6 6.x con Qt6Core 6.y` | `CMAKE_PREFIX_PATH` está apuntando a dos instalaciones de Qt: deja solo el Qt oficial |
 | `ASSERT: "theme" in qstylehints.cpp` o `Could not find the Qt platform plugin` | Hay un Qt de vcpkg copiado junto al ejecutable. MiniGIS **excluye a propósito** las DLLs `Qt6*.dll` de vcpkg al copiar dependencias: borra `build\<preset>\bin\Qt6*.dll` y recompila |
 | `gdal.dll` / `Qt6Core.dll` no encontradas al ejecutar | Ejecuta desde Qt Creator o con `scripts\run.bat`; para una carpeta autónoma usa `scripts\deploy.bat` |
 | `could not find or load the Qt platform plugin "offscreen"` | `MINIGIS_DEPLOY_QT_RUNTIME` está en `OFF` y las pruebas necesitan ese plugin: actívalo, ejecuta `scripts\deploy.bat`, o define `QT_QPA_PLATFORM=windows` |
-| Aviso `No se encontro proj.db` | Define `PROJ_DATA=E:\vcpkg\installed\x64-windows\share\proj` (o copia esa carpeta junto al `.exe`) |
-| `La configuracion Debug necesita la variante Debug de GDAL` | Usa `windows-msvc-reldbg`, o instala la variante debug: `E:\vcpkg\vcpkg.exe install gdal --triplet x64-windows` |
+| Aviso `No se encontro proj.db` | Define `PROJ_DATA=D:\VCPKG\installed\x64-windows\share\proj` (o copia esa carpeta junto al `.exe`) |
+| `La configuracion Debug necesita la variante Debug de GDAL` | Usa `windows-msvc-reldbg`, o instala la variante debug: `D:\VCPKG\vcpkg.exe install gdal --triplet x64-windows` |
 | Aviso de que no se pudo detectar el prefijo de `/showIncludes` | Es MSVC en español sin paquete de idioma inglés. Compila igual, pero conviene instalar el idioma inglés en Visual Studio: así CMake registra las cabeceras y las recompilaciones incrementales son fiables |
-| CMake no encuentra GDAL | `E:\vcpkg\vcpkg.exe install gdal --triplet x64-windows` y reconfigura |
+| CMake no encuentra GDAL | `D:\VCPKG\vcpkg.exe install gdal --triplet x64-windows` y reconfigura |
 | El shapefile se abre sin SRC | Al `.shp` le falta el `.prj`; usa `ogr2ogr ... -a_srs EPSG:xxxx` (ver `scripts\make_sample_data.bat`) |
 
 ---
@@ -355,40 +425,41 @@ ctest --preset windows-msvc-release -R minigis.rendimiento
   diagnóstico en `stderr`) con códigos de salida estables, y Qt Creator muestra esa salida en
   *Application Output*.
 * **Modo manifiesto de vcpkg desactivado por defecto**: en este equipo el árbol compartido
-  `E:\vcpkg\installed` ya tiene GDAL compilado (release y debug). El modo manifiesto
+  `D:\VCPKG\installed` ya tiene GDAL compilado (release y debug). El modo manifiesto
   recompilaría la cadena completa y, apuntando al árbol compartido, **eliminaría** paquetes
   ajenos al manifiesto (`qtbase`, `qgis-o2`…). El manifiesto se conserva en `vcpkg/vcpkg.json`
   para documentar la dependencia y fijar el `baseline`.
+* **Ráster por ventana y warp cacheado**: de un ráster solo se lee la parte visible, al tamaño
+  del lienzo, y la reproyección se cachea por capa y SRC de destino. Es lo que permite mover un
+  GeoTIFF de 4096² a 4 ms por cuadro sin copiarlo a memoria (ver RENDIMIENTO.md §13).
 
 ---
 
 ## 11. Verificación realizada
 
-Todo lo siguiente se ejecutó sobre este equipo con el preset `windows-msvc-debug`:
+Todo lo siguiente se ejecutó sobre este equipo con el preset `windows-msvc-release`:
 
 | Comprobación | Resultado |
 |---|---|
-| `scripts\configure.bat windows-msvc-debug` | Qt 6.10.3, GDAL 3.12.4, vcpkg `x64-windows` (modo clásico) |
-| `scripts\build.bat windows-msvc-debug` | Compila sin errores; 87 DLLs de vcpkg + Qt oficial + plugins desplegados |
-| `minigis --version` | GDAL 3.12.4, PROJ 9.8.1, `PROJ_DATA` y `GDAL_DATA` localizados |
-| `minigis --info --json -l cities.shp` | 12 elementos, `ESRI Shapefile`, `Point`, `EPSG:4326 - WGS 84`, 5 campos con tipo y ancho |
-| `minigis --info -l parcels_utm30.shp` | 5 polígonos, `EPSG:25830 - ETRS89 / UTM zone 30N` |
-| `minigis --snapshot` sobre `cities.shp` | PNG con los 12 puntos en su posición geográfica correcta (península + Canarias) |
-| `minigis --snapshot` sobre `parcels.shp` | PNG con los 5 polígonos y el **hueco** del polígono `P-005` |
-| `minigis --snapshot --crs EPSG:4326 -l parcels_utm30.shp` | Reproyección UTM→geográfica correcta (encuadre y geometrías) |
-| `minigis --snapshot-window` | Captura de la interfaz: menús, barra, panel de capas, lienzo y barra de estado |
-| `ctest --preset windows-msvc-debug` | **5/5 pruebas superadas** |
-| Configuración con el **kit de Qt Creator** (CMake 3.30 del kit, sin presets, partiendo de una caché que apuntaba al Qt de vcpkg) | Qt 6.10.3 oficial detectado, las variables `Qt6*_DIR` de vcpkg descartadas, compila y el binario lee el shapefile y captura la interfaz a 900x600 |
-| `scripts\deploy.bat` + ejecución con `PATH=C:\Windows\system32` | La carpeta `dist\<preset>` funciona sin Qt ni vcpkg instalados en `PATH` |
+| `scripts\configure.bat windows-msvc-release` | Qt 6.8.3, GDAL 3.12.4, vcpkg `x64-windows` (modo clásico) |
+| `scripts\build.bat windows-msvc-release` | Compila sin errores; DLLs de vcpkg + Qt oficial + plugins desplegados |
+| `minigis --version` | Qt 6.8.3, GDAL 3.12.4, PROJ 9.9.0, `PROJ_DATA` y `GDAL_DATA` en `D:\VCPKG` |
+| `minigis --info --json -l cities.shp` | 12 elementos, `ESRI Shapefile`, `EPSG:4326 - WGS 84` |
+| `minigis --info -l parcels_utm30.shp` | 5 polígonos, extensión en UTM 30N |
+| `minigis --info --json -l ortho_rgb.tif` | `"type": "raster"`, 256×256, 3 bandas, `EPSG:4326` |
+| `minigis --snapshot` sobre `parcels.shp` | PNG 900x600 (4 ms de render) |
+| `minigis --snapshot --crs EPSG:4326 -l dem_utm30.tif` | DEM UTM reproyectado, NoData transparente y esquina con error ≤ 1 px |
+| `minigis --check-raster` (tres capas) | **12 comprobaciones OK**: cuadrantes, extensión, warp, NoData, contraste, paleta, redibujado, paneo y lectura |
+| `minigis --snapshot-window` sobre ráster + vectorial | Captura de la interfaz con la fila del ráster en el panel |
+| `ctest --preset windows-msvc-release` | **13/13 pruebas superadas** |
 
-Las imágenes de esa verificación están en `build\windows-msvc-debug\*.png`.
+Las imágenes de esa verificación están en `build\verify-*.png`.
 
 ---
 
 ## 12. Siguientes pasos sugeridos
 
-1. **Ráster**: una `RasterLayer` sobre `GDALRasterBand` + estiramiento de contraste, dibujada
-   bajo las capas vectoriales.
+1. **Hillshade y rampas de color** para los DEM (hoy se ven en grises con estiramiento).
 2. **Consulta por atributos**: filtros tipo `QgsExpression` (o directamente `OGR_L_SetAttributeFilter`).
-3. **Etiquetado**: dibujar un campo de la tabla sobre las geometrías.
-4. **Exportación**: guardar el mapa a PDF/SVG con `QPdfWriter` / `QSvgGenerator`.
+3. **Exportación**: guardar el mapa a PDF/SVG con `QPdfWriter` / `QSvgGenerator`.
+4. **Teselas y GPU** para el régimen ligado a píxeles (ver RENDIMIENTO.md).

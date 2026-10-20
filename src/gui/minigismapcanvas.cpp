@@ -1,6 +1,7 @@
 #include "minigismapcanvas.h"
 
 #include "minigisgeometrystore.h"
+#include "minigisrasterlayer.h"
 #include "minigisvectorlayer.h"
 
 #include <QDragEnterEvent>
@@ -188,6 +189,12 @@ quint64 MapCanvas::contentRevision() const
       continue;
     revision ^= layer->revision() + 0x9E3779B97F4A7C15ULL + (revision << 6) + (revision >> 2);
   }
+  for (const std::shared_ptr<RasterLayer> &layer : mRasterLayers)
+  {
+    if (!layer)
+      continue;
+    revision ^= layer->revision() + 0x9E3779B97F4A7C15ULL + (revision << 6) + (revision >> 2);
+  }
   return revision;
 }
 
@@ -338,11 +345,12 @@ bool MapCanvas::removeLayer(const std::shared_ptr<VectorLayer> &layer)
 
 void MapCanvas::clearLayers()
 {
-  if (mLayers.empty())
+  if (mLayers.empty() && mRasterLayers.empty())
     return;
 
   invalidateFrameCache();
   mLayers.clear();
+  mRasterLayers.clear();
   mCurrentLayer.reset();
   mExtent.setNull();
 
@@ -354,6 +362,66 @@ void MapCanvas::clearLayers()
 bool MapCanvas::contains(const std::shared_ptr<VectorLayer> &layer) const
 {
   return std::find(mLayers.begin(), mLayers.end(), layer) != mLayers.end();
+}
+
+std::shared_ptr<RasterLayer> MapCanvas::addRasterLayer(const std::shared_ptr<RasterLayer> &layer,
+                                                       bool zoomToExtent)
+{
+  if (!layer)
+    return {};
+
+  // No se admiten duplicados: evita dibujar dos veces el mismo archivo.
+  for (const std::shared_ptr<RasterLayer> &existing : mRasterLayers)
+  {
+    if (existing && existing->sourcePath() == layer->sourcePath())
+    {
+      emit statusMessage(QStringLiteral("La capa «%1» ya estaba cargada.").arg(layer->name()), kStatusTimeoutMs);
+      return existing;
+    }
+  }
+
+  invalidateFrameCache();
+  mRasterLayers.push_back(layer);
+
+  emit layersChanged();
+
+  if (zoomToExtent || !mExtent.isValid())
+    zoomToLayer(layer);
+  else
+    update();
+
+  return layer;
+}
+
+bool MapCanvas::removeRasterLayer(const std::shared_ptr<RasterLayer> &layer)
+{
+  const auto it = std::find(mRasterLayers.begin(), mRasterLayers.end(), layer);
+  if (it == mRasterLayers.end())
+    return false;
+
+  invalidateFrameCache();
+  mRasterLayers.erase(it);
+
+  emit layersChanged();
+  update();
+  return true;
+}
+
+void MapCanvas::clearRasterLayers()
+{
+  if (mRasterLayers.empty())
+    return;
+
+  invalidateFrameCache();
+  mRasterLayers.clear();
+
+  emit layersChanged();
+  update();
+}
+
+bool MapCanvas::containsRaster(const std::shared_ptr<RasterLayer> &layer) const
+{
+  return std::find(mRasterLayers.begin(), mRasterLayers.end(), layer) != mRasterLayers.end();
 }
 
 void MapCanvas::setCurrentLayer(const std::shared_ptr<VectorLayer> &layer)
@@ -400,6 +468,12 @@ Rectangle MapCanvas::layersExtent() const
     // encuadrarla con sus propias unidades la dejaria fuera de la vista.
     result.combine(layer->extentInEpsg(mDestinationEpsg));
   }
+  for (const std::shared_ptr<RasterLayer> &layer : mRasterLayers)
+  {
+    if (!layer || !layer->isVisible())
+      continue;
+    result.combine(layer->extentInEpsg(mDestinationEpsg));
+  }
   return result;
 }
 
@@ -442,6 +516,21 @@ void MapCanvas::zoomToLayer(const std::shared_ptr<VectorLayer> &layer)
   }
 
   setCurrentLayer(layer);
+  setExtent(adjustedExtent(layerExtent));
+}
+
+void MapCanvas::zoomToLayer(const std::shared_ptr<RasterLayer> &layer)
+{
+  if (!layer)
+    return;
+
+  const Rectangle layerExtent = layer->extentInEpsg(mDestinationEpsg);
+  if (!layerExtent.isValid())
+  {
+    emit statusMessage(QStringLiteral("La capa «%1» no informa de su extension.").arg(layer->name()), kStatusTimeoutMs);
+    return;
+  }
+
   setExtent(adjustedExtent(layerExtent));
 }
 
@@ -549,6 +638,9 @@ QImage MapCanvas::renderToImage(const QSize &size, bool draft)
   FastMapRenderer::Options options = mFastOptions;
   options.draft = draft;
 
+  RasterRenderer::Options rasterOptions;
+  rasterOptions.draft = draft;
+
   QPainter painter(&image);
   if (reused)
   {
@@ -563,6 +655,9 @@ QImage MapCanvas::renderToImage(const QSize &size, bool draft)
     else
       painter.setClipRegion(exposedRegion);
   }
+
+  // Raster debajo del vectorial y con el mismo recorte que la franja a repintar.
+  mRasterRenderer.paint(painter, mRasterLayers, extent, size, rasterOptions, mDestinationEpsg);
 
   // Las capas se recorren en orden de apilado. Las que tienen almacen se agrupan
   // para dibujarlas de una vez; cuando aparece una capa sin almacen (todavia
@@ -644,7 +739,9 @@ void MapCanvas::paintEvent(QPaintEvent *event)
     painter.drawImage(0, 0, renderToImage(size(), false));
   }
 
-  if (mLayers.empty())
+  // Solo se pinta la ayuda cuando no hay ninguna capa (tampoco rasters): con un
+  // raster cargado el lienzo ya tiene contenido.
+  if (mLayers.empty() && mRasterLayers.empty())
     paintEmptyState(painter);
 }
 

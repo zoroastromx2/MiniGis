@@ -16,6 +16,7 @@
  */
 
 #include <QApplication>
+#include <QColor>
 #include <QCommandLineOption>
 #include <QCommandLineParser>
 #include <QDir>
@@ -32,7 +33,12 @@
 #include <QTextStream>
 
 #include <algorithm>
+#include <cmath>
+#include <limits>
 #include <memory>
+#include <vector>
+
+#include <ogr_spatialref.h>
 
 #ifdef Q_OS_WIN
 // Se declara SetConsoleOutputCP a mano en lugar de incluir <windows.h>: ese
@@ -50,6 +56,9 @@ constexpr unsigned int kUtf8CodePage = 65001;
 #include "minigislabeldialog.h"
 #include "minigismainwindow.h"
 #include "minigismapcanvas.h"
+#include "minigisrasterlayer.h"
+#include "minigisrasterstyledialog.h"
+#include "minigisrasterstyle.h"
 #include "minigisrectangle.h"
 #include "minigisshapefileindex.h"
 #include "minigisstyle.h"
@@ -97,6 +106,44 @@ struct LabelOptions
 
 void applyLabelOptions(const std::shared_ptr<VectorLayer> &layer, const LabelOptions &options);
 
+/**
+ * Opciones de raster de la linea de comandos. Permiten fijar el estiramiento,
+ * las bandas y la opacidad sin abrir la interfaz (capturas y pruebas).
+ */
+struct RasterOptions
+{
+  bool stretchSet = false;
+  RasterStyle::Stretch stretch = RasterStyle::Stretch::PercentClip;
+  bool bandsSet = false;
+  QVector<int> bands;
+  bool opacitySet = false;
+  int opacity = 100;
+};
+
+void applyRasterOptions(const std::shared_ptr<RasterLayer> &raster, const RasterOptions &options)
+{
+  if (!raster || (!options.stretchSet && !options.bandsSet && !options.opacitySet))
+    return;
+
+  RasterStyle style = raster->style();
+  if (options.stretchSet)
+    style.stretch = options.stretch;
+
+  if (options.bandsSet && !options.bands.isEmpty())
+  {
+    style.bandMode = options.bands.size() == 1 ? RasterStyle::BandMode::Grayscale
+                                               : RasterStyle::BandMode::Rgb;
+    style.redBand = options.bands.at(0);
+    style.greenBand = options.bands.size() > 1 ? options.bands.at(1) : options.bands.at(0);
+    style.blueBand = options.bands.size() > 2 ? options.bands.at(2) : options.bands.at(0);
+  }
+
+  if (options.opacitySet)
+    style.opacity = options.opacity;
+
+  raster->setStyle(style);
+}
+
 QTextStream &stdOut()
 {
   static QTextStream stream(stdout);
@@ -135,6 +182,8 @@ QString helpText(const QCommandLineParser &parser)
                           "  minigis --info --json --layer c.shp       el mismo resumen en JSON\n"
                           "  minigis --snapshot mapa.png -l c.shp      renderiza el mapa a PNG\n"
                           "  minigis --snapshot-window ui.png -l c.shp captura tambien la interfaz\n"
+                          "  minigis --snapshot m.png -l capa.tif -l c.shp raster debajo del vectorial\n"
+                          "  minigis --check-raster -l a.tif -l b.tif  comprueba el dibujado raster\n"
                           "\nRendimiento (sin ventana):\n"
                           "  minigis --bench 40 -l capa.gpkg                 mide 40 cuadros de paneo/zoom\n"
                           "  minigis --bench 40 --bench-scenario zoom -l c.gpkg\n"
@@ -195,6 +244,7 @@ QString layerInfoText(const VectorLayer &layer)
 QJsonObject layerInfoJson(const VectorLayer &layer)
 {
   QJsonObject object;
+  object.insert(QStringLiteral("type"), QStringLiteral("vector"));
   object.insert(QStringLiteral("name"), layer.name());
   object.insert(QStringLiteral("source"), layer.sourcePath());
   object.insert(QStringLiteral("driver"), layer.driverName());
@@ -225,6 +275,105 @@ QJsonObject layerInfoJson(const VectorLayer &layer)
     fields.append(fieldObject);
   }
   object.insert(QStringLiteral("fields"), fields);
+
+  return object;
+}
+
+QString rasterInfoText(const RasterLayer &layer)
+{
+  QStringList lines;
+  lines << QStringLiteral("Capa        : %1").arg(layer.name());
+  lines << QStringLiteral("Archivo     : %1").arg(QDir::toNativeSeparators(layer.sourcePath()));
+  lines << QStringLiteral("Driver      : %1").arg(layer.driverName());
+  lines << QStringLiteral("Tipo        : Raster (%1)")
+             .arg(layer.bandCount() == 1 ? QStringLiteral("1 banda")
+                                         : QStringLiteral("%1 bandas").arg(layer.bandCount()));
+  lines << QStringLiteral("Tamano      : %1 x %2 pixeles").arg(layer.width()).arg(layer.height());
+
+  QStringList bandTexts;
+  QStringList noDataTexts;
+  QStringList paletteTexts;
+  for (int i = 1; i <= layer.bandCount(); ++i)
+  {
+    const RasterLayer::BandInfo &info = layer.bands().at(i - 1);
+    bandTexts << QStringLiteral("%1: %2 (%3)").arg(i).arg(info.typeName, info.colorName);
+    if (info.hasNoData)
+      noDataTexts << QStringLiteral("%1 (banda %2)").arg(QString::number(info.noData), QString::number(i));
+    if (info.colorCount > 0)
+      paletteTexts << QStringLiteral("%1 colores (banda %2)").arg(info.colorCount).arg(i);
+  }
+
+  lines << QStringLiteral("Bandas      : %1").arg(bandTexts.join(QStringLiteral(", ")));
+  lines << QStringLiteral("Extension   : %1").arg(layer.extent().toString());
+  lines << QStringLiteral("SRC         : %1").arg(layer.crsDescription());
+  lines << QStringLiteral("NoData      : %1")
+             .arg(noDataTexts.isEmpty() ? QStringLiteral("(sin NoData)") : noDataTexts.join(QStringLiteral(", ")));
+
+  if (!paletteTexts.isEmpty())
+    lines << QStringLiteral("Paleta      : %1").arg(paletteTexts.join(QStringLiteral(", ")));
+
+  const QVector<int> factors = layer.overviewFactors();
+  QStringList factorTexts;
+  for (int factor : factors)
+    factorTexts << QString::number(factor);
+  lines << QStringLiteral("Overviews   : %1")
+             .arg(factors.isEmpty() ? QStringLiteral("no") : factorTexts.join(QStringLiteral(", ")));
+
+  return lines.join(QLatin1Char('\n'));
+}
+
+QJsonObject rasterInfoJson(const RasterLayer &layer)
+{
+  QJsonObject object;
+  object.insert(QStringLiteral("type"), QStringLiteral("raster"));
+  object.insert(QStringLiteral("name"), layer.name());
+  object.insert(QStringLiteral("source"), layer.sourcePath());
+  object.insert(QStringLiteral("driver"), layer.driverName());
+  object.insert(QStringLiteral("width"), layer.width());
+  object.insert(QStringLiteral("height"), layer.height());
+
+  QJsonArray bands;
+  QJsonArray noDataValues;
+  for (int i = 1; i <= layer.bandCount(); ++i)
+  {
+    const RasterLayer::BandInfo &info = layer.bands().at(i - 1);
+
+    QJsonObject bandObject;
+    bandObject.insert(QStringLiteral("index"), i);
+    bandObject.insert(QStringLiteral("type"), info.typeName);
+    bandObject.insert(QStringLiteral("color"), info.colorName);
+    if (info.hasNoData)
+      bandObject.insert(QStringLiteral("nodata"), info.noData);
+    else
+      bandObject.insert(QStringLiteral("nodata"), QJsonValue::Null);
+    bands.append(bandObject);
+
+    if (info.hasNoData)
+      noDataValues.append(info.noData);
+    else
+      noDataValues.append(QJsonValue::Null);
+  }
+  object.insert(QStringLiteral("bands"), bands);
+  object.insert(QStringLiteral("nodata"), noDataValues);
+
+  const Rectangle extent = layer.extent();
+  QJsonArray extentArray;
+  extentArray.append(extent.xMin());
+  extentArray.append(extent.yMin());
+  extentArray.append(extent.xMax());
+  extentArray.append(extent.yMax());
+  object.insert(QStringLiteral("extent"), extentArray);
+
+  QJsonObject crs;
+  crs.insert(QStringLiteral("description"), layer.crsDescription());
+  crs.insert(QStringLiteral("epsg"), layer.crsEpsg());
+  object.insert(QStringLiteral("crs"), crs);
+  object.insert(QStringLiteral("epsg"), layer.crsEpsg());
+
+  QJsonArray overviews;
+  for (int factor : layer.overviewFactors())
+    overviews.append(factor);
+  object.insert(QStringLiteral("overviews"), overviews);
 
   return object;
 }
@@ -446,6 +595,7 @@ int runBenchmark(const BenchRequest &request)
   qint64 storeFeatures = 0;
 
   int opened = 0;
+  int rasterLayers = 0;
   for (const QString &path : request.layerPaths)
   {
     if (!QFileInfo::exists(path))
@@ -454,12 +604,28 @@ int runBenchmark(const BenchRequest &request)
       return ExitFileNotFound;
     }
 
-    Error error;
-    const std::shared_ptr<VectorLayer> layer = VectorLayer::open(path, &error);
+    Error vectorError;
+    const std::shared_ptr<VectorLayer> layer = VectorLayer::open(path, &vectorError);
     if (!layer)
     {
-      writeErr(error.toText());
-      return ExitOpenFailed;
+      Error rasterError;
+      const std::shared_ptr<RasterLayer> raster = RasterLayer::open(path, &rasterError);
+      if (!raster)
+      {
+        writeErr(vectorError.toText());
+        return ExitOpenFailed;
+      }
+
+      canvas.addRasterLayer(raster, opened == 0);
+      layerNames << raster->name();
+      ++rasterLayers;
+      ++opened;
+      logVerbose(QStringLiteral("raster de medida: %1 (%2x%3, %4 bandas)")
+                   .arg(raster->name())
+                   .arg(raster->width())
+                   .arg(raster->height())
+                   .arg(raster->bandCount()));
+      continue;
     }
 
     if (useStore)
@@ -527,6 +693,9 @@ int runBenchmark(const BenchRequest &request)
   qint64 paintMs = 0;
   qint64 readFeatures = 0;
   qint64 skippedFeatures = 0;
+  qint64 rasterBytesLast = 0;
+  qint64 rasterPixelsLast = 0;
+  qint64 rasterBytesTotal = 0;
 
   for (int frame = 0; frame < request.frames; ++frame)
   {
@@ -543,6 +712,11 @@ int runBenchmark(const BenchRequest &request)
     paintMs += lastStats.paintMs;
     readFeatures += lastStats.readFeatures;
     skippedFeatures += lastStats.skippedFeatures;
+
+    const RasterRenderer::FrameStats rasterFrame = canvas.rasterFrameStats();
+    rasterBytesLast = rasterFrame.bytesRead;
+    rasterPixelsLast = rasterFrame.pixelsDrawn;
+    rasterBytesTotal += rasterFrame.bytesRead;
 
     if (image.isNull())
     {
@@ -602,6 +776,13 @@ int runBenchmark(const BenchRequest &request)
     store.insert(QStringLiteral("skipped_total"), static_cast<double>(skippedFeatures));
     store.insert(QStringLiteral("read_last_frame"), static_cast<double>(lastStats.readFeatures));
     root.insert(QStringLiteral("store"), store);
+
+    QJsonObject raster;
+    raster.insert(QStringLiteral("layers"), rasterLayers);
+    raster.insert(QStringLiteral("bytes_read_last_frame"), static_cast<double>(rasterBytesLast));
+    raster.insert(QStringLiteral("pixels_last_frame"), static_cast<double>(rasterPixelsLast));
+    raster.insert(QStringLiteral("bytes_read_total"), static_cast<double>(rasterBytesTotal));
+    root.insert(QStringLiteral("raster"), raster);
 
     QJsonObject phases;
     phases.insert(QStringLiteral("query_ms_per_frame"), static_cast<double>(queryMs) / static_cast<double>(frames));
@@ -1529,9 +1710,454 @@ int checkRefresh(const QStringList &layerPaths, const QSize &size, bool asJson)
   return ok ? ExitOk : ExitRenderFailed;
 }
 
-/** Construye el almacen indexado de una capa para los modos sin ventana. */
-void attachGeometryStore(const std::shared_ptr<VectorLayer> &layer, int destinationEpsg, bool enabled)
+/**
+ * Transforma un punto del SRC nativo de la capa a EPSG:4326 con GDAL.
+ * Es el oraculo independiente que usa --check-raster para comprobar el encuadre.
+ */
+bool transformRasterPointTo4326(const RasterLayer &layer, double x, double y, double *longitude, double *latitude)
 {
+  const OGRSpatialReference *source = layer.spatialRef();
+  if (!source)
+    return false;
+
+  OGRSpatialReference destination;
+  if (destination.importFromEPSG(4326) != OGRERR_NONE)
+    return false;
+  destination.SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
+
+  std::unique_ptr<OGRSpatialReference> sourceClone(source->Clone());
+  if (!sourceClone)
+    return false;
+  sourceClone->SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
+
+  std::unique_ptr<OGRCoordinateTransformation> transformation(
+    OGRCreateCoordinateTransformation(sourceClone.get(), &destination));
+  if (!transformation)
+    return false;
+
+  double px = x;
+  double py = y;
+  if (!transformation->Transform(1, &px, &py))
+    return false;
+
+  *longitude = px;
+  *latitude = py;
+  return true;
+}
+
+/**
+ * Diagnostico del dibujado raster (sin ventana).
+ *
+ * Comprueba pixel a pixel lo que una prueba de rendimiento no ve: cuadrantes en
+ * su sitio, extension, reproyeccion, NoData, estiramiento, paleta, redibujado
+ * al cambiar el estilo, invariante del paneo reutilizado y lectura acotada.
+ */
+int checkRaster(const QStringList &layerPaths, const QSize &size, bool asJson)
+{
+  if (layerPaths.isEmpty())
+  {
+    writeErr(QStringLiteral("Se necesita al menos un raster, por ejemplo:"));
+    writeErr(QStringLiteral("  minigis --check-raster -l data/sample/rasters/ortho_rgb.tif"));
+    return ExitUsage;
+  }
+
+  std::shared_ptr<RasterLayer> rgbLayer;
+  std::shared_ptr<RasterLayer> demLayer;
+  std::shared_ptr<RasterLayer> paletteLayer;
+
+  for (const QString &path : layerPaths)
+  {
+    if (!QFileInfo::exists(path))
+    {
+      writeErr(QStringLiteral("No existe el archivo: %1").arg(QDir::toNativeSeparators(path)));
+      return ExitFileNotFound;
+    }
+
+    Error error;
+    const std::shared_ptr<RasterLayer> layer = RasterLayer::open(path, &error);
+    if (!layer)
+    {
+      writeErr(error.toText());
+      return ExitOpenFailed;
+    }
+
+    const QString name = layer->name().toLower();
+    if (name.contains(QStringLiteral("ortho")))
+      rgbLayer = layer;
+    else if (name.contains(QStringLiteral("dem")))
+      demLayer = layer;
+    else if (name.contains(QStringLiteral("landcover")) || name.contains(QStringLiteral("palette")))
+      paletteLayer = layer;
+    else if (!rgbLayer)
+      rgbLayer = layer;
+  }
+
+  if (!rgbLayer && !demLayer && !paletteLayer)
+  {
+    writeErr(QStringLiteral("No hay capas raster que comprobar."));
+    return ExitNoLayers;
+  }
+
+  bool ok = true;
+  qint64 quadrantMatches = -1;
+  double extentError = -1.0;
+  double warpError = -1.0;
+  qint64 transparentPixels = -1;
+  qint64 percentClipRange = -1;
+  qint64 minMaxRange = -1;
+  qint64 paletteMatches = -1;
+  qint64 restyledPixels = -1;
+  qint64 reuseDifferences = -1;
+  qint64 bytesRead = -1;
+  qint64 bytesLimit = -1;
+
+  const auto check = [&ok](const QString &name, bool passed, const QString &detail) {
+    writeOut(QStringLiteral("%1 %2%3")
+               .arg(passed ? QStringLiteral("OK  ") : QStringLiteral("FALLO"))
+               .arg(name, detail.isEmpty() ? QString() : QStringLiteral(" — ") + detail));
+    if (!passed)
+      ok = false;
+  };
+
+  const QColor background(248, 248, 244);
+
+  // Misma transformacion que MapToPixel, para calcular donde debe caer cada cosa.
+  const auto mapToPixel = [](const Rectangle &extent, const QSize &imageSize, double x, double y) {
+    const double scale = std::min(static_cast<double>(imageSize.width()) / extent.width(),
+                                  static_cast<double>(imageSize.height()) / extent.height());
+    const double offsetX = (imageSize.width() - extent.width() * scale) / 2.0;
+    const double offsetY = (imageSize.height() - extent.height() * scale) / 2.0;
+    return QPointF(offsetX + (x - extent.xMin()) * scale, offsetY + (extent.yMax() - y) * scale);
+  };
+
+  const auto pixelAt = [](const QImage &image, const QPointF &point) {
+    const int x = std::clamp(static_cast<int>(std::lround(point.x())), 0, image.width() - 1);
+    const int y = std::clamp(static_cast<int>(std::lround(point.y())), 0, image.height() - 1);
+    return image.pixelColor(x, y);
+  };
+
+  const auto sameColor = [](const QColor &left, const QColor &right, int tolerance) {
+    return std::abs(left.red() - right.red()) <= tolerance
+           && std::abs(left.green() - right.green()) <= tolerance
+           && std::abs(left.blue() - right.blue()) <= tolerance;
+  };
+
+  const auto isBackground = [&background](const QColor &color) {
+    return (color.rgb() & 0x00FFFFFF) == (background.rgb() & 0x00FFFFFF);
+  };
+
+  const auto contentBounds = [&isBackground](const QImage &image, QRect *rect) {
+    int minX = std::numeric_limits<int>::max();
+    int minY = std::numeric_limits<int>::max();
+    int maxX = -1;
+    int maxY = -1;
+    for (int y = 0; y < image.height(); ++y)
+    {
+      for (int x = 0; x < image.width(); ++x)
+      {
+        if (isBackground(image.pixelColor(x, y)))
+          continue;
+        minX = std::min(minX, x);
+        minY = std::min(minY, y);
+        maxX = std::max(maxX, x);
+        maxY = std::max(maxY, y);
+      }
+    }
+    if (maxX < 0)
+      return false;
+    *rect = QRect(QPoint(minX, minY), QPoint(maxX, maxY));
+    return true;
+  };
+
+  // Rango de gris p2..p98 de lo dibujado (ignora el fondo), que es lo que el ojo
+  // percibe como contraste: un unico pixel atipico no debe dominar la medida.
+  const auto grayPercentileRange = [&isBackground](const QImage &image) {
+    std::vector<int> values;
+    values.reserve(static_cast<size_t>(image.width()) * image.height());
+    for (int y = 0; y < image.height(); ++y)
+    {
+      for (int x = 0; x < image.width(); ++x)
+      {
+        const QColor color = image.pixelColor(x, y);
+        if (!isBackground(color))
+          values.push_back(color.red());
+      }
+    }
+    if (values.empty())
+      return qint64(0);
+    std::sort(values.begin(), values.end());
+    const auto percentile = [&values](double fraction) {
+      const size_t last = values.size() - 1;
+      return values[static_cast<size_t>(std::lround(fraction * last))];
+    };
+    return qint64(percentile(0.98) - percentile(0.02));
+  };
+
+  // --- 1) Ortofoto: cuadrantes, extension, redibujado, paneo y lectura ------
+  if (rgbLayer)
+  {
+    const RasterStyle savedStyle = rgbLayer->style();
+    const bool savedVisible = rgbLayer->isVisible();
+
+    RasterStyle style = savedStyle;
+    style.stretch = RasterStyle::Stretch::None;
+    style.opacity = 100;
+    style.useNodata = true;
+    if (rgbLayer->bandCount() >= 3)
+    {
+      style.bandMode = RasterStyle::BandMode::Rgb;
+      style.redBand = 1;
+      style.greenBand = 2;
+      style.blueBand = 3;
+      style.alphaBand = rgbLayer->bandCount() >= 4 ? 4 : 0;
+    }
+    rgbLayer->setStyle(style);
+
+    const Rectangle extent(-4.85, 39.8, -2.75, 41.2);
+
+    MapCanvas canvas;
+    canvas.setDestinationEpsg(4326);
+    canvas.resize(size);
+    canvas.addRasterLayer(rgbLayer, false);
+    canvas.setExtent(extent);
+    const QImage image = canvas.renderToImage(size, false);
+
+    struct QuadrantSample
+    {
+      const char *name;
+      double longitude;
+      double latitude;
+      QColor color;
+    };
+    const QuadrantSample quadrants[4] = {
+      {"NO", -4.2, 40.85, QColor(220, 50, 50)},
+      {"NE", -3.4, 40.85, QColor(50, 180, 70)},
+      {"SO", -4.2, 40.15, QColor(40, 80, 200)},
+      {"SE", -3.4, 40.15, QColor(245, 245, 245)}};
+
+    quadrantMatches = 0;
+    for (const QuadrantSample &sample : quadrants)
+    {
+      const QColor color = pixelAt(image, mapToPixel(extent, size, sample.longitude, sample.latitude));
+      if (sameColor(color, sample.color, 2))
+        ++quadrantMatches;
+    }
+    check(QStringLiteral("cuadrantes en su posicion"), quadrantMatches == 4,
+          QStringLiteral("%1/4 colores esperados").arg(quadrantMatches));
+
+    QRect bounds;
+    if (contentBounds(image, &bounds))
+    {
+      const QPointF topLeft = mapToPixel(extent, size, -4.6, 41.2);
+      const QPointF bottomRight = mapToPixel(extent, size, -3.0, 39.8);
+      extentError = std::max({std::fabs(bounds.left() - topLeft.x()), std::fabs(bounds.right() - bottomRight.x()),
+                              std::fabs(bounds.top() - topLeft.y()),
+                              std::fabs(bounds.bottom() - bottomRight.y())});
+    }
+    check(QStringLiteral("extension del raster"), extentError >= 0.0 && extentError <= 1.5,
+          QStringLiteral("error maximo %1 px").arg(QString::number(extentError, 'f', 1)));
+
+    // Redibujado: cambiar el estilo debe verse sin mover la vista (revision).
+    const QImage base = canvas.renderToImage(size, false);
+    RasterStyle restyle = style;
+    restyle.opacity = 40;
+    rgbLayer->setStyle(restyle);
+    const QImage restyled = canvas.renderToImage(size, false);
+    restyledPixels = countVisibleDifferences(base, restyled, 0, nullptr);
+    check(QStringLiteral("el cambio de estilo se ve en el mapa"), restyledPixels > 0,
+          QStringLiteral("%1 pixeles distintos").arg(restyledPixels));
+
+    rgbLayer->setVisible(false);
+    const QImage hidden = canvas.renderToImage(size, false);
+    const qint64 hiddenPainted = countPaintedPixels(hidden);
+    check(QStringLiteral("la capa oculta desaparece del mapa"), hiddenPainted == 0,
+          QStringLiteral("%1 pixeles pintados").arg(hiddenPainted));
+
+    rgbLayer->setVisible(true);
+    const QImage shown = canvas.renderToImage(size, false);
+    check(QStringLiteral("al volver a mostrarla se recupera el dibujo"), shown == restyled, QString());
+
+    // Paneo reutilizado == redibujado completo (0 pixeles en calidad).
+    canvas.setExtent(extent);
+    canvas.refreshMap();
+    const QImage beforePan = canvas.renderToImage(size, false);
+    const double shift = 37.0 * canvas.mapUnitsPerPixel();
+    canvas.setExtent(Rectangle(extent.xMin() + shift, extent.yMin(), extent.xMax() + shift, extent.yMax()));
+    const QImage reused = canvas.renderToImage(size, false);
+    canvas.refreshMap();
+    const QImage full = canvas.renderToImage(size, false);
+    reuseDifferences = countVisibleDifferences(reused, full, 0, nullptr);
+    check(QStringLiteral("el paneo reutilizado coincide con el redibujado"), reuseDifferences == 0,
+          QStringLiteral("%1 pixeles distintos de %2")
+            .arg(reuseDifferences)
+            .arg(static_cast<qint64>(size.width()) * size.height()));
+
+    bytesRead = canvas.rasterFrameStats().bytesRead;
+    bytesLimit = static_cast<qint64>(size.width()) * size.height() * rgbLayer->bandCount() * 4;
+    check(QStringLiteral("lectura acotada al lienzo"), bytesRead >= 0 && bytesRead <= bytesLimit,
+          QStringLiteral("%1 MB por cuadro (limite %2 MB)")
+            .arg(QString::number(static_cast<double>(bytesRead) / (1024.0 * 1024.0), 'f', 1))
+            .arg(QString::number(static_cast<double>(bytesLimit) / (1024.0 * 1024.0), 'f', 1)));
+
+    Q_UNUSED(beforePan);
+
+    rgbLayer->setStyle(savedStyle);
+    rgbLayer->setVisible(savedVisible);
+  }
+
+  // --- 2) DEM: reproyeccion, NoData y estiramiento --------------------------
+  if (demLayer)
+  {
+    const RasterStyle savedStyle = demLayer->style();
+
+    RasterStyle style = savedStyle;
+    style.stretch = RasterStyle::Stretch::PercentClip;
+    style.useNodata = true;
+    demLayer->setStyle(style);
+
+    const Rectangle extent(-3.83078, 40.37419, -3.80678, 40.39019);
+
+    MapCanvas canvas;
+    canvas.setDestinationEpsg(4326);
+    canvas.resize(size);
+    canvas.addRasterLayer(demLayer, false);
+    canvas.setExtent(extent);
+
+    const QImage percentImage = canvas.renderToImage(size, false);
+
+    const double *geoTransform = demLayer->geoTransform();
+    double longitude = 0.0;
+    double latitude = 0.0;
+    const bool transformed =
+      transformRasterPointTo4326(*demLayer, geoTransform[0] + demLayer->width() * geoTransform[1],
+                                 geoTransform[3] + demLayer->height() * geoTransform[5], &longitude, &latitude);
+
+    warpError = -1.0;
+    if (transformed)
+    {
+      // Se recorre la diagonal desde fuera hacia dentro: la distancia al primer
+      // pixel pintado es el error de colocacion de esa esquina.
+      const QPointF corner = mapToPixel(extent, size, longitude, latitude);
+      for (double distance = 6.0; distance >= -6.0; distance -= 0.5)
+      {
+        const QPointF sample = corner + QPointF(distance * 0.70710678, distance * 0.70710678);
+        if (!isBackground(pixelAt(percentImage, sample)))
+        {
+          warpError = std::fabs(distance);
+          break;
+        }
+      }
+    }
+    check(QStringLiteral("reproyeccion UTM->4326"), warpError >= 0.0 && warpError <= 1.5,
+          QStringLiteral("error %1 px").arg(QString::number(warpError, 'f', 1)));
+
+    // NoData: un bloque de 5x5 alrededor del pixel (2,2) del archivo debe ser fondo.
+    transparentPixels = -1;
+    double noDataLongitude = 0.0;
+    double noDataLatitude = 0.0;
+    if (transformRasterPointTo4326(*demLayer, geoTransform[0] + 2.5 * geoTransform[1],
+                                   geoTransform[3] + 2.5 * geoTransform[5], &noDataLongitude, &noDataLatitude))
+    {
+      const QPointF center = mapToPixel(extent, size, noDataLongitude, noDataLatitude);
+      transparentPixels = 0;
+      for (int dy = -2; dy <= 2; ++dy)
+      {
+        for (int dx = -2; dx <= 2; ++dx)
+        {
+          if (isBackground(pixelAt(percentImage, center + QPointF(dx, dy))))
+            ++transparentPixels;
+        }
+      }
+    }
+    check(QStringLiteral("NoData transparente"), transparentPixels == 25,
+          QStringLiteral("%1 de 25 pixeles de fondo").arg(transparentPixels));
+
+    percentClipRange = grayPercentileRange(percentImage);
+
+    RasterStyle minMaxStyle = style;
+    minMaxStyle.stretch = RasterStyle::Stretch::MinMax;
+    demLayer->setStyle(minMaxStyle);
+    const QImage minMaxImage = canvas.renderToImage(size, false);
+    minMaxRange = grayPercentileRange(minMaxImage);
+
+    check(QStringLiteral("estiramiento por percentiles"), percentClipRange >= 200 && minMaxRange <= 10,
+          QStringLiteral("rango %1 (min-max: %2)").arg(percentClipRange).arg(minMaxRange));
+
+    demLayer->setStyle(savedStyle);
+  }
+
+  // --- 3) Paleta -----------------------------------------------------------
+  if (paletteLayer)
+  {
+    const Rectangle extent(-4.85, 39.8, -2.75, 41.2);
+
+    MapCanvas canvas;
+    canvas.setDestinationEpsg(4326);
+    canvas.resize(size);
+    canvas.addRasterLayer(paletteLayer, false);
+    canvas.setExtent(extent);
+    const QImage image = canvas.renderToImage(size, false);
+
+    struct PaletteSample
+    {
+      const char *name;
+      int column;
+      QColor color;
+    };
+    const PaletteSample samples[3] = {
+      {"bosque", 10, QColor(70, 140, 70)},
+      {"cultivo", 64, QColor(200, 180, 90)},
+      {"agua", 120, QColor(70, 110, 180)}};
+
+    paletteMatches = 0;
+    for (const PaletteSample &sample : samples)
+    {
+      const double longitude = -4.6 + (sample.column + 0.5) / 128.0 * 1.6;
+      const QColor color = pixelAt(image, mapToPixel(extent, size, longitude, 40.5));
+      if (sameColor(color, sample.color, 0))
+        ++paletteMatches;
+    }
+    check(QStringLiteral("paleta del archivo"), paletteMatches == 3,
+          QStringLiteral("%1/3 clases con su color").arg(paletteMatches));
+
+    // El indice 0 (NoData) no debe pintarse de negro.
+    qint64 blackPixels = 0;
+    for (int y = 0; y < image.height(); ++y)
+    {
+      for (int x = 0; x < image.width(); ++x)
+      {
+        const QColor color = image.pixelColor(x, y);
+        if (color.red() == 0 && color.green() == 0 && color.blue() == 0)
+          ++blackPixels;
+      }
+    }
+    check(QStringLiteral("el NoData de la paleta no se pinta"), blackPixels == 0,
+          QStringLiteral("%1 pixeles negros").arg(blackPixels));
+  }
+
+  if (asJson)
+  {
+    QJsonObject root;
+    root.insert(QStringLiteral("ok"), ok);
+    root.insert(QStringLiteral("quadrants"), static_cast<double>(quadrantMatches));
+    root.insert(QStringLiteral("extent_error_px"), extentError);
+    root.insert(QStringLiteral("warp_error_px"), warpError);
+    root.insert(QStringLiteral("nodata_pixels"), static_cast<double>(transparentPixels));
+    root.insert(QStringLiteral("percentclip_range"), static_cast<double>(percentClipRange));
+    root.insert(QStringLiteral("minmax_range"), static_cast<double>(minMaxRange));
+    root.insert(QStringLiteral("palette_classes"), static_cast<double>(paletteMatches));
+    root.insert(QStringLiteral("restyled_pixels"), static_cast<double>(restyledPixels));
+    root.insert(QStringLiteral("reuse_differences"), static_cast<double>(reuseDifferences));
+    root.insert(QStringLiteral("bytes_read"), static_cast<double>(bytesRead));
+    root.insert(QStringLiteral("bytes_limit"), static_cast<double>(bytesLimit));
+    writeOut(QString::fromUtf8(QJsonDocument(root).toJson(QJsonDocument::Indented)).trimmed());
+  }
+
+  return ok ? ExitOk : ExitRenderFailed;
+}
+
+/** Construye el almacen indexado de una capa para los modos sin ventana. */
+void attachGeometryStore(const std::shared_ptr<VectorLayer> &layer, int destinationEpsg, bool enabled){
   if (!enabled || !layer)
     return;
 
@@ -1584,6 +2210,7 @@ int main(int argc, char *argv[])
              || argument == QStringLiteral("--bench")
              || argument == QStringLiteral("--index-shp")
              || argument == QStringLiteral("--check-refresh")
+             || argument == QStringLiteral("--check-raster")
              || argument == QStringLiteral("--help") || argument == QStringLiteral("-h")
              || argument == QStringLiteral("--version") || argument == QStringLiteral("-v"))
     {
@@ -1672,10 +2299,18 @@ int main(int argc, char *argv[])
   const QCommandLineOption snapshotDialogOption(QStringLiteral("snapshot-dialog"),
                                                 QStringLiteral("Captura el dialogo de etiquetas a <archivo.png> y sale"),
                                                 QStringLiteral("archivo.png"));
+  const QCommandLineOption snapshotRasterDialogOption(
+    QStringLiteral("snapshot-raster-dialog"),
+    QStringLiteral("Captura el dialogo de estilo raster a <archivo.png> y sale"),
+    QStringLiteral("archivo.png"));
   const QCommandLineOption checkLabelsOption(QStringLiteral("check-labels"),
                                              QStringLiteral("Comprueba el etiquetado (campos, escala, solapes, cache)"));
   const QCommandLineOption checkRefreshOption(QStringLiteral("check-refresh"),
                                               QStringLiteral("Comprueba que el mapa se redibuja al cambiar simbologia o visibilidad"));
+  const QCommandLineOption checkRasterOption(
+    QStringLiteral("check-raster"),
+    QStringLiteral("Comprueba el dibujado raster: cuadrantes, extension, reproyeccion, NoData, contraste, "
+                   "paleta, redibujado, paneo y lectura acotada"));
   const QCommandLineOption withAttributesOption(QStringLiteral("with-attributes"),
                                                QStringLiteral("Con --snapshot-window: incluye la tabla de atributos en la captura"));
   const QCommandLineOption indexShpOption(QStringLiteral("index-shp"),
@@ -1684,13 +2319,24 @@ int main(int argc, char *argv[])
   const QCommandLineOption readBudgetOption(QStringLiteral("read-budget"),
                                             QStringLiteral("Elementos leidos del archivo por cuadro en capas indexadas por envolventes (0 = sin limite)"),
                                             QStringLiteral("n"), QStringLiteral("40000"));
+  const QCommandLineOption rasterStretchOption(QStringLiteral("raster-stretch"),
+                                               QStringLiteral("Estiramiento de contraste de los rasters: none | minmax | percentclip"),
+                                               QStringLiteral("modo"));
+  const QCommandLineOption rasterBandsOption(QStringLiteral("raster-bands"),
+                                             QStringLiteral("Bandas del raster: R,G,B o una sola (escala de grises)"),
+                                             QStringLiteral("bandas"));
+  const QCommandLineOption rasterOpacityOption(QStringLiteral("raster-opacity"),
+                                               QStringLiteral("Opacidad de los rasters (0-100)"),
+                                               QStringLiteral("0-100"), QStringLiteral("100"));
 
   parser.addOptions({infoOption, jsonOption, driversOption, snapshotOption, snapshotWindowOption,
                      layerOption, extentOption, sizeOption, crsOption, maxFeaturesOption, verboseOption,
                      benchOption, benchScenarioOption, benchBudgetOption, rendererOption, vertexBudgetOption,
                      spatialFilterOption, readBudgetOption, indexShpOption, withAttributesOption,
-                     checkRefreshOption, checkLabelsOption, snapshotDialogOption, labelFieldOption, labelSizeOption,
-                     labelMapSizeOption, noLabelsOption});
+                     checkRefreshOption, checkLabelsOption, snapshotDialogOption, snapshotRasterDialogOption,
+                     checkRasterOption, labelFieldOption, labelSizeOption,
+                     labelMapSizeOption, noLabelsOption, rasterStretchOption, rasterBandsOption,
+                     rasterOpacityOption});
   parser.addPositionalArgument(QStringLiteral("archivo"),
                               QStringLiteral("Capas a cargar (opcional, se puede repetir)"),
                               QStringLiteral("[archivo...]"));
@@ -1748,6 +2394,66 @@ int main(int argc, char *argv[])
     labelOptions.enabled = !parser.isSet(noLabelsOption);
     if (labelOptions.size <= 0.0)
       labelOptions.size = 10.0;
+  }
+
+  // Opciones de raster (se aplican a cada capa raster que se abra en los modos
+  // sin ventana; en la interfaz se cambian con el dialogo de estilo).
+  RasterOptions rasterOptions;
+  if (parser.isSet(rasterStretchOption))
+  {
+    const QString mode = parser.value(rasterStretchOption).trimmed().toLower();
+    if (mode == QStringLiteral("none"))
+      rasterOptions.stretch = RasterStyle::Stretch::None;
+    else if (mode == QStringLiteral("minmax"))
+      rasterOptions.stretch = RasterStyle::Stretch::MinMax;
+    else if (mode == QStringLiteral("percentclip"))
+      rasterOptions.stretch = RasterStyle::Stretch::PercentClip;
+    else
+    {
+      writeErr(QStringLiteral("Estiramiento no soportado: «%1». Usa none, minmax o percentclip.")
+                 .arg(parser.value(rasterStretchOption)));
+      return ExitUsage;
+    }
+    rasterOptions.stretchSet = true;
+  }
+
+  if (parser.isSet(rasterBandsOption))
+  {
+    const QStringList parts =
+      parser.value(rasterBandsOption).split(QLatin1Char(','), Qt::SkipEmptyParts);
+    if (parts.isEmpty() || parts.size() > 3)
+    {
+      writeErr(QStringLiteral("Bandas no validas: «%1». Ejemplo: --raster-bands 1 o --raster-bands 1,2,3")
+                 .arg(parser.value(rasterBandsOption)));
+      return ExitUsage;
+    }
+
+    for (const QString &part : parts)
+    {
+      bool ok = false;
+      const int band = part.trimmed().toInt(&ok);
+      if (!ok || band < 1)
+      {
+        writeErr(QStringLiteral("Banda no valida: «%1». Indica numeros de banda empezando en 1.").arg(part));
+        return ExitUsage;
+      }
+      rasterOptions.bands.append(band);
+    }
+    rasterOptions.bandsSet = true;
+  }
+
+  if (parser.isSet(rasterOpacityOption))
+  {
+    bool ok = false;
+    const int opacity = parser.value(rasterOpacityOption).toInt(&ok);
+    if (!ok || opacity < 0 || opacity > 100)
+    {
+      writeErr(QStringLiteral("Opacidad no valida: «%1». Usa un valor entre 0 y 100.")
+                 .arg(parser.value(rasterOpacityOption)));
+      return ExitUsage;
+    }
+    rasterOptions.opacity = opacity;
+    rasterOptions.opacitySet = true;
   }
 
   const QStringList layerPaths = collectLayerPaths(parser);
@@ -1818,6 +2524,62 @@ int main(int argc, char *argv[])
 
     writeOut(QStringLiteral("Imagen escrita: %1").arg(QDir::toNativeSeparators(dialogPath)));
     return ExitOk;
+  }
+
+  // Captura del dialogo de estilo raster: permite revisar el diseno sin abrir
+  // la aplicacion (mismo patron que --snapshot-dialog para etiquetas).
+  if (parser.isSet(snapshotRasterDialogOption))
+  {
+    if (layerPaths.isEmpty())
+    {
+      writeErr(QStringLiteral("Se necesita un raster: minigis --snapshot-raster-dialog d.png -l capa.tif"));
+      return ExitUsage;
+    }
+
+    const QString path = layerPaths.first();
+    if (!QFileInfo::exists(path))
+    {
+      writeErr(QStringLiteral("No existe el archivo: %1").arg(QDir::toNativeSeparators(path)));
+      return ExitFileNotFound;
+    }
+
+    Error error;
+    const std::shared_ptr<RasterLayer> raster = RasterLayer::open(path, &error);
+    if (!raster)
+    {
+      writeErr(error.toText());
+      return ExitOpenFailed;
+    }
+
+    applyRasterOptions(raster, rasterOptions);
+
+    RasterStyleDialog dialog(raster->name(), raster->bandLabels(), raster->style(), nullptr);
+    dialog.resize(560, 520);
+    dialog.show();
+    QCoreApplication::processEvents();
+
+    const QString dialogPath = parser.value(snapshotRasterDialogOption);
+    if (!dialog.grab().save(dialogPath))
+    {
+      writeErr(QStringLiteral("No se pudo escribir la imagen: %1").arg(QDir::toNativeSeparators(dialogPath)));
+      return ExitRenderFailed;
+    }
+
+    writeOut(QStringLiteral("Imagen escrita: %1").arg(QDir::toNativeSeparators(dialogPath)));
+    return ExitOk;
+  }
+
+  // Diagnostico del dibujado raster (sin ventana).
+  if (parser.isSet(checkRasterOption))
+  {
+    QSize checkSize(900, 600);
+    if (parser.isSet(sizeOption) && !parseSize(parser.value(sizeOption), &checkSize))
+    {
+      writeErr(QStringLiteral("Tamano no valido: «%1». Ejemplo: --size 1200x800").arg(parser.value(sizeOption)));
+      return ExitUsage;
+    }
+
+    return checkRaster(layerPaths, checkSize, parser.isSet(jsonOption));
   }
 
   if (parser.isSet(checkLabelsOption) || parser.isSet(checkRefreshOption))
@@ -1930,16 +2692,47 @@ int main(int argc, char *argv[])
 
       Error error;
       const std::shared_ptr<VectorLayer> layer = VectorLayer::open(path, &error);
-      if (!layer)
+      if (layer)
       {
-        writeErr(error.toText());
-        return ExitOpenFailed;
+        if (parser.isSet(jsonOption))
+          jsonLayers.append(layerInfoJson(*layer));
+        else
+          writeOut(layerInfoText(*layer));
+        continue;
       }
 
-      if (parser.isSet(jsonOption))
-        jsonLayers.append(layerInfoJson(*layer));
-      else
-        writeOut(layerInfoText(*layer));
+      // No era vectorial: se intenta como raster. El orden importa: un
+      // GeoPackage con las dos cosas se informa como vectorial (documentado).
+      Error rasterError;
+      const std::shared_ptr<RasterLayer> raster = RasterLayer::open(path, &rasterError);
+      if (raster)
+      {
+        if (parser.isSet(jsonOption))
+          jsonLayers.append(rasterInfoJson(*raster));
+        else
+          writeOut(rasterInfoText(*raster));
+
+        // Diagnostico: extension ya reproyectada al SRC del lienzo, para
+        // comprobar el encuadre sin abrir la ventana (-V).
+        logVerbose(QStringLiteral("%1: extension en EPSG:4326 = %2")
+                     .arg(raster->name(), raster->extentInEpsg(4326).toString()));
+        for (int band = 1; band <= raster->bandCount(); ++band)
+        {
+          const RasterLayer::BandStats &stats = raster->bandStats(band);
+          if (stats.valid)
+            logVerbose(QStringLiteral("%1: banda %2 rango [%3, %4], percentiles [%5, %6]")
+                         .arg(raster->name())
+                         .arg(band)
+                         .arg(stats.min)
+                         .arg(stats.max)
+                         .arg(stats.p2)
+                         .arg(stats.p98));
+        }
+        continue;
+      }
+
+      writeErr(error.toText());
+      return ExitOpenFailed;
     }
 
     if (parser.isSet(jsonOption))
@@ -2005,7 +2798,8 @@ int main(int argc, char *argv[])
         return ExitOpenFailed;
       }
 
-      const int opened = static_cast<int>(window.canvas()->layers().size());
+      const int opened = static_cast<int>(window.canvas()->layers().size()
+                                          + window.canvas()->rasterLayers().size());
       if (opened == 0)
       {
         writeErr(QStringLiteral("No hay capas que capturar: indica una con --layer <archivo> o como argumento."));
@@ -2022,6 +2816,17 @@ int main(int argc, char *argv[])
       if (parser.isSet(withAttributesOption))
       {
         window.showAttributeTable(true);
+        QApplication::processEvents();
+      }
+
+      // Deja que el layout de la ventana (paneles, docks) fije el tamano final
+      // del lienzo antes de encuadrar: si no, el zoom se calcula con un tamano
+      // provisional y el mapa queda descentrado. Se procesan eventos hasta que
+      // el tamano se estabiliza.
+      QSize lastCanvasSize;
+      for (int iteration = 0; iteration < 5 && window.canvas()->size() != lastCanvasSize; ++iteration)
+      {
+        lastCanvasSize = window.canvas()->size();
         QApplication::processEvents();
       }
 
@@ -2070,17 +2875,44 @@ int main(int argc, char *argv[])
 
       Error error;
       const std::shared_ptr<VectorLayer> layer = VectorLayer::open(path, &error);
-      if (!layer)
+      if (layer)
+      {
+        applyLabelOptions(layer, labelOptions);
+        attachGeometryStore(layer, destinationEpsg, useStore);
+        canvas.addLayer(layer, opened == 0);
+        ++opened;
+        logVerbose(QStringLiteral("capa cargada: %1 (%2 elementos)").arg(layer->name()).arg(layer->featureCount()));
+        continue;
+      }
+
+      Error rasterError;
+      const std::shared_ptr<RasterLayer> raster = RasterLayer::open(path, &rasterError);
+      if (!raster)
       {
         writeErr(error.toText());
         return ExitOpenFailed;
       }
 
-      applyLabelOptions(layer, labelOptions);
-      attachGeometryStore(layer, destinationEpsg, useStore);
-      canvas.addLayer(layer, opened == 0);
+      for (int band : rasterOptions.bands)
+      {
+        if (band < 1 || band > raster->bandCount())
+        {
+          writeErr(QStringLiteral("La banda %1 no existe en «%2» (tiene %3 bandas).")
+                     .arg(band)
+                     .arg(raster->name())
+                     .arg(raster->bandCount()));
+          return ExitUsage;
+        }
+      }
+      applyRasterOptions(raster, rasterOptions);
+
+      canvas.addRasterLayer(raster, opened == 0);
       ++opened;
-      logVerbose(QStringLiteral("capa cargada: %1 (%2 elementos)").arg(layer->name()).arg(layer->featureCount()));
+      logVerbose(QStringLiteral("raster cargado: %1 (%2x%3, %4 bandas)")
+                   .arg(raster->name())
+                   .arg(raster->width())
+                   .arg(raster->height())
+                   .arg(raster->bandCount()));
     }
 
     if (opened == 0)

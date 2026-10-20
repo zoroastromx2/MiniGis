@@ -6,10 +6,17 @@ set(MINIGIS_CORE_SRCS
   minigiserror.h
   minigisgdalinit.h
   minigisgdalinit.cpp
+  minigislayerkind.h
+  minigislayerkind.cpp
   minigisrectangle.h
   minigisrectangle.cpp
   minigisstyle.h
   minigisstyle.cpp
+  minigisrasterstyle.h
+  minigisrasterlayer.h
+  minigisrasterlayer.cpp
+  minigisrasterrenderer.h
+  minigisrasterrenderer.cpp
   minigisvectorlayer.h
   minigisvectorlayer.cpp
   minigisgeometrystore.h

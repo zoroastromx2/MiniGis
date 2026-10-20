@@ -146,6 +146,95 @@ elseif(MODE STREQUAL "check-labels")
     message(STATUS "minigis --check-labels OK")
   endif()
 
+elseif(MODE STREQUAL "raster-info")
+  # Contrato de --info para raster: tipo, tamano, bandas, SRC y NoData.
+  execute_process(
+    COMMAND "${MINIGIS_EXE}" --info --json --layer "${SAMPLE}" --layer "${SAMPLE2}"
+    RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+  if(NOT _rc EQUAL EXPECT_EXIT)
+    message(FATAL_ERROR "minigis --info raster fallo (codigo ${_rc}, esperado ${EXPECT_EXIT})\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")
+  endif()
+  if(EXPECT_EXIT EQUAL 0)
+    foreach(_key IN ITEMS "\"type\": \"raster\"" "\"width\": 256" "\"index\": 3" "\"epsg\": 25830")
+      if(NOT _out MATCHES "${_key}")
+        message(FATAL_ERROR "La salida JSON del raster no contiene ${_key}:\n${_out}")
+      endif()
+    endforeach()
+    message(STATUS "minigis --info raster OK")
+  endif()
+
+elseif(MODE STREQUAL "check-raster")
+  # Contrato del dibujado raster: todas las comprobaciones deben pasar.
+  execute_process(
+    COMMAND "${MINIGIS_EXE}" --check-raster --layer "${SAMPLE}" --layer "${SAMPLE2}" --layer "${SAMPLE3}"
+            --size 900x600
+    RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+  if(NOT _rc EQUAL EXPECT_EXIT)
+    message(FATAL_ERROR "minigis --check-raster fallo (codigo ${_rc}, esperado ${EXPECT_EXIT})\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")
+  endif()
+
+  if(EXPECT_EXIT EQUAL 0)
+    if(_out MATCHES "FALLO")
+      message(FATAL_ERROR "El dibujado raster no cumple su contrato:\n${_out}")
+    endif()
+    foreach(_key IN ITEMS "cuadrantes en su posicion" "extension del raster" "reproyeccion UTM"
+                          "NoData transparente" "estiramiento por percentiles" "paleta del archivo"
+                          "el cambio de estilo se ve en el mapa" "paneo reutilizado" "lectura acotada")
+      if(NOT _out MATCHES "${_key}")
+        message(FATAL_ERROR "La comprobacion «${_key}» no se ejecuto:\n${_out}")
+      endif()
+    endforeach()
+    message(STATUS "minigis --check-raster OK")
+  endif()
+
+elseif(MODE STREQUAL "raster-dialog")
+  # Captura del dialogo de estilo raster (se comprueba que se escribe y no esta vacio).
+  get_filename_component(_outdir "${OUT}" DIRECTORY)
+  file(MAKE_DIRECTORY "${_outdir}")
+  if(EXISTS "${OUT}")
+    file(REMOVE "${OUT}")
+  endif()
+  execute_process(
+    COMMAND "${MINIGIS_EXE}" --snapshot-raster-dialog "${OUT}" --layer "${SAMPLE}"
+    RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+  if(NOT _rc EQUAL EXPECT_EXIT)
+    message(FATAL_ERROR "minigis --snapshot-raster-dialog fallo (codigo ${_rc})\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")
+  endif()
+  if(EXPECT_EXIT EQUAL 0)
+    if(NOT EXISTS "${OUT}")
+      message(FATAL_ERROR "No se genero la captura del dialogo: ${OUT}\nSTDOUT:\n${_out}")
+    endif()
+    file(SIZE "${OUT}" _size)
+    if(_size LESS 4000)
+      message(FATAL_ERROR "La captura del dialogo parece vacia (${_size} bytes)")
+    endif()
+    message(STATUS "minigis --snapshot-raster-dialog OK: ${_size} bytes")
+  endif()
+
+elseif(MODE STREQUAL "snapshot-window")
+  # Captura de la interfaz con raster + vectorial: valida que ambos se cargan.
+  get_filename_component(_outdir "${OUT}" DIRECTORY)
+  file(MAKE_DIRECTORY "${_outdir}")
+  if(EXISTS "${OUT}")
+    file(REMOVE "${OUT}")
+  endif()
+  execute_process(
+    COMMAND "${MINIGIS_EXE}" --snapshot-window "${OUT}" --layer "${SAMPLE}" --layer "${SAMPLE2}" --size 1000x700
+    RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+  if(NOT _rc EQUAL EXPECT_EXIT)
+    message(FATAL_ERROR "minigis --snapshot-window fallo (codigo ${_rc})\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")
+  endif()
+  if(EXPECT_EXIT EQUAL 0)
+    if(NOT EXISTS "${OUT}")
+      message(FATAL_ERROR "No se genero la captura de la interfaz: ${OUT}\nSTDOUT:\n${_out}")
+    endif()
+    file(SIZE "${OUT}" _size)
+    if(_size LESS 5000)
+      message(FATAL_ERROR "La captura de la interfaz parece vacia (${_size} bytes)")
+    endif()
+    message(STATUS "minigis --snapshot-window OK: ${_size} bytes")
+  endif()
+
 else()
   message(FATAL_ERROR "MODE no soportado: ${MODE}")
 endif()

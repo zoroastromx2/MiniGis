@@ -105,3 +105,65 @@ set_tests_properties(minigis.etiquetas PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=o
 set_tests_properties(minigis.bench PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 set_tests_properties(minigis.indice-envolventes PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 set_tests_properties(minigis.redibujado PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# --- Raster ---------------------------------------------------------------
+# Contrato de --info y del dibujado raster, mas las capturas de interfaz y del
+# dialogo de estilo. Los datos son los GeoTIFF de data/sample/rasters.
+set(MINIGIS_SAMPLE_RASTER_DIR "${MINIGIS_ROOT_DIR}/data/sample/rasters")
+set(MINIGIS_RASTER_ORTHO "${MINIGIS_SAMPLE_RASTER_DIR}/ortho_rgb.tif")
+set(MINIGIS_RASTER_DEM "${MINIGIS_SAMPLE_RASTER_DIR}/dem_utm30.tif")
+set(MINIGIS_RASTER_PALETTE "${MINIGIS_SAMPLE_RASTER_DIR}/landcover.tif")
+
+add_test(NAME minigis.raster-info
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DSAMPLE=${MINIGIS_RASTER_ORTHO}"
+          "-DSAMPLE2=${MINIGIS_RASTER_DEM}"
+          -DMODE=raster-info
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
+add_test(NAME minigis.raster-dibujo
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DSAMPLE=${MINIGIS_RASTER_ORTHO}"
+          "-DSAMPLE2=${MINIGIS_RASTER_DEM}"
+          "-DSAMPLE3=${MINIGIS_RASTER_PALETTE}"
+          -DMODE=check-raster
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
+add_test(NAME minigis.raster-dialogo
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DSAMPLE=${MINIGIS_RASTER_DEM}"
+          "-DOUT=${CMAKE_BINARY_DIR}/test-output/raster-dialog.png"
+          -DMODE=raster-dialog
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
+add_test(NAME minigis.raster-ventana
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DSAMPLE=${MINIGIS_RASTER_ORTHO}"
+          "-DSAMPLE2=${MINIGIS_ROOT_DIR}/data/sample/shapefiles/parcels.shp"
+          "-DOUT=${CMAKE_BINARY_DIR}/test-output/raster-window.png"
+          -DMODE=snapshot-window
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
+set_tests_properties(minigis.raster-info minigis.raster-dibujo minigis.raster-dialogo minigis.raster-ventana
+  PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# Puerta de rendimiento con un raster grande (opcional, como la del vectorial).
+set(MINIGIS_RASTER_BENCH_DATASET "" CACHE FILEPATH "Raster grande para la puerta de rendimiento raster")
+if(MINIGIS_RASTER_BENCH_DATASET)
+  add_test(NAME minigis.rendimiento-raster
+    COMMAND ${CMAKE_COMMAND}
+            "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+            "-DSAMPLE=${MINIGIS_RASTER_BENCH_DATASET}"
+            -DFRAMES=24
+            -DSCENARIO=mixed
+            "-DBUDGET=${MINIGIS_BENCH_BUDGET_MS}"
+            -DMODE=bench
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+  set_tests_properties(minigis.rendimiento-raster PROPERTIES
+    TIMEOUT 900
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+endif()

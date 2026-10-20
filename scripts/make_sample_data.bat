@@ -39,10 +39,43 @@ rem (ogr2ogr no admite -a_srs junto a -t_srs: el origen se declara con -s_srs).
   -s_srs EPSG:4326 -t_srs EPSG:25830 -lco ENCODING=UTF-8 -nln parcels_utm30 -overwrite
 if errorlevel 1 goto :error
 
+rem ---------------------------------------------------------------------------
+rem GeoTIFF de ejemplo: los genera un script Python con GDAL. Si no hay Python
+rem con GDAL se avisa y se continua: los .tif ya estan versionados.
+rem ---------------------------------------------------------------------------
+set "PYTHON="
+if exist "D:\OSGeo4w\apps\Python312\python.exe" (
+  set "PYTHON=D:\OSGeo4w\apps\Python312\python.exe"
+  set "PYTHONHOME=D:\OSGeo4w\apps\Python312"
+) else (
+  for /f "delims=" %%i in ('where python 2^>nul') do (
+    if not defined PYTHON (
+      "%%i" -c "import osgeo" >nul 2>nul
+      if not errorlevel 1 set "PYTHON=%%i"
+    )
+  )
+)
+
+if not defined PYTHON (
+  echo [aviso] No se encontro Python con GDAL; los GeoTIFF de ejemplo ya estan versionados.
+  goto :rasters_ok
+)
+
+echo [minigis] Generando GeoTIFF de ejemplo en "%SRC%\rasters"...
+"%PYTHON%" "%ROOT%\scripts\make_sample_rasters.py"
+if errorlevel 1 goto :raster_error
+
+:rasters_ok
 echo.
 echo [ok] Datos de ejemplo listos:
 dir /b "%DST%"
+if exist "%SRC%\rasters" dir /b "%SRC%\rasters"
 exit /b 0
+
+:raster_error
+echo.
+echo [error] make_sample_rasters.py fallo al generar los GeoTIFF de ejemplo.
+exit /b 1
 
 :error
 echo.

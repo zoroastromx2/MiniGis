@@ -17,9 +17,11 @@ namespace minigis
 {
 
 struct Error;
+struct LayerEntry;
 class AttributeTableModel;
 class LayerPanel;
 class MapCanvas;
+class RasterLayer;
 class Rectangle;
 class VectorLayer;
 class VectorLayerLoader;
@@ -74,6 +76,8 @@ private slots:
   void closeAllLayers();
   void zoomToCurrentLayer();
   void editCurrentLayerStyle();
+  /** Configura el contraste/bandas de la capa raster actual. */
+  void editCurrentRasterStyle();
   /** Configura las etiquetas de la capa actual (campos, fuente, halo, escala). */
   void editCurrentLayerLabels();
   void showAboutDialog();
@@ -81,8 +85,8 @@ private slots:
 
   void onLayersChanged();
   void onCurrentLayerChanged();
-  void onLayerPanelCurrentChanged(const std::shared_ptr<VectorLayer> &layer);
-  void onLayerVisibilityChanged(const std::shared_ptr<VectorLayer> &layer, bool visible);
+  void onLayerPanelCurrentChanged(const LayerEntry &entry);
+  void onLayerVisibilityChanged(const LayerEntry &entry, bool visible);
   void onCursorMoved(const QPointF &mapPoint, bool hasCrs);
   void onCursorLeft();
   void onScaleChanged(double mapUnitsPerPixel);
@@ -111,7 +115,11 @@ private:
   void addRecentFile(const QString &path);
 
   std::shared_ptr<VectorLayer> currentLayer() const;
+  std::shared_ptr<RasterLayer> currentRaster() const { return mCurrentRaster; }
   void showError(const QString &title, const Error &error);
+
+  /** Abre un raster ya detectado y lo añade al lienzo. */
+  bool openRasterLayer(const QString &path, bool zoomToExtent);
 
   /** Muestra u oculta el indicador de carga de la barra de estado. */
   void setLoadIndicatorVisible(bool visible);
@@ -123,6 +131,7 @@ private:
   QDockWidget *mLayerDock = nullptr;
   QDockWidget *mAttributeDock = nullptr;
   VectorLayerLoader *mLoader = nullptr;
+  std::shared_ptr<RasterLayer> mCurrentRaster;
 
   QLabel *mCoordinateLabel = nullptr;
   QLabel *mScaleLabel = nullptr;
