@@ -1810,6 +1810,7 @@ int checkRaster(const QStringList &layerPaths, const QSize &size, bool asJson)
   qint64 reuseDifferences = -1;
   qint64 bytesRead = -1;
   qint64 bytesLimit = -1;
+  qint64 marginPixels = -1;
 
   const auto check = [&ok](const QString &name, bool passed, const QString &detail) {
     writeOut(QStringLiteral("%1 %2%3")
@@ -2001,6 +2002,34 @@ int checkRaster(const QStringList &layerPaths, const QSize &size, bool asJson)
 
     Q_UNUSED(beforePan);
 
+    // 8) Margenes del warp. Al reproyectar, la huella del raster (girada) se
+    //    mete en un rectangulo alineado a los ejes y las esquinas que sobran se
+    //    rellenan de negro. Al cargar un mosaico por hojas, esos margenes
+    //    opacos tapaban la hoja vecina y dejaban una cuna negra en cada union:
+    //    el "desfase" que se ve entre imagenes contiguas. La ortofoto no tiene
+    //    NoData ni ningun pixel negro propio, asi que cualquier negro delata un
+    //    margen del warp que se esta dibujando.
+    {
+      MapCanvas projected;
+      projected.setDestinationEpsg(25830);
+      projected.resize(size);
+      projected.addRasterLayer(rgbLayer, true);
+      const QImage projectedImage = projected.renderToImage(size, false);
+
+      marginPixels = 0;
+      for (int y = 0; y < projectedImage.height(); ++y)
+      {
+        for (int x = 0; x < projectedImage.width(); ++x)
+        {
+          if (projectedImage.pixelColor(x, y) == QColor(0, 0, 0))
+            ++marginPixels;
+        }
+      }
+
+      check(QStringLiteral("sin margenes negros al reproyectar"), marginPixels == 0,
+            QStringLiteral("%1 pixeles negros en %2x%3").arg(marginPixels).arg(size.width()).arg(size.height()));
+    }
+
     rgbLayer->setStyle(savedStyle);
     rgbLayer->setVisible(savedVisible);
   }
@@ -2150,6 +2179,7 @@ int checkRaster(const QStringList &layerPaths, const QSize &size, bool asJson)
     root.insert(QStringLiteral("reuse_differences"), static_cast<double>(reuseDifferences));
     root.insert(QStringLiteral("bytes_read"), static_cast<double>(bytesRead));
     root.insert(QStringLiteral("bytes_limit"), static_cast<double>(bytesLimit));
+    root.insert(QStringLiteral("warp_margin_pixels"), static_cast<double>(marginPixels));
     writeOut(QString::fromUtf8(QJsonDocument(root).toJson(QJsonDocument::Indented)).trimmed());
   }
 

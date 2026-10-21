@@ -1119,11 +1119,11 @@ void MainWindow::showAboutDialog()
 
   const QString text =
     QStringLiteral("<h3>MiniGIS %1</h3>"
-                   "<p>Visor SIG minimo para cargar shapefiles, dibujarlos y consultar sus atributos.</p>"
+                   "<p>Visor SIG mínimo para cargar shapefiles, dibujarlos y consultar sus atributos.</p>"
                    "<p>Construido en C++ con Qt 6 y GDAL, siguiendo las convenciones de compilacion de QGIS "
                    "(CMake + vcpkg + capas core/gui/app).</p>"
                    "<p><b>Qt</b>: %2<br><b>GDAL</b>: %3<br><b>PROJ</b>: %4</p>"
-                   "<p>Los formatos vectoriales los aporta GDAL/OGR; no se reutiliza codigo de QGIS.</p>")
+                   "<p>Los formatos vectoriales los aporta GDAL/OGR; no se reutiliza código de QGIS.</p>")
       .arg(QString::fromUtf8(MINIGIS_VERSION), QString::fromUtf8(qVersion()), info.gdalVersion, info.projVersion);
 
   QMessageBox::about(this, QStringLiteral("Acerca de MiniGIS"), text);

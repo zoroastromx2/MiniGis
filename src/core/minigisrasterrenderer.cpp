@@ -5,6 +5,7 @@
 #include "minigismaprenderer.h"
 
 #include <QPainter>
+#include <QPainterPath>
 #include <QPointF>
 #include <QRgb>
 
@@ -221,12 +222,17 @@ void RasterRenderer::paint(QPainter &painter, const std::vector<std::shared_ptr<
   if (!transform.isValid())
     return;
 
+  // Tamano de pixel del lienzo: fija la rejilla de los VRT reproyectados para
+  // que todas las hojas de un mosaico compartan reticula (ver RasterLayer). En
+  // borrador se reutiliza la rejilla que ya tengan: el gesto no recrea warps.
+  const double pixelSize = options.draft ? 0.0 : 1.0 / transform.pixelsPerMapUnit();
+
   for (const std::shared_ptr<RasterLayer> &layer : layers)
   {
     if (!layer || !layer->isVisible() || !layer->extent().isValid())
       continue;
 
-    const RasterLayer::View *view = layer->viewForEpsg(destinationEpsg);
+    const RasterLayer::View *view = layer->viewForEpsg(destinationEpsg, pixelSize);
     if (!view || view->width <= 0 || view->height <= 0)
       continue;
 
@@ -258,8 +264,10 @@ void RasterRenderer::paint(QPainter &painter, const std::vector<std::shared_ptr<
     if (target.isEmpty())
       continue;
 
-    const QImage image = compose(*layer, target, transform, destinationEpsg, options.draft, mStats);
-    if (image.isNull())
+    QRectF destination;
+    const QImage image =
+      compose(*layer, target, transform, destinationEpsg, options.draft, mStats, &destination);
+    if (image.isNull() || destination.isEmpty())
       continue;
 
     const RasterStyle &style = layer->style();
@@ -267,7 +275,22 @@ void RasterRenderer::paint(QPainter &painter, const std::vector<std::shared_ptr<
     painter.setOpacity(std::clamp(style.opacity, 0, 100) / 100.0);
     painter.setRenderHint(QPainter::SmoothPixmapTransform,
                           style.resampling == RasterStyle::Resampling::Bilinear);
-    painter.drawImage(target, image);
+
+    // Recorte a la huella real de la hoja: el VRT reproyectado es un
+    // rectangulo que la contiene y sus margenes (negros o NoData) taparian las
+    // hojas vecinas. Dos hojas contiguas comparten el borde, asi que el recorte
+    // reparte los pixeles de la union sin dejar hueco ni solape.
+    if (view->footprint.size() >= 3)
+    {
+      QPainterPath clip;
+      clip.moveTo(transform.transform(view->footprint.front().x(), view->footprint.front().y()));
+      for (size_t i = 1; i < view->footprint.size(); ++i)
+        clip.lineTo(transform.transform(view->footprint[i].x(), view->footprint[i].y()));
+      clip.closeSubpath();
+      painter.setClipPath(clip, Qt::IntersectClip);
+    }
+
+    painter.drawImage(destination, image);
     painter.restore();
 
     ++mStats.layersDrawn;
@@ -276,9 +299,10 @@ void RasterRenderer::paint(QPainter &painter, const std::vector<std::shared_ptr<
 }
 
 QImage RasterRenderer::compose(const RasterLayer &layer, const QRectF &target, const MapToPixel &transform,
-                               int destinationEpsg, bool draft, FrameStats &stats) const
+                               int destinationEpsg, bool draft, FrameStats &stats, QRectF *destination) const
 {
-  const RasterLayer::View *view = layer.viewForEpsg(destinationEpsg);
+  const RasterLayer::View *view =
+    layer.viewForEpsg(destinationEpsg, draft ? 0.0 : 1.0 / transform.pixelsPerMapUnit());
   if (!view || !view->dataset)
     return {};
 
@@ -324,10 +348,24 @@ QImage RasterRenderer::compose(const RasterLayer &layer, const QRectF &target, c
   if (sourceRight <= sourceX || sourceBottom <= sourceY)
     return {};
 
-  const QSize targetSize = draft ? QSize(std::max(1, static_cast<int>(target.width()) / 2),
-                                         std::max(1, static_cast<int>(target.height()) / 2))
-                                 : QSize(std::max(1, static_cast<int>(std::lround(target.width()))),
-                                         std::max(1, static_cast<int>(std::lround(target.height()))));
+  // La ventana de origen se ajusta a pixeles ENTEROS, asi que en pantalla ocupa
+  // un rectangulo algo mayor que `target` (hasta un pixel de origen por lado).
+  // Hay que dibujar la imagen en ese rectangulo y no en `target`: estirarla
+  // hasta el recorte visible desplazaba el contenido hasta un pixel y hacia que
+  // dos hojas contiguas no encajaran (el desfase entre imagenes).
+  const double left = geoTransform[0] + sourceX * geoTransform[1];
+  const double top = geoTransform[3] + sourceY * geoTransform[5];
+  const double right = geoTransform[0] + sourceRight * geoTransform[1];
+  const double bottom = geoTransform[3] + sourceBottom * geoTransform[5];
+  *destination = QRectF(transform.transform(left, top), transform.transform(right, bottom)).normalized();
+  if (destination->isEmpty())
+    return {};
+
+  const QSize targetSize =
+    draft ? QSize(std::max(1, static_cast<int>(destination->width()) / 2),
+                  std::max(1, static_cast<int>(destination->height()) / 2))
+          : QSize(std::max(1, static_cast<int>(std::lround(destination->width()))),
+                  std::max(1, static_cast<int>(std::lround(destination->height()))));
 
   const RasterStyle &style = layer.style();
   const bool grayscale = style.bandMode == RasterStyle::BandMode::Grayscale;
@@ -366,7 +404,10 @@ QImage RasterRenderer::compose(const RasterLayer &layer, const QRectF &target, c
     stats.bytesRead += bufferSize;
   }
 
-  // Banda alfa opcional (se lee como Byte; GDAL la convierte si hace falta).
+  // Alfa opcional de la propia capa (se lee como Byte; GDAL la convierte si
+  // hace falta). Los margenes del VRT reproyectado se recortan en `paint` con
+  // la huella, no con una banda alfa: un alfa por capa no reparte los pixeles
+  // de la union entre dos hojas y dejaria una linea de fondo en la costura.
   std::vector<unsigned char> alphaBuffer;
   const bool hasAlpha = style.alphaBand > 0 && style.alphaBand <= layer.bandCount()
                         && GDALGetRasterBand(view->dataset, style.alphaBand) != nullptr;

@@ -202,7 +202,7 @@ minigis [opciones] [archivos...]
 | `--raster-stretch <none\|minmax\|percentclip>` | Estiramiento de contraste de los rásters (por defecto percentiles 2–98) |
 | `--raster-bands <R,G,B \| 1>` | Bandas que usan los rásters (una sola = escala de grises) |
 | `--raster-opacity <0-100>` | Opacidad de los rásters |
-| `--check-raster` | Comprueba el dibujado ráster: cuadrantes, extensión, warp, NoData, contraste, paleta, paneo |
+| `--check-raster` | Comprueba el dibujado ráster: cuadrantes, extensión, warp, NoData, contraste, paleta, paneo y márgenes del warp |
 | `--snapshot-raster-dialog <archivo.png>` | Captura el diálogo de estilo ráster y sale |
 | `-V, --verbose` | Trazas en `stderr` (los datos siguen limpios en `stdout`) |
 | `-h, --help` / `-v, --version` | Ayuda con ejemplos / versiones de Qt, GDAL y PROJ y rutas de datos |
@@ -256,9 +256,12 @@ En la interfaz:
   geometrías como la extensión con la que se encuadra la capa.
 * **Ráster de solo lectura**: abre cualquier formato que GDAL reconozca como ráster (probado con
   GeoTIFF), lo dibuja **debajo del vectorial**, lo reproyecta al SRC del lienzo (warp cacheado por
-  capa y SRC), respeta NoData y banda alfa, usa la paleta del archivo y permite elegir bandas,
+  capa, SRC y escala), respeta NoData y banda alfa, usa la paleta del archivo y permite elegir bandas,
   estiramiento de contraste (percentiles 2–98, mín-máx o ninguno), remuestreo y opacidad por capa.
-  La lectura por cuadro se limita a la ventana visible, a la resolución del lienzo.
+  La lectura por cuadro se limita a la ventana visible, a la resolución del lienzo. Al reproyectar,
+  todas las capas comparten la misma rejilla de píxel (a la escala del lienzo) y el dibujado se
+  recorta a la huella real del ráster, de modo que las hojas de un mosaico encajan sin márgenes
+  negros ni costuras.
 * Tabla de atributos paginada y bajo demanda (máximo 100 000 filas mostradas).
 * Simbología: color de relleno/contorno, grosor, tamaño de punto y opacidad.
 * **Etiquetas por capa**: uno o varios campos, familia y tamaño de fuente, negrita/cursiva,
@@ -301,7 +304,7 @@ ctest --preset windows-msvc-debug --output-on-failure
 * `minigis.bench` — contrato del banco de pruebas de rendimiento (`--bench --json`).
 * `minigis.raster-info` — `--info --json` describe la ortofoto y el DEM (tipo, tamaño, bandas, SRC).
 * `minigis.raster-dibujo` — `--check-raster` con las tres capas: cuadrantes, extensión, warp,
-  NoData, contraste, paleta, redibujado, paneo reutilizado y lectura acotada.
+  NoData, contraste, paleta, redibujado, paneo reutilizado, lectura acotada y márgenes del warp.
 * `minigis.raster-dialogo` — captura del diálogo de estilo ráster.
 * `minigis.raster-ventana` — captura de la interfaz con ráster y vectorial.
 * `minigis.rendimiento-raster` — puerta opcional de rendimiento con `MINIGIS_RASTER_BENCH_DATASET`.
@@ -448,8 +451,8 @@ Todo lo siguiente se ejecutó sobre este equipo con el preset `windows-msvc-rele
 | `minigis --info -l parcels_utm30.shp` | 5 polígonos, extensión en UTM 30N |
 | `minigis --info --json -l ortho_rgb.tif` | `"type": "raster"`, 256×256, 3 bandas, `EPSG:4326` |
 | `minigis --snapshot` sobre `parcels.shp` | PNG 900x600 (4 ms de render) |
-| `minigis --snapshot --crs EPSG:4326 -l dem_utm30.tif` | DEM UTM reproyectado, NoData transparente y esquina con error ≤ 1 px |
-| `minigis --check-raster` (tres capas) | **12 comprobaciones OK**: cuadrantes, extensión, warp, NoData, contraste, paleta, redibujado, paneo y lectura |
+| `minigis --snapshot --crs EPSG:4326 -l dem_utm30.tif` | DEM UTM reproyectado, NoData transparente y esquina con error ≤ 1,5 px |
+| `minigis --check-raster` (tres capas) | **13 comprobaciones OK**: cuadrantes, extensión, warp, NoData, contraste, paleta, redibujado, paneo, lectura y márgenes del warp |
 | `minigis --snapshot-window` sobre ráster + vectorial | Captura de la interfaz con la fila del ráster en el panel |
 | `ctest --preset windows-msvc-release` | **13/13 pruebas superadas** |
 

@@ -1241,22 +1241,26 @@ Contrato de `--check-raster` con los tres GeoTIFF de ejemplo (900x600):
 |---|---|
 | Cuadrantes de la ortofoto en su sitio | 4/4 colores exactos |
 | Extensión del ráster | error máximo **1,0 px** |
-| Reproyección del DEM UTM→4326 | error **1,0 px** en la esquina |
+| Reproyección del DEM UTM→4326 | error **1,5 px** en la esquina |
 | NoData transparente | 25/25 píxeles de fondo |
-| Estiramiento por percentiles vs mín-máx | rango **201** frente a **2** (el píxel 1000 no aplana el relieve) |
+| Estiramiento por percentiles vs mín-máx | rango **204** frente a **3** (el píxel 1000 no aplana el relieve) |
 | Paleta | 3/3 clases exactas; 0 píxeles negros de NoData |
 | Cambio de estilo | 411 000 píxeles distintos, sin mover la vista |
 | Paneo reutilizado vs redibujado | **0 píxeles** distintos de 540 000 |
 | Lectura por cuadro | 1,2 MB (límite 6,2 MB) |
+| Márgenes del warp | **0 píxeles negros** (ortofoto sin NoData reproyectada a EPSG:25830) |
 
-El primer cuadro de una capa reproyectada incluye crear el warp (~30 ms una sola vez);
-los siguientes solo leen.
+El primer cuadro de una capa reproyectada incluye crear el warp (~30 ms); se reutiliza
+mientras no cambie la escala, de modo que el paneo solo lee. Al cambiar el zoom se crea
+uno nuevo (una vez por capa y escala).
 
 ### 13.3 Límites conocidos
 
-- **Sin NoData no hay transparencia en las esquinas**: al reproyectar una ortofoto sin
-  banda alfa, el área fuera de su huella sale negra (el warp no puede distinguirla del
-  negro real). Con NoData (el DEM) sale transparente.
+- **El warp se recrea al cambiar de escala**: para que las hojas de un mosaico encajen, todas
+  las capas comparten una rejilla de píxel fijada a la escala del lienzo y se recortan a su
+  huella real (sin los márgenes negros del rectángulo del VRT). Al cambiar el zoom se crea un
+  VRT nuevo por capa en el cuadro de calidad; los cuadros de borrador reutilizan el anterior,
+  de modo que el gesto sigue siendo fluido y el coste se paga una vez al soltar.
 - **Sin overviews** el recorte a la resolución del lienzo sigue leyendo el ráster
   completo: el objetivo de rendimiento se mide con overviews.
 - **Geotransformación con rotación**: el renderizador omite esos rásters (los datos de

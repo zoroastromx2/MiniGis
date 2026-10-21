@@ -1,11 +1,13 @@
 #pragma once
 
+#include <QPointF>
 #include <QString>
 #include <QStringList>
 #include <QVector>
 
 #include <map>
 #include <memory>
+#include <vector>
 
 #include "minigiserror.h"
 #include "minigisrasterstyle.h"
@@ -57,9 +59,9 @@ public:
 
   /**
    * Fuente de datos para dibujar: el dataset original cuando el SRC coincide
-   * con el del lienzo, o un VRT reproyectado (cacheado por SRC de destino)
-   * cuando no. La vista presta el dataset y su geotransformacion ya en el SRC
-   * de destino.
+   * con el del lienzo, o un VRT reproyectado (cacheado por SRC de destino y
+   * escala) cuando no. La vista presta el dataset y su geotransformacion ya en
+   * el SRC de destino.
    */
   struct View
   {
@@ -68,6 +70,21 @@ public:
     int width = 0;
     int height = 0;
     bool ownsDataset = false;
+    /**
+     * Tamano de pixel (unidades del SRC de destino) de la rejilla del VRT, o 0
+     * si la vista usa la rejilla que propone GDAL. La rejilla se elige A LA
+     * ESCALA DEL LIENZO y anclada en multiplos del tamano de pixel: todas las
+     * hojas de un mosaico comparten reticula y sus bordes encajan sin costura.
+     */
+    double pixelSize = 0.0;
+    /**
+     * Contorno de la huella del raster en el SRC de destino (puntos de mapa),
+     * o vacio cuando la vista nativa ya es un rectangulo y no hay que recortar.
+     * Un VRT reproyectado es el rectangulo alineado a los ejes que contiene la
+     * huella girada; sin este recorte se dibujarian sus margenes negros, que
+     * tapan las hojas vecinas de un mosaico y dejan una cuna en cada union.
+     */
+    std::vector<QPointF> footprint;
 
     ~View();
   };
@@ -97,8 +114,12 @@ public:
    * Vista para dibujar en el SRC indicado. La primera vez que se pide un SRC
    * distinto del nativo crea un warp con GDAL y lo cachea; el llamador no es
    * dueño del resultado y este sigue siendo valido mientras viva la capa.
+   *
+   * `pixelSize` (unidades de mapa por pixel, > 0) fija la rejilla del warp a la
+   * escala del lienzo; si cambia (zoom), el warp se recrea. Con 0 se usa la
+   * rejilla que propone GDAL, que no encaja entre hojas contiguas.
    */
-  const View *viewForEpsg(int destinationEpsg) const;
+  const View *viewForEpsg(int destinationEpsg, double pixelSize = 0.0) const;
 
   Rectangle extent() const { return mExtent; }
 

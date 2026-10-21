@@ -54,9 +54,14 @@ private:
    * Compone la imagen de una capa para el rectangulo de pantalla indicado, o
    * devuelve una imagen nula si no se puede dibujar (sin geotransformacion,
    * rotada, fuera de la vista...).
+   *
+   * `destination` recibe el rectangulo donde hay que dibujar la imagen: es el
+   * que corresponde a la ventana de pixeles de origen leida, que puede ser algo
+   * mayor que `target` al ajustarse a pixeles enteros. Dibujarla en `target`
+   * desplazaria el contenido y descuadraria las hojas de un mosaico.
    */
   QImage compose(const RasterLayer &layer, const QRectF &target, const MapToPixel &transform, int destinationEpsg,
-                 bool draft, FrameStats &stats) const;
+                 bool draft, FrameStats &stats, QRectF *destination) const;
 
   FrameStats mStats;
 };
