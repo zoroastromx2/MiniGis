@@ -178,9 +178,9 @@ elseif(MODE STREQUAL "check-raster")
       message(FATAL_ERROR "El dibujado raster no cumple su contrato:\n${_out}")
     endif()
     foreach(_key IN ITEMS "cuadrantes en su posicion" "extension del raster" "reproyeccion UTM"
-                          "NoData transparente" "estiramiento por percentiles" "paleta del archivo"
-                          "el cambio de estilo se ve en el mapa" "paneo reutilizado" "lectura acotada"
-                          "sin margenes negros al reproyectar")
+                          "NoData transparente" "estiramiento por defecto" "estiramiento por percentiles"
+                          "paleta del archivo" "el cambio de estilo se ve en el mapa" "paneo reutilizado"
+                          "lectura acotada" "sin margenes negros al reproyectar")
       if(NOT _out MATCHES "${_key}")
         message(FATAL_ERROR "La comprobacion «${_key}» no se ejecuto:\n${_out}")
       endif()

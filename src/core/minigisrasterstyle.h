@@ -22,7 +22,11 @@ struct RasterStyle
     Rgb        // tres bandas (o mas) con seleccion R/G/B
   };
 
-  /** Estiramiento de contraste aplicado a cada banda. */
+  /**
+   * Estiramiento de contraste aplicado a cada banda. Por defecto no se estira:
+   * las imagenes Byte se dibujan con sus valores originales y el estiramiento
+   * queda como una eleccion del usuario en el dialogo de estilo.
+   */
   enum class Stretch
   {
     None,        // Byte tal cual; otros tipos, normalizacion por tipo
@@ -44,7 +48,7 @@ struct RasterStyle
   /** Banda alfa (0 = ninguna). */
   int alphaBand = 0;
 
-  Stretch stretch = Stretch::PercentClip;
+  Stretch stretch = Stretch::None;
   double percentLow = 2.0;
   double percentHigh = 98.0;
 

@@ -113,7 +113,7 @@ void applyLabelOptions(const std::shared_ptr<VectorLayer> &layer, const LabelOpt
 struct RasterOptions
 {
   bool stretchSet = false;
-  RasterStyle::Stretch stretch = RasterStyle::Stretch::PercentClip;
+  RasterStyle::Stretch stretch = RasterStyle::Stretch::None;
   bool bandsSet = false;
   QVector<int> bands;
   bool opacitySet = false;
@@ -1811,6 +1811,7 @@ int checkRaster(const QStringList &layerPaths, const QSize &size, bool asJson)
   qint64 bytesRead = -1;
   qint64 bytesLimit = -1;
   qint64 marginPixels = -1;
+  bool defaultStretchNone = false;
 
   const auto check = [&ok](const QString &name, bool passed, const QString &detail) {
     writeOut(QStringLiteral("%1 %2%3")
@@ -1899,6 +1900,12 @@ int checkRaster(const QStringList &layerPaths, const QSize &size, bool asJson)
   {
     const RasterStyle savedStyle = rgbLayer->style();
     const bool savedVisible = rgbLayer->isVisible();
+
+    // Al abrir una imagen no se estira el contraste: los valores Byte se pintan
+    // tal cual y el estiramiento es una eleccion del usuario en el dialogo.
+    defaultStretchNone = savedStyle.stretch == RasterStyle::Stretch::None;
+    check(QStringLiteral("estiramiento por defecto: ninguno"), defaultStretchNone,
+          QStringLiteral("modo %1").arg(static_cast<int>(savedStyle.stretch)));
 
     RasterStyle style = savedStyle;
     style.stretch = RasterStyle::Stretch::None;
@@ -2180,6 +2187,7 @@ int checkRaster(const QStringList &layerPaths, const QSize &size, bool asJson)
     root.insert(QStringLiteral("bytes_read"), static_cast<double>(bytesRead));
     root.insert(QStringLiteral("bytes_limit"), static_cast<double>(bytesLimit));
     root.insert(QStringLiteral("warp_margin_pixels"), static_cast<double>(marginPixels));
+    root.insert(QStringLiteral("default_stretch_none"), defaultStretchNone);
     writeOut(QString::fromUtf8(QJsonDocument(root).toJson(QJsonDocument::Indented)).trimmed());
   }
 
@@ -2350,7 +2358,7 @@ int main(int argc, char *argv[])
                                             QStringLiteral("Elementos leidos del archivo por cuadro en capas indexadas por envolventes (0 = sin limite)"),
                                             QStringLiteral("n"), QStringLiteral("40000"));
   const QCommandLineOption rasterStretchOption(QStringLiteral("raster-stretch"),
-                                               QStringLiteral("Estiramiento de contraste de los rasters: none | minmax | percentclip"),
+                                               QStringLiteral("Estiramiento de contraste de los rasters: none | minmax | percentclip (por defecto none)"),
                                                QStringLiteral("modo"));
   const QCommandLineOption rasterBandsOption(QStringLiteral("raster-bands"),
                                              QStringLiteral("Bandas del raster: R,G,B o una sola (escala de grises)"),

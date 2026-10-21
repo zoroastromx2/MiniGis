@@ -1249,6 +1249,7 @@ Contrato de `--check-raster` con los tres GeoTIFF de ejemplo (900x600):
 | Paneo reutilizado vs redibujado | **0 píxeles** distintos de 540 000 |
 | Lectura por cuadro | 1,2 MB (límite 6,2 MB) |
 | Márgenes del warp | **0 píxeles negros** (ortofoto sin NoData reproyectada a EPSG:25830) |
+| Estiramiento por defecto | `none` (los Byte se pintan tal cual) |
 
 El primer cuadro de una capa reproyectada incluye crear el warp (~30 ms); se reutiliza
 mientras no cambie la escala, de modo que el paneo solo lee. Al cambiar el zoom se crea
@@ -1265,8 +1266,9 @@ uno nuevo (una vez por capa y escala).
   completo: el objetivo de rendimiento se mide con overviews.
 - **Geotransformación con rotación**: el renderizador omite esos rásters (los datos de
   trabajo son norte-arriba); no hay aviso en la interfaz todavía.
-- **Sin rampas de color ni hillshade**: un DEM se ve en grises con estiramiento; las
-  rampas multicolor y el sombreado quedan como trabajo futuro.
+- **Sin rampas de color ni hillshade**: un DEM se ve en grises (sin estiramiento por
+  defecto; el contraste se activa en el diálogo de estilo); las rampas multicolor y el
+  sombreado quedan como trabajo futuro.
 - El SRC del lienzo sigue fijo en EPSG:4326 desde la interfaz (`--crs` existe en la CLI).
 
 ### 13.4 Reproducir

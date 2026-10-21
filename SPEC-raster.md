@@ -155,9 +155,9 @@ Estilos de estiramiento por capa:
 
 | Modo | Comportamiento | Por defecto |
 |---|---|---|
-| `percentclip` | Recorte de percentiles (2–98 configurable) de una muestra de la banda | **sí, 2–98** |
+| `none` | Byte tal cual (0–255); en otros tipos, normalización de tipo | **sí** |
+| `percentclip` | Recorte de percentiles (2–98 configurable) de una muestra de la banda | no |
 | `minmax` | Mínimo y máximo reales de la muestra | no |
-| `none` | Byte tal cual (0–255); en otros tipos, normalización de tipo | no |
 
 * Las estadísticas se calculan al abrir, con una **lectura decimada** de como
   máximo 512×512 píxeles por banda (usa overviews si existen): nunca se recorre
@@ -569,8 +569,8 @@ Se considerará terminado cuando **todo** esto sea cierto y reproducible:
    es el de carga.
 2. El SRC del lienzo sigue fijo en EPSG:4326 en la interfaz; `--crs` solo en la
    CLI.
-3. Por defecto: estiramiento por percentiles 2–98, muestreo bilineal, opacidad
-   100 %, NoData activo.
+3. Por defecto: estiramiento `none`, muestreo bilineal, opacidad 100 %, NoData
+   activo.
 4. Las estadísticas de contraste salen de una muestra decimada (≤ 512×512 por
    banda); no se recorre el ráster completo al abrirlo.
 5. La apertura es **síncrona** (solo metadatos y muestra de estadísticas, pocos

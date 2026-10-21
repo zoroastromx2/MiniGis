@@ -199,7 +199,7 @@ minigis [opciones] [archivos...]
 | `--size <AnchoxAlto>` | Tamaño de la imagen (por defecto `1200x800`) |
 | `--crs <EPSG:xxxx>` | SRC de destino del dibujo (por defecto `EPSG:4326`) |
 | `--max-features <n>` | Límite de elementos dibujados por capa vectorial (`0` = sin límite) |
-| `--raster-stretch <none\|minmax\|percentclip>` | Estiramiento de contraste de los rásters (por defecto percentiles 2–98) |
+| `--raster-stretch <none\|minmax\|percentclip>` | Estiramiento de contraste de los rásters (por defecto `none`) |
 | `--raster-bands <R,G,B \| 1>` | Bandas que usan los rásters (una sola = escala de grises) |
 | `--raster-opacity <0-100>` | Opacidad de los rásters |
 | `--check-raster` | Comprueba el dibujado ráster: cuadrantes, extensión, warp, NoData, contraste, paleta, paneo y márgenes del warp |
@@ -257,7 +257,8 @@ En la interfaz:
 * **Ráster de solo lectura**: abre cualquier formato que GDAL reconozca como ráster (probado con
   GeoTIFF), lo dibuja **debajo del vectorial**, lo reproyecta al SRC del lienzo (warp cacheado por
   capa, SRC y escala), respeta NoData y banda alfa, usa la paleta del archivo y permite elegir bandas,
-  estiramiento de contraste (percentiles 2–98, mín-máx o ninguno), remuestreo y opacidad por capa.
+  estiramiento de contraste (ninguno por defecto, percentiles 2–98 o mín-máx), remuestreo y opacidad
+  por capa.
   La lectura por cuadro se limita a la ventana visible, a la resolución del lienzo. Al reproyectar,
   todas las capas comparten la misma rejilla de píxel (a la escala del lienzo) y el dibujado se
   recorta a la huella real del ráster, de modo que las hojas de un mosaico encajan sin márgenes
@@ -452,7 +453,7 @@ Todo lo siguiente se ejecutó sobre este equipo con el preset `windows-msvc-rele
 | `minigis --info --json -l ortho_rgb.tif` | `"type": "raster"`, 256×256, 3 bandas, `EPSG:4326` |
 | `minigis --snapshot` sobre `parcels.shp` | PNG 900x600 (4 ms de render) |
 | `minigis --snapshot --crs EPSG:4326 -l dem_utm30.tif` | DEM UTM reproyectado, NoData transparente y esquina con error ≤ 1,5 px |
-| `minigis --check-raster` (tres capas) | **13 comprobaciones OK**: cuadrantes, extensión, warp, NoData, contraste, paleta, redibujado, paneo, lectura y márgenes del warp |
+| `minigis --check-raster` (tres capas) | **14 comprobaciones OK**: cuadrantes, extensión, warp, NoData, contraste, estiramiento por defecto, paleta, redibujado, paneo, lectura y márgenes del warp |
 | `minigis --snapshot-window` sobre ráster + vectorial | Captura de la interfaz con la fila del ráster en el panel |
 | `ctest --preset windows-msvc-release` | **13/13 pruebas superadas** |
 
@@ -462,7 +463,7 @@ Las imágenes de esa verificación están en `build\verify-*.png`.
 
 ## 12. Siguientes pasos sugeridos
 
-1. **Hillshade y rampas de color** para los DEM (hoy se ven en grises con estiramiento).
+1. **Hillshade y rampas de color** para los DEM (hoy se ven en grises, sin estiramiento por defecto).
 2. **Consulta por atributos**: filtros tipo `QgsExpression` (o directamente `OGR_L_SetAttributeFilter`).
 3. **Exportación**: guardar el mapa a PDF/SVG con `QPdfWriter` / `QSvgGenerator`.
 4. **Teselas y GPU** para el régimen ligado a píxeles (ver RENDIMIENTO.md).
