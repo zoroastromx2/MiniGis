@@ -505,6 +505,14 @@ void MapCanvas::zoomToFullExtent()
   setExtent(adjustedExtent(full));
 }
 
+void MapCanvas::zoomToExtent(const Rectangle &extent)
+{
+  if (!extent.isValid())
+    return;
+
+  setExtent(adjustedExtent(extent));
+}
+
 void MapCanvas::zoomToLayer(const std::shared_ptr<VectorLayer> &layer)
 {
   if (!layer)

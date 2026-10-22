@@ -68,17 +68,18 @@ elseif(MODE STREQUAL "geopackage")
   endif()
 
   if(EXPECT_EXIT EQUAL 0)
-    # Tres capas vectoriales en el JSON.
+    # Cuatro capas vectoriales en el JSON.
     string(REGEX MATCHALL "\"type\": \"vector\"" _vector_layers "${_out}")
     list(LENGTH _vector_layers _vector_count)
-    if(NOT _vector_count EQUAL 3)
-      message(FATAL_ERROR "El GeoPackage tiene 3 capas y --info informo de ${_vector_count}:\n${_out}")
+    if(NOT _vector_count EQUAL 4)
+      message(FATAL_ERROR "El GeoPackage tiene 4 capas y --info informo de ${_vector_count}:\n${_out}")
     endif()
 
-    foreach(_key IN ITEMS "\"container\": \"ejemplo.gpkg\"" "\"layerCount\": 3"
-                          "\"layerIndex\": 0" "\"layerIndex\": 1" "\"layerIndex\": 2"
+    foreach(_key IN ITEMS "\"container\": \"ejemplo.gpkg\"" "\"layerCount\": 4"
+                          "\"layerIndex\": 0" "\"layerIndex\": 1" "\"layerIndex\": 3"
+                          "\"assumed\": false"
                           "\"name\": \"cities\"" "\"name\": \"parcels\""
-                          "\"name\": \"parcels_utm30\"")
+                          "\"name\": \"parcels_utm30\"" "\"name\": \"area_sur\"")
       if(NOT _out MATCHES "${_key}")
         message(FATAL_ERROR "La salida JSON no contiene ${_key}:\n${_out}")
       endif()
@@ -99,12 +100,15 @@ elseif(MODE STREQUAL "check-layers")
 
   if(EXPECT_EXIT EQUAL 0)
     if(_out MATCHES "FALLO")
-      message(FATAL_ERROR "El panel no muestra todas las capas del GeoPackage:\n${_out}")
+      message(FATAL_ERROR "El mapa o el panel no muestran todas las capas del GeoPackage:\n${_out}")
     endif()
     foreach(_key IN ITEMS "se cargan todas las capas del archivo"
+                          "cada capa usa el SRC del archivo"
                           "el panel agrupa las capas bajo el nombre del archivo"
-                          "aparece como un item con 3 capas"
-                          "cities, parcels, parcels_utm30")
+                          "aparece como un item con 4 capas"
+                          "cities, parcels, parcels_utm30, area_sur"
+                          "el encuadre inicial incluye todas las capas del archivo"
+                          "cada capa del archivo se dibuja en el mapa")
       if(NOT _out MATCHES "${_key}")
         message(FATAL_ERROR "La comprobacion «${_key}» no se ejecuto:\n${_out}")
       endif()

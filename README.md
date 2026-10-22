@@ -175,7 +175,7 @@ cmake --build build\manual
    MapRenderer::paintLayer`, una vez por capa del archivo.
 6. **Argumentos de depuración útiles** (`Projects > Run > Command line arguments`):
    * `data\sample\shapefiles\cities.shp` → arranca con el shapefile cargado
-   * `data\sample\geopackage\ejemplo.gpkg` → arranca con las tres capas del GeoPackage
+   * `data\sample\geopackage\ejemplo.gpkg` → arranca con las cuatro capas del GeoPackage
    * `--snapshot salida.png -l data\sample\shapefiles\parcels.shp` → render sin ventana
      (perfecto para depurar el motor de dibujo sin interactuar con la interfaz)
    * `--info --layer data\sample\shapefiles\parcels_utm30.shp` → comprobar lectura y SRC
@@ -209,7 +209,7 @@ minigis [opciones] [archivos...]
 | `--raster-bands <R,G,B \| 1>` | Bandas que usan los rásters (una sola = escala de grises) |
 | `--raster-opacity <0-100>` | Opacidad de los rásters |
 | `--check-raster` | Comprueba el dibujado ráster: cuadrantes, extensión, warp, NoData, contraste, paleta, paneo y márgenes del warp |
-| `--check-layers` | Comprueba que un archivo con varias capas se abre entero y el panel las agrupa bajo el nombre del archivo |
+| `--check-layers` | Comprueba que un archivo con varias capas se carga, se encuadra y se dibuja entero, y que el panel las agrupa bajo el nombre del archivo |
 | `--snapshot-raster-dialog <archivo.png>` | Captura el diálogo de estilo ráster y sale |
 | `-V, --verbose` | Trazas en `stderr` (los datos siguen limpios en `stdout`) |
 | `-h, --help` / `-v, --version` | Ayuda con ejemplos / versiones de Qt, GDAL y PROJ y rutas de datos |
@@ -242,8 +242,9 @@ minigis --snapshot paleta.png -l data\sample\rasters\landcover.tif --raster-stre
 minigis --check-raster -l data\sample\rasters\ortho_rgb.tif ^
         -l data\sample\rasters\dem_utm30.tif -l data\sample\rasters\landcover.tif
 
-:: un GeoPackage contiene varias capas (cities, parcels y parcels_utm30): se
-:: cargan TODAS y el panel las agrupa bajo el nombre del archivo
+:: un GeoPackage contiene varias capas (cities, parcels, parcels_utm30 y area_sur):
+:: se cargan TODAS, el panel las agrupa bajo el nombre del archivo y el mapa
+:: encuadra la union (area_sur esta muy lejos del resto)
 minigis data\sample\geopackage\ejemplo.gpkg
 minigis --info -l data\sample\geopackage\ejemplo.gpkg
 minigis --check-layers -l data\sample\geopackage\ejemplo.gpkg
@@ -257,8 +258,9 @@ En la interfaz:
 * `F6` tabla de atributos · `Ctrl+Shift+Y` simbología (en un ráster, diálogo de contraste)
 * arrastrar un `.shp`, un `.gpkg` o un `.tif` desde el Explorador y soltarlo sobre el mapa
 * un archivo con varias capas (GeoPackage) se abre **entero**: el panel muestra un ítem con
-  el nombre del archivo y una capa por subítem, y cada una tiene su visibilidad, simbología,
-  etiquetas y tabla de atributos
+  el nombre del archivo y una capa por subítem, cada una con su visibilidad, simbología,
+  etiquetas y tabla de atributos, y el mapa se encuadra a la **unión** de todas las capas
+  (no solo a la primera)
 
 ---
 
@@ -267,10 +269,14 @@ En la interfaz:
 **Hace**
 
 * Abre cualquier formato vectorial soportado por GDAL/OGR (probado con shapefile y GeoPackage).
-  **Si el archivo contiene varias capas, se cargan todas**: un GeoPackage con cinco capas produce
-  cinco capas en el mapa y en el panel, cada una con su visibilidad, simbología, etiquetas y tabla
-  de atributos. El panel las presenta dentro de un ítem con el nombre del archivo, de modo que dos
-  capas que se llaman igual en archivos distintos no se confunden.
+  **Si el archivo contiene varias capas, se cargan todas y se encuadran todas**: un GeoPackage con
+  cinco capas produce cinco capas en el mapa y en el panel, cada una con su visibilidad, simbología,
+  etiquetas y tabla de atributos. El panel las presenta dentro de un ítem con el nombre del archivo,
+  de modo que dos capas que se llaman igual en archivos distintos no se confunden. El encuadre
+  inicial es la unión de lo cargado, así que una capa situada lejos del resto también se ve.
+  Si una capa del archivo no declara SRC (GeoPackage con `srs_id 99999`), se usa el de otra capa
+  del mismo archivo y se avisa en la descripción del SRC; sin eso sus coordenadas no se pueden
+  reproyectar y caen fuera de la vista.
 * Dibuja puntos, líneas y polígonos **con huecos**; reproyecta al vuelo si el SRC de la capa
   difiere del de destino (por ejemplo, un shapefile UTM sobre un mapa en EPSG:4326), tanto las
   geometrías como la extensión con la que se encuadra la capa.
@@ -328,10 +334,12 @@ ctest --preset windows-msvc-release --output-on-failure
   NoData, contraste, paleta, redibujado, paneo reutilizado, lectura acotada y márgenes del warp.
 * `minigis.raster-dialogo` — captura del diálogo de estilo ráster.
 * `minigis.raster-ventana` — captura de la interfaz con ráster y vectorial.
-* `minigis.geopackage` — `--info --json` sobre el GeoPackage de ejemplo: informa de sus tres capas
+* `minigis.geopackage` — `--info --json` sobre el GeoPackage de ejemplo: informa de sus cuatro capas
   (`container`, `layerIndex`, `layerCount`), no solo de la primera.
 * `minigis.panel-capas` — `--check-layers` demuestra sin ventana que al abrir el GeoPackage se cargan
-  sus tres capas y que el panel las agrupa bajo el nombre del archivo, con una capa por subítem.
+  sus cuatro capas, que cada una usa un SRC (declarado o heredado), que el panel las agrupa bajo el
+  nombre del archivo, que el encuadre inicial las incluye todas (la capa `area_sur` está muy lejos)
+  y que cada capa pinta píxeles propios.
 * `minigis.rendimiento-raster` — puerta opcional de rendimiento con `MINIGIS_RASTER_BENCH_DATASET`.
 
 ### 8.1 Rendimiento
@@ -427,7 +435,7 @@ ctest --preset windows-msvc-release -R minigis.rendimiento
 | `could not find or load the Qt platform plugin "offscreen"` | `MINIGIS_DEPLOY_QT_RUNTIME` está en `OFF` y las pruebas necesitan ese plugin: actívalo, ejecuta `scripts\deploy.bat`, o define `QT_QPA_PLATFORM=windows` |
 | Aviso `No se encontro proj.db` | Define `PROJ_DATA=E:\vcpkg\installed\x64-windows\share\proj` (o copia esa carpeta junto al `.exe`) |
 | `La configuracion Debug necesita la variante Debug de GDAL` | Usa `windows-msvc-release` (o `windows-msvc-reldbg`), o instala la variante debug: `E:\vcpkg\vcpkg.exe install gdal --triplet x64-windows` |
-| Aviso de que no se pudo detectar el prefijo de `/showIncludes` | Es MSVC en español sin paquete de idioma inglés. Compila igual, pero conviene instalar el idioma inglés en Visual Studio: así CMake registra las cabeceras y las recompilaciones incrementales son fiables |
+| Aviso de que no se pudo detectar el prefijo de `/showIncludes` | Es MSVC en español sin paquete de idioma inglés. Compila igual, pero CMake **no registra las dependencias de cabeceras**, así que tras cambiar un `.h` pueden quedar objetos viejos y fallos difíciles de explicar (un cambio de estilo que no se ve, un test que falla solo en incremental). Instala el idioma inglés en Visual Studio o, mientras tanto, recompila limpio (`cmake --build --preset <preset> --clean-first` o borra `build\<preset>`) |
 | CMake no encuentra GDAL | `E:\vcpkg\vcpkg.exe install gdal --triplet x64-windows` y reconfigura |
 | El shapefile se abre sin SRC | Al `.shp` le falta el `.prj`; usa `ogr2ogr ... -a_srs EPSG:xxxx` (ver `scripts\make_sample_data.bat`) |
 
@@ -456,6 +464,15 @@ ctest --preset windows-msvc-release -R minigis.rendimiento
 * **Los grupos del panel se recuerdan por la ruta del archivo**: el panel se reconstruye en cada
   cambio del mapa (marcar una casilla, añadir una capa), así que el estado plegado/desplegado se
   guarda por ruta y no por posición en el árbol, que cambia.
+* **El encuadre inicial es la unión de la tanda, no la primera capa**: al cargar capas en segundo
+  plano se anota dónde empieza la tanda y, al terminar, se encuadra la unión de las capas y ráster
+  nuevos (`frameLoadedBatch`). Encuadrar la primera capa dejaba fuera las demás capas de un
+  GeoPackage o los demás archivos de una tanda: se veían en el panel pero no en el mapa.
+* **Una capa sin SRC hereda el de otra capa del archivo**: los GeoPackage pueden guardar capas con
+  `srs_id 99999` ("Undefined SRS") aunque sus coordenadas estén en el sistema de las demás. GDAL no
+  las reproyecta y quedarían en coordenadas proyectadas (millones) fuera de la vista; `VectorLayer`
+  adopta el SRC de la capa del archivo cuya extensión se solapa más, lo avisa en `crsDescription()`
+  y `GeometryStore::build()` recibe el SRC explícitamente (no lo lee de la capa OGR, que no lo tiene).
 * **Ejecutable de consola**: los modos CLI escriben en `stdout`/`stderr` (datos en `stdout`,
   diagnóstico en `stderr`) con códigos de salida estables, y Qt Creator muestra esa salida en
   *Application Output*.
@@ -487,7 +504,8 @@ Todo lo siguiente se ejecutó sobre este equipo con Qt 6.10.3 y el preset `windo
 | `minigis --snapshot --crs EPSG:4326 -l dem_utm30.tif` | DEM UTM reproyectado a 4326 (PNG 1200x800, 24 ms) |
 | `minigis --check-raster` (tres capas) | **14 comprobaciones OK**: cuadrantes, extensión, warp, NoData, contraste, estiramiento por defecto, paleta, redibujado, paneo, lectura y márgenes del warp |
 | `minigis --snapshot-window` sobre ráster + vectorial | Captura de la interfaz con la fila del ráster en el panel |
-| `minigis --info` y `--check-layers` sobre `ejemplo.gpkg` | 3 capas (`cities`, `parcels`, `parcels_utm30`), 1 grupo con el nombre del archivo |
+| `minigis --info` y `--check-layers` sobre `ejemplo.gpkg` | 4 capas (`cities`, `parcels`, `parcels_utm30`, `area_sur`), 1 grupo con el nombre del archivo, encuadre inicial con todas y píxeles propios de cada una |
+| `minigis --check-layers` sobre un GeoPackage real con 3 capas sin SRC (`srs_id 99999`) | Las 3 capas heredan el SRC de la que sí lo declara, el encuadre queda en México y las 4 se dibujan |
 | `ctest --preset windows-msvc-release` | **15/15 pruebas superadas** |
 
 Las imágenes de esa verificación están en `build\windows-msvc-release\test-output\`

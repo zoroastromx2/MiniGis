@@ -39,7 +39,9 @@ set_tests_properties(minigis.info minigis.snapshot PROPERTIES
 # --- GeoPackage multicapa ------------------------------------------------
 # Al abrir un contenedor con varias capas (un GeoPackage) deben cargarse TODAS:
 # el fallo original solo mostraba la primera, tanto en el mapa como en el panel.
-# El archivo de ejemplo tiene tres capas (cities, parcels, parcels_utm30).
+# El archivo de ejemplo tiene cuatro capas (cities, parcels, parcels_utm30 y
+# area_sur, esta ultima muy lejos de las demas para que el encuadre inicial tenga
+# que cubrir la union y no solo la primera capa).
 set(MINIGIS_SAMPLE_GPKG "${MINIGIS_ROOT_DIR}/data/sample/geopackage/ejemplo.gpkg")
 
 add_test(NAME minigis.geopackage

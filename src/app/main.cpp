@@ -276,6 +276,7 @@ QJsonObject layerInfoJson(const VectorLayer &layer)
   QJsonObject crs;
   crs.insert(QStringLiteral("description"), layer.crsDescription());
   crs.insert(QStringLiteral("epsg"), layer.crsEpsg());
+  crs.insert(QStringLiteral("assumed"), layer.hasAssumedSrs());
   object.insert(QStringLiteral("crs"), crs);
 
   QJsonArray fields;
@@ -1819,6 +1820,35 @@ int checkLayers(const QStringList &layerPaths, bool asJson)
   check(QStringLiteral("se cargan todas las capas del archivo"), loadedLayers == vectorLayers,
         QStringLiteral("%1 cargadas, %2 en los archivos").arg(loadedLayers).arg(vectorLayers));
 
+  // Coherencia de SRC: si el archivo declara SRC en alguna capa, ninguna otra capa
+  // del mismo archivo puede quedarse sin el. Un GeoPackage puede dejar capas con
+  // srs_id 99999 ("Undefined SRS"); sin heredar el SRC no se reproyectan y sus
+  // coordenadas caen fuera de la vista.
+  {
+    QStringList sourcesWithSrs;
+    for (const std::shared_ptr<VectorLayer> &layer : window.canvas()->layers())
+    {
+      if (layer->spatialRef() && !sourcesWithSrs.contains(layer->sourcePath()))
+        sourcesWithSrs << layer->sourcePath();
+    }
+
+    QStringList withoutSrs;
+    int assumedSrs = 0;
+    for (const std::shared_ptr<VectorLayer> &layer : window.canvas()->layers())
+    {
+      if (layer->hasAssumedSrs())
+        ++assumedSrs;
+      else if (!layer->spatialRef() && sourcesWithSrs.contains(layer->sourcePath()))
+        withoutSrs << layer->name();
+    }
+
+    check(QStringLiteral("cada capa usa el SRC del archivo (declarado o asumido)"),
+          withoutSrs.isEmpty(),
+          withoutSrs.isEmpty()
+            ? QStringLiteral("%1 capa(s) heredan el SRC de otra capa del archivo").arg(assumedSrs)
+            : QStringLiteral("sin SRC: %1").arg(withoutSrs.join(QStringLiteral(", "))));
+  }
+
   // Estructura del panel: un item de grupo con las capas como subitems.
   const std::vector<LayerPanel::TreeRow> rows = window.layerTreeRows();
 
@@ -1889,6 +1919,85 @@ int checkLayers(const QStringList &layerPaths, bool asJson)
                           : QStringLiteral("%1 subitem(s): %2")
                               .arg(shown.size())
                               .arg(shown.join(QStringLiteral(", "))));
+  }
+
+  // Encuadre inicial: el mapa debe mostrar TODO lo que se acaba de abrir. Si solo
+  // se encuadra la primera capa, las demas quedan fuera de la vista y el archivo
+  // se ve "a medias", aunque el panel las liste todas.
+  {
+    const Rectangle view = window.canvas()->extent();
+    QStringList outsideView;
+
+    for (const std::shared_ptr<VectorLayer> &layer : window.canvas()->layers())
+    {
+      const Rectangle layerExtent = layer->extentInEpsg(window.canvas()->destinationEpsg());
+      if (!layerExtent.isValid() || !view.isValid())
+        continue;
+
+      const double toleranceX = view.width() * 0.02;
+      const double toleranceY = view.height() * 0.02;
+      const bool covered = layerExtent.xMin() >= view.xMin() - toleranceX
+                           && layerExtent.xMax() <= view.xMax() + toleranceX
+                           && layerExtent.yMin() >= view.yMin() - toleranceY
+                           && layerExtent.yMax() <= view.yMax() + toleranceY;
+      if (!covered)
+        outsideView << layer->name();
+    }
+
+    check(QStringLiteral("el encuadre inicial incluye todas las capas del archivo"),
+          outsideView.isEmpty(),
+          outsideView.isEmpty()
+            ? QStringLiteral("vista %1 (EPSG:%2)").arg(view.toString()).arg(window.canvas()->destinationEpsg())
+            : QStringLiteral("fuera de la vista: %1 (vista %2)").arg(outsideView.join(QStringLiteral(", ")),
+                                                                     view.toString()));
+  }
+
+  // Cada capa debe aportar pixeles propios al mapa: una capa cargada que no se
+  // dibuja es justo el fallo que se comprueba. Se aisla cada capa (ocultando las
+  // demas y los raster) y se encuadra SU extension, de modo que el resultado no
+  // dependa de que sus elementos caigan en menos de un pixel en la vista general
+  // (el encuadre general se comprueba aparte, mas arriba).
+  {
+    const QSize mapSize(800, 600);
+    const Rectangle initialView = window.canvas()->extent();
+    const size_t layerCount = window.canvas()->layers().size();
+
+    std::vector<bool> layerVisibility;
+    layerVisibility.reserve(layerCount);
+    for (const std::shared_ptr<VectorLayer> &layer : window.canvas()->layers())
+      layerVisibility.push_back(layer->isVisible());
+
+    std::vector<bool> rasterVisibility;
+    rasterVisibility.reserve(window.canvas()->rasterLayers().size());
+    for (const std::shared_ptr<RasterLayer> &raster : window.canvas()->rasterLayers())
+      rasterVisibility.push_back(raster->isVisible());
+
+    QStringList notDrawn;
+    for (size_t index = 0; index < layerCount; ++index)
+    {
+      for (size_t other = 0; other < layerCount; ++other)
+        window.canvas()->layers()[other]->setVisible(other == index);
+      for (const std::shared_ptr<RasterLayer> &raster : window.canvas()->rasterLayers())
+        raster->setVisible(false);
+
+      window.canvas()->zoomToExtent(
+        window.canvas()->layers()[index]->extentInEpsg(window.canvas()->destinationEpsg()));
+      window.canvas()->refreshMap();
+      if (countPaintedPixels(window.canvas()->renderToImage(mapSize)) == 0)
+        notDrawn << window.canvas()->layers()[index]->name();
+    }
+
+    for (size_t index = 0; index < layerCount; ++index)
+      window.canvas()->layers()[index]->setVisible(layerVisibility[index]);
+    for (size_t index = 0; index < window.canvas()->rasterLayers().size(); ++index)
+      window.canvas()->rasterLayers()[index]->setVisible(rasterVisibility[index]);
+    if (initialView.isValid())
+      window.canvas()->setExtent(initialView);
+    window.canvas()->refreshMap();
+
+    check(QStringLiteral("cada capa del archivo se dibuja en el mapa"), notDrawn.isEmpty(),
+          notDrawn.isEmpty() ? QStringLiteral("%1 capa(s) con pixeles propios").arg(layerCount)
+                             : QStringLiteral("sin dibujar: %1").arg(notDrawn.join(QStringLiteral(", "))));
   }
 
   if (asJson)
@@ -2541,7 +2650,8 @@ int main(int argc, char *argv[])
                                               QStringLiteral("Comprueba que el mapa se redibuja al cambiar simbologia o visibilidad"));
   const QCommandLineOption checkLayersOption(
     QStringLiteral("check-layers"),
-    QStringLiteral("Comprueba que un archivo con varias capas (GeoPackage) se abre entero y el panel las agrupa"));
+    QStringLiteral("Comprueba que un archivo con varias capas (GeoPackage) se carga, se encuadra y se "
+                   "dibuja entero, y que el panel las agrupa"));
   const QCommandLineOption checkRasterOption(
     QStringLiteral("check-raster"),
     QStringLiteral("Comprueba el dibujado raster: cuadrantes, extension, reproyeccion, NoData, contraste, "

@@ -6,6 +6,7 @@
 #include <QFileInfo>
 #include <QStringList>
 
+#include <algorithm>
 #include <cstring>
 
 #include <cpl_conv.h>
@@ -221,6 +222,10 @@ std::shared_ptr<VectorLayer> VectorLayer::open(const QString &path, int layerInd
   }
 
   layer->readMetadata();
+  // La herencia del SRC necesita el SRC ya resuelto y la extension de la capa
+  // (para elegir la capa del archivo cuyas coordenadas encajan), asi que va
+  // despues de leer los metadatos.
+  layer->adoptSiblingSpatialRef(layerCount);
   layer->readFields();
   layer->mStyle = Style::defaultForKind(layer->mKind, nextStyleIndex());
 
@@ -273,6 +278,57 @@ void VectorLayer::readFields()
   }
 }
 
+void VectorLayer::adoptSiblingSpatialRef(int layerCount)
+{
+  if (!mDatasetHandle || !mLayerHandle)
+    return;
+
+  // Si la capa declara su SRC no hay nada que suponer.
+  if (OGR_L_GetSpatialRef(mLayerHandle) != nullptr)
+    return;
+
+  OGRSpatialReference *best = nullptr;
+  double bestOverlap = -1.0;
+
+  for (int index = 0; index < layerCount; ++index)
+  {
+    if (index == mLayerIndex)
+      continue;
+
+    OGRLayerH other = GDALDatasetGetLayer(mDatasetHandle, index);
+    if (!other)
+      continue;
+
+    auto *candidate = reinterpret_cast<OGRSpatialReference *>(OGR_L_GetSpatialRef(other));
+    if (!candidate)
+      continue;
+
+    // Se prefiere la capa cuyas coordenadas se solapan con esta: en un archivo
+    // con capas en SRC distintos, la primera que aparezca puede ser la equivocada.
+    OGREnvelope envelope;
+    std::memset(&envelope, 0, sizeof(envelope));
+    double overlap = 0.0;
+    if (OGR_L_GetExtent(other, &envelope, 1) == OGRERR_NONE && envelope.IsInit() && mExtent.isValid())
+    {
+      const double xMin = std::max(mExtent.xMin(), envelope.MinX);
+      const double yMin = std::max(mExtent.yMin(), envelope.MinY);
+      const double xMax = std::min(mExtent.xMax(), envelope.MaxX);
+      const double yMax = std::min(mExtent.yMax(), envelope.MaxY);
+      if (xMax > xMin && yMax > yMin)
+        overlap = (xMax - xMin) * (yMax - yMin);
+    }
+
+    if (overlap > bestOverlap)
+    {
+      bestOverlap = overlap;
+      best = candidate;
+    }
+  }
+
+  if (best)
+    mAssumedSrs.reset(best->Clone());
+}
+
 qint64 VectorLayer::featureCount() const
 {
   if (mFeatureCount >= 0)
@@ -303,6 +359,11 @@ qint64 VectorLayer::featureCount() const
 
 const OGRSpatialReference *VectorLayer::spatialRef() const
 {
+  // Si la capa no declara SRC se usa el heredado de otra capa del archivo (ver
+  // adoptSiblingSpatialRef); sin el, sus coordenadas no se pueden reproyectar.
+  if (mAssumedSrs)
+    return mAssumedSrs.get();
+
   if (!mLayerHandle)
     return nullptr;
 
@@ -347,7 +408,14 @@ QString VectorLayer::crsDescription() const
     prefix = srs->IsProjected() ? QStringLiteral("SRC proyectado sin codigo EPSG")
                                 : QStringLiteral("SRC geografico sin codigo EPSG");
 
-  return name.isEmpty() ? prefix : prefix + QStringLiteral(" - ") + name;
+  const QString base = name.isEmpty() ? prefix : prefix + QStringLiteral(" - ") + name;
+
+  // Se advierte de que el SRC es una suposicion: el usuario debe saberlo si las
+  // capas no se colocan donde espera.
+  if (mAssumedSrs)
+    return base + QStringLiteral(" (la capa no declara SRC; se usa el de otra capa del archivo)");
+
+  return base;
 }
 
 QString VectorLayer::crsWkt() const

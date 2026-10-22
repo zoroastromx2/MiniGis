@@ -14,6 +14,7 @@
 #include "minigisstyle.h"
 
 class OGRLayer;
+class OGRSpatialReference;
 class OGRCoordinateTransformation;
 
 namespace minigis
@@ -167,9 +168,14 @@ public:
    * devolver false para cancelar. Si se cancela o se supera `vertexBudget`
    * devuelve nullptr y explica el motivo en `error` (no es un fallo fatal: el
    * renderizador puede seguir usando el camino clasico).
+   *
+   * El SRC de origen se pasa aparte (y no se lee de `layer`) porque una capa
+   * puede no declararlo y heredar el de otra capa del archivo: en ese caso
+   * `OGRLayer::GetSpatialRef()` devuelve nulo y sin la reproyeccion las
+   * geometrias caen fuera de la vista.
    */
   static std::shared_ptr<GeometryStore> build(
-    OGRLayer *layer, int destinationEpsg, const Options &options,
+    OGRLayer *layer, const OGRSpatialReference *sourceSrs, int destinationEpsg, const Options &options,
     const std::function<bool(int, const QString &)> &progress = {},
     QString *error = nullptr);
 

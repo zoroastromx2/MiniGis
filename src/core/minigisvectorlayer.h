@@ -97,7 +97,22 @@ public:
   QString crsDescription() const;
   int crsEpsg() const;
   QString crsWkt() const;
-  const OGRSpatialReference *spatialRef() const; // prestado, puede ser nullptr
+
+  /**
+   * SRC de la capa, prestado (no liberar). Nunca es nulo si `hasAssumedSrs()` es
+   * true: en ese caso apunta al SRC heredado de otra capa del archivo.
+   */
+  const OGRSpatialReference *spatialRef() const;
+
+  /**
+   * True si la capa no declara SRC en el archivo y se ha adoptado el de otra capa
+   * del mismo archivo. Un GeoPackage puede dejar capas con srs_id 99999
+   * ("Undefined SRS") aunque sus coordenadas esten en el mismo sistema que las
+   * demas; sin esta herencia no se pueden reproyectar y caen fuera de la vista.
+   * La descripcion del SRC lo advierte para que el usuario sepa que es una
+   * suposicion.
+   */
+  bool hasAssumedSrs() const { return mAssumedSrs != nullptr; }
 
   /** Valor del campo `fieldIndex` en la fila `row`, ya formateado; vacio si es nulo. */
   QString fieldValue(qint64 row, int fieldIndex) const;
@@ -176,6 +191,14 @@ private:
 
   void readMetadata();
   void readFields();
+
+  /**
+   * Si la capa no declara SRC, adopta el de la capa del mismo archivo cuya
+   * extension se solape mas con la suya (o el primero que lo declare). Se llama
+   * al abrir la capa, cuando aun se puede consultar el dataset.
+   */
+  void adoptSiblingSpatialRef(int layerCount);
+
   void bumpRevision() { ++mRevision; }
 
   GDALDatasetH mDatasetHandle = nullptr;
@@ -193,6 +216,8 @@ private:
   Style mStyle;
   LabelStyle mLabelStyle;
   std::shared_ptr<GeometryStore> mGeometryStore;
+  /** SRC heredado de otra capa del archivo; nulo si la capa declara el suyo. */
+  std::unique_ptr<OGRSpatialReference> mAssumedSrs;
   bool mVisible = true;
   quint64 mRevision = 1;
   mutable qint64 mFeatureCount = -1; // -1 = pendiente de calcular

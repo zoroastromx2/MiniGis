@@ -137,6 +137,14 @@ private:
   /** Muestra u oculta el indicador de carga de la barra de estado. */
   void setLoadIndicatorVisible(bool visible);
 
+  /**
+   * Encuadra la union de las capas y raster abiertos en la tanda actual. Se hace
+   * al terminar (no capa a capa) para que un archivo con varias capas, o una
+   * tanda de archivos, se vea entero: encuadrar solo la primera capa dejaria las
+   * demas fuera de la vista aunque el panel las liste.
+   */
+  void frameLoadedBatch();
+
   MapCanvas *mCanvas = nullptr;
   LayerPanel *mLayerPanel = nullptr;
   AttributeTableModel *mAttributeModel = nullptr;
@@ -175,6 +183,11 @@ private:
   QString mLastDirectory;
   bool mUpdatingUi = false;
   bool mRestoreSettings = true;
+
+  /** Donde empieza la tanda de carga en curso y si hay que encuadrarla al final. */
+  size_t mLoadStartVectorLayers = 0;
+  size_t mLoadStartRasterLayers = 0;
+  bool mLoadBatchPending = false;
 };
 
 } // namespace minigis

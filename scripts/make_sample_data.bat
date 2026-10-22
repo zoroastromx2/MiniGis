@@ -56,6 +56,12 @@ if errorlevel 1 goto :error
 "%OGR2OGR%" -f GPKG -update -append "%GPKG_DST%\ejemplo.gpkg" "%DST%\parcels_utm30.shp" -nln parcels_utm30
 if errorlevel 1 goto :error
 
+rem Cuarta capa muy lejos de las demas: sirve para comprobar que al abrir el
+rem archivo se encuadra la union de todas las capas, no solo la primera.
+"%OGR2OGR%" -f GPKG -update -append "%GPKG_DST%\ejemplo.gpkg" "%SRC%\area_sur.geojson" ^
+  -nln area_sur -a_srs EPSG:4326
+if errorlevel 1 goto :error
+
 rem ---------------------------------------------------------------------------
 rem GeoTIFF de ejemplo: los genera un script Python con GDAL. Si no hay Python
 rem con GDAL se avisa y se continua: los .tif ya estan versionados.

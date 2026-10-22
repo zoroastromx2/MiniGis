@@ -84,6 +84,14 @@ public:
   void zoomToFullExtent();
   void zoomToLayer(const std::shared_ptr<VectorLayer> &layer);
   void zoomToLayer(const std::shared_ptr<RasterLayer> &layer);
+
+  /**
+   * Encuadra una extension concreta con el mismo ajuste (aspecto, tamano minimo y
+   * margen) que zoomToFullExtent. Lo usan las cargas que anaden varias capas a la
+   * vez: encuadrar solo la primera dejaria las demas fuera de la vista.
+   */
+  void zoomToExtent(const Rectangle &extent);
+
   void zoomIn();
   void zoomOut();
   void zoomBy(double factor, const QPointF &anchorPixel = QPointF());

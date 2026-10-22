@@ -552,7 +552,7 @@ private:
 } // namespace
 
 std::shared_ptr<GeometryStore> GeometryStore::build(
-  OGRLayer *layer, int destinationEpsg, const Options &options,
+  OGRLayer *layer, const OGRSpatialReference *sourceSrs, int destinationEpsg, const Options &options,
   const std::function<bool(int, const QString &)> &progress, QString *error)
 {
   const auto fail = [error](const QString &message) -> std::shared_ptr<GeometryStore> {
@@ -580,9 +580,9 @@ std::shared_ptr<GeometryStore> GeometryStore::build(
 
   std::unique_ptr<OGRSpatialReference> sourceClone;
   bool reprojected = false;
-  if (const OGRSpatialReference *source = layer->GetSpatialRef())
+  if (sourceSrs)
   {
-    sourceClone.reset(source->Clone());
+    sourceClone.reset(sourceSrs->Clone());
     if (sourceClone)
       sourceClone->SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
   }
@@ -830,7 +830,11 @@ std::shared_ptr<GeometryStore> GeometryStore::buildFromLayer(
     return {};
   }
 
-  return build(reinterpret_cast<OGRLayer *>(handle), destinationEpsg, options, progress, error);
+  // El SRC sale del VectorLayer, no de la capa OGR: si la capa no lo declara, lo
+  // hereda de otra capa del archivo (VectorLayer::spatialRef) y aqui hace falta
+  // para reproyectar las geometrias.
+  return build(reinterpret_cast<OGRLayer *>(handle), layer.spatialRef(), destinationEpsg, options,
+               progress, error);
 }
 
 std::shared_ptr<GeometryStore> GeometryStore::buildEnvelopeIndex(

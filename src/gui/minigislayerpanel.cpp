@@ -210,6 +210,9 @@ void LayerPanel::addLayerRow(QTreeWidgetItem *parent, size_t index, const LayerE
   item->setText(ColumnGeometry, entry.kindText);
   item->setText(ColumnFeatures, entry.countText);
   item->setText(ColumnCrs, entry.crsText);
+  // La descripcion del SRC puede ser larga (incluye el aviso de SRC asumido): el
+  // tooltip permite leerla entera aunque la columna salga recortada.
+  item->setToolTip(ColumnCrs, entry.crsText);
   item->setCheckState(ColumnName, entry.visible ? Qt::Checked : Qt::Unchecked);
   item->setData(ColumnName, kLayerIndexRole, static_cast<int>(index));
 

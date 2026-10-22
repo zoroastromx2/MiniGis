@@ -184,8 +184,8 @@ void VectorLayerLoader::run(const QStringList &paths)
         {
           // No es un fallo fatal: la capa se dibujara leyendo de GDAL en cada
           // cuadro. Se avisa para que el usuario entienda por que va mas lenta.
-          emit layerFailed(path, QStringLiteral("La capa se abrio, pero no se pudo preparar el "
-                                                "indice de dibujo rapido."),
+          emit layerFailed(path, QStringLiteral("La capa se abrió, pero no se pudo preparar el "
+                                                "índice de dibujo rápido."),
                            storeError);
         }
       }

@@ -1,0 +1,22 @@
+{
+  "type": "FeatureCollection",
+  "name": "area_sur",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": { "nombre": "Area sur de ejemplo" },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [ -62.0, -35.0 ],
+            [ -61.0, -35.0 ],
+            [ -61.0, -34.0 ],
+            [ -62.0, -34.0 ],
+            [ -62.0, -35.0 ]
+          ]
+        ]
+      }
+    }
+  ]
+}

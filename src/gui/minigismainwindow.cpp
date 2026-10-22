@@ -450,6 +450,11 @@ void MainWindow::onLayerLoadFailed(const QString &path, const QString &message, 
 void MainWindow::onLoadFinished(int loaded, int failed, bool cancelled)
 {
   setLoadIndicatorVisible(false);
+
+  // Ahora que se sabe todo lo que aportaba la tanda se encuadra su union: si se
+  // hubiera encuadrado solo la primera capa, las demas (otras capas del mismo
+  // GeoPackage o los demas archivos) quedarian fuera de la vista.
+  frameLoadedBatch();
   updateWindowTitle();
 
   QString summary;
@@ -461,6 +466,31 @@ void MainWindow::onLoadFinished(int loaded, int failed, bool cancelled)
     summary = QStringLiteral("Carga terminada: %1 capa(s).").arg(loaded);
 
   statusBar()->showMessage(summary, kStatusTimeoutMs);
+}
+
+void MainWindow::frameLoadedBatch()
+{
+  if (!mLoadBatchPending)
+    return;
+  mLoadBatchPending = false;
+
+  Rectangle extent;
+  const std::vector<std::shared_ptr<VectorLayer>> &layers = mCanvas->layers();
+  for (size_t index = std::min(mLoadStartVectorLayers, layers.size()); index < layers.size(); ++index)
+  {
+    if (layers[index])
+      extent.combine(layers[index]->extentInEpsg(mCanvas->destinationEpsg()));
+  }
+
+  const std::vector<std::shared_ptr<RasterLayer>> &rasters = mCanvas->rasterLayers();
+  for (size_t index = std::min(mLoadStartRasterLayers, rasters.size()); index < rasters.size(); ++index)
+  {
+    if (rasters[index])
+      extent.combine(rasters[index]->extentInEpsg(mCanvas->destinationEpsg()));
+  }
+
+  if (extent.isValid())
+    mCanvas->zoomToExtent(extent);
 }
 
 std::shared_ptr<VectorLayer> MainWindow::currentLayer() const
@@ -495,6 +525,7 @@ bool MainWindow::openLayer(const QString &path, bool zoomToExtent)
     return false;
   }
 
+  const size_t firstLayerIndex = mCanvas->layers().size();
   int added = 0;
   std::shared_ptr<VectorLayer> onlyLayer;
   for (int index = 0; index < names.size(); ++index)
@@ -518,6 +549,21 @@ bool MainWindow::openLayer(const QString &path, bool zoomToExtent)
 
   if (added == 0)
     return false;
+
+  // Encuadrar la union de las capas anadidas: si el archivo tiene varias capas,
+  // encuadrar solo la primera dejaria las demas fuera de la vista.
+  if (zoomToExtent)
+  {
+    Rectangle extent;
+    for (size_t index = std::min(firstLayerIndex, mCanvas->layers().size());
+         index < mCanvas->layers().size(); ++index)
+    {
+      if (mCanvas->layers()[index])
+        extent.combine(mCanvas->layers()[index]->extentInEpsg(mCanvas->destinationEpsg()));
+    }
+    if (extent.isValid())
+      mCanvas->zoomToExtent(extent);
+  }
 
   addRecentFile(path);
 
@@ -585,6 +631,13 @@ int MainWindow::loadPaths(const QStringList &paths)
   QStringList vectorPaths;
   int queued = 0;
 
+  // Se anota donde empieza la tanda para encuadrar al final la union de todo lo
+  // cargado (ver frameLoadedBatch). Los raster se anaden aqui mismo, antes de
+  // arrancar el cargador vectorial, y tambien cuentan.
+  mLoadStartVectorLayers = mCanvas->layers().size();
+  mLoadStartRasterLayers = mCanvas->rasterLayers().size();
+  mLoadBatchPending = true;
+
   for (const QString &path : paths)
   {
     Error error;
@@ -617,6 +670,8 @@ int MainWindow::loadPaths(const QStringList &paths)
   }
   else
   {
+    // Solo habia raster: no pasara por onLoadFinished.
+    frameLoadedBatch();
     setLoadIndicatorVisible(false);
     updateWindowTitle();
   }
