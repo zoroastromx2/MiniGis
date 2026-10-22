@@ -6,6 +6,7 @@
  *   minigis --info [--json] --layer x.shp     informacion de las capas, sin ventana
  *   minigis --snapshot out.png --layer x.shp  render del mapa a PNG, sin ventana
  *   minigis --snapshot-window ui.png          captura de la interfaz completa
+ *   minigis --check-layers -l x.gpkg          todas las capas del archivo y su grupo en el panel
  *   minigis --bench 40 --layer x.gpkg         mide cuadros de paneo/zoom (rendimiento)
  *   minigis --list-drivers                    drivers vectoriales de GDAL
  *
@@ -54,6 +55,7 @@ constexpr unsigned int kUtf8CodePage = 65001;
 #include "minigisgdalinit.h"
 #include "minigisgeometrystore.h"
 #include "minigislabeldialog.h"
+#include "minigislayerpanel.h"
 #include "minigismainwindow.h"
 #include "minigismapcanvas.h"
 #include "minigisrasterlayer.h"
@@ -184,6 +186,7 @@ QString helpText(const QCommandLineParser &parser)
                           "  minigis --snapshot-window ui.png -l c.shp captura tambien la interfaz\n"
                           "  minigis --snapshot m.png -l capa.tif -l c.shp raster debajo del vectorial\n"
                           "  minigis --check-raster -l a.tif -l b.tif  comprueba el dibujado raster\n"
+                          "  minigis --check-layers -l capa.gpkg      todas las capas del archivo, en el panel\n"
                           "\nRendimiento (sin ventana):\n"
                           "  minigis --bench 40 -l capa.gpkg                 mide 40 cuadros de paneo/zoom\n"
                           "  minigis --bench 40 --bench-scenario zoom -l c.gpkg\n"
@@ -222,23 +225,30 @@ QString layerInfoText(const VectorLayer &layer)
   for (const VectorLayer::FieldInfo &field : layer.fields())
     fields << QStringLiteral("%1 (%2)").arg(field.name, field.typeName);
 
-  return QStringLiteral("Capa        : %1\n"
-                        "Archivo     : %2\n"
-                        "Driver      : %3\n"
-                        "Geometria   : %4 (%5)\n"
-                        "Elementos   : %6\n"
-                        "Extension   : %7\n"
-                        "SRC         : %8\n"
-                        "Campos      : %9")
-    .arg(layer.name(),
-         QDir::toNativeSeparators(layer.sourcePath()),
-         layer.driverName(),
-         layer.geometryTypeName(),
-         Style::kindName(layer.geometryKind()),
-         QString::number(layer.featureCount()),
-         layer.extent().toString(),
-         layer.crsDescription(),
-         fields.isEmpty() ? QStringLiteral("(sin campos)") : fields.join(QStringLiteral(", ")));
+  QStringList lines;
+  lines << QStringLiteral("Capa        : %1").arg(layer.name());
+  lines << QStringLiteral("Archivo     : %1").arg(QDir::toNativeSeparators(layer.sourcePath()));
+
+  // Solo se informa de la posicion cuando el archivo tiene varias capas: en un
+  // shapefile la linea sobraria.
+  if (layer.layerCount() > 1)
+  {
+    lines << QStringLiteral("Posicion    : capa %1 de %2 de «%3»")
+               .arg(layer.layerIndex() + 1)
+               .arg(layer.layerCount())
+               .arg(layer.containerName());
+  }
+
+  lines << QStringLiteral("Driver      : %1").arg(layer.driverName());
+  lines << QStringLiteral("Geometria   : %1 (%2)")
+             .arg(layer.geometryTypeName(), Style::kindName(layer.geometryKind()));
+  lines << QStringLiteral("Elementos   : %1").arg(layer.featureCount());
+  lines << QStringLiteral("Extension   : %1").arg(layer.extent().toString());
+  lines << QStringLiteral("SRC         : %1").arg(layer.crsDescription());
+  lines << QStringLiteral("Campos      : %1")
+             .arg(fields.isEmpty() ? QStringLiteral("(sin campos)") : fields.join(QStringLiteral(", ")));
+
+  return lines.join(QLatin1Char('\n'));
 }
 
 QJsonObject layerInfoJson(const VectorLayer &layer)
@@ -247,6 +257,9 @@ QJsonObject layerInfoJson(const VectorLayer &layer)
   object.insert(QStringLiteral("type"), QStringLiteral("vector"));
   object.insert(QStringLiteral("name"), layer.name());
   object.insert(QStringLiteral("source"), layer.sourcePath());
+  object.insert(QStringLiteral("container"), layer.containerName());
+  object.insert(QStringLiteral("layerIndex"), layer.layerIndex());
+  object.insert(QStringLiteral("layerCount"), layer.layerCount());
   object.insert(QStringLiteral("driver"), layer.driverName());
   object.insert(QStringLiteral("geometryType"), layer.geometryTypeName());
   object.insert(QStringLiteral("geometryKind"), Style::kindName(layer.geometryKind()));
@@ -604,15 +617,17 @@ int runBenchmark(const BenchRequest &request)
       return ExitFileNotFound;
     }
 
-    Error vectorError;
-    const std::shared_ptr<VectorLayer> layer = VectorLayer::open(path, &vectorError);
-    if (!layer)
+    // Un archivo con varias capas se mide entero: el coste del mapa es el de
+    // todas sus capas, no solo el de la primera.
+    Error listError;
+    const QStringList names = VectorLayer::layerNames(path, &listError);
+    if (names.isEmpty())
     {
       Error rasterError;
       const std::shared_ptr<RasterLayer> raster = RasterLayer::open(path, &rasterError);
       if (!raster)
       {
-        writeErr(vectorError.toText());
+        writeErr(listError.toText());
         return ExitOpenFailed;
       }
 
@@ -628,48 +643,59 @@ int runBenchmark(const BenchRequest &request)
       continue;
     }
 
-    if (useStore)
+    for (int layerIndex = 0; layerIndex < names.size(); ++layerIndex)
     {
-      QString storeError;
-      QString modeName;
-      qint64 layerBuildMs = 0;
-      const std::shared_ptr<GeometryStore> store =
-        buildGeometryStore(layer, request.destinationEpsg, &layerBuildMs, &modeName, &storeError);
-      storeBuildMs += layerBuildMs;
+      Error layerError;
+      const std::shared_ptr<VectorLayer> layer = VectorLayer::open(path, layerIndex, &layerError);
+      if (!layer)
+      {
+        writeErr(layerError.toText());
+        return ExitOpenFailed;
+      }
 
-      if (store)
+      if (useStore)
       {
-        const GeometryStore::Stats stats = store->stats();
-        storeFeatures += stats.features;
-        storeVertices += stats.vertices;
-        storeBytes += stats.bytes;
-        if (stats.mode == GeometryStore::Mode::Envelopes)
-          envelopeMode = true;
-        layer->setGeometryStore(store);
-        logVerbose(QStringLiteral("almacen de «%1» (%9): %2 elementos, %3 vertices, %4 MB, niveles %5 "
-                                  "(lectura %6 ms, indice %7 ms, detalle %8 ms)")
-                     .arg(layer->name())
-                     .arg(stats.features)
-                     .arg(stats.vertices)
-                     .arg(QString::number(static_cast<double>(stats.bytes) / (1024.0 * 1024.0), 'f', 1))
-                     .arg(stats.cachedLevels)
-                     .arg(stats.readMs)
-                     .arg(stats.indexMs)
-                     .arg(stats.levelsMs)
-                     .arg(modeName));
+        QString storeError;
+        QString modeName;
+        qint64 layerBuildMs = 0;
+        const std::shared_ptr<GeometryStore> store =
+          buildGeometryStore(layer, request.destinationEpsg, &layerBuildMs, &modeName, &storeError);
+        storeBuildMs += layerBuildMs;
+
+        if (store)
+        {
+          const GeometryStore::Stats stats = store->stats();
+          storeFeatures += stats.features;
+          storeVertices += stats.vertices;
+          storeBytes += stats.bytes;
+          if (stats.mode == GeometryStore::Mode::Envelopes)
+            envelopeMode = true;
+          layer->setGeometryStore(store);
+          logVerbose(QStringLiteral("almacen de «%1» (%9): %2 elementos, %3 vertices, %4 MB, niveles %5 "
+                                    "(lectura %6 ms, indice %7 ms, detalle %8 ms)")
+                       .arg(layer->name())
+                       .arg(stats.features)
+                       .arg(stats.vertices)
+                       .arg(QString::number(static_cast<double>(stats.bytes) / (1024.0 * 1024.0), 'f', 1))
+                       .arg(stats.cachedLevels)
+                       .arg(stats.readMs)
+                       .arg(stats.indexMs)
+                       .arg(stats.levelsMs)
+                       .arg(modeName));
+        }
+        else
+        {
+          writeErr(QStringLiteral("Aviso: no se pudo indexar «%1»: %2 (se usara la lectura directa).")
+                     .arg(QDir::toNativeSeparators(path), storeError));
+        }
       }
-      else
-      {
-        writeErr(QStringLiteral("Aviso: no se pudo indexar «%1»: %2 (se usara la lectura directa).")
-                   .arg(QDir::toNativeSeparators(path), storeError));
-      }
+
+      applyLabelOptions(layer, request.labels);
+
+      layerNames << layer->name();
+      canvas.addLayer(layer, opened == 0);
+      ++opened;
     }
-
-    applyLabelOptions(layer, request.labels);
-
-    layerNames << layer->name();
-    canvas.addLayer(layer, opened == 0);
-    ++opened;
   }
 
   if (opened == 0)
@@ -1711,6 +1737,173 @@ int checkRefresh(const QStringList &layerPaths, const QSize &size, bool asJson)
 }
 
 /**
+ * Comprueba que un archivo con varias capas vectoriales (un GeoPackage) se abre
+ * entero y que el panel lo presenta agrupado (`--check-layers`).
+ *
+ * Es la prueba de contrato del fallo original: al abrir un GeoPackage solo se
+ * cargaba la primera capa, de modo que ni el mapa ni el panel mostraban el resto
+ * del archivo. Se comprueba contra `VectorLayer::layerNames()`, que es la
+ * enumeracion que hace GDAL, y no contra una lista escrita a mano.
+ */
+int checkLayers(const QStringList &layerPaths, bool asJson)
+{
+  if (layerPaths.isEmpty())
+  {
+    writeErr(QStringLiteral("Se necesita un archivo: minigis --check-layers -l capa.gpkg"));
+    return ExitUsage;
+  }
+
+  bool ok = true;
+  const auto check = [&ok](const QString &name, bool passed, const QString &detail) {
+    writeOut(QStringLiteral("%1 %2%3")
+               .arg(passed ? QStringLiteral("OK  ") : QStringLiteral("FALLO"))
+               .arg(name, detail.isEmpty() ? QString() : QStringLiteral(" — ") + detail));
+    if (!passed)
+      ok = false;
+  };
+
+  /** Un archivo de entrada y las capas que GDAL dice que contiene. */
+  struct ExpectedFile
+  {
+    QString container;
+    QStringList layers;
+  };
+  QVector<ExpectedFile> expected;
+
+  int vectorLayers = 0;
+  int expectedGroups = 0;
+  for (const QString &path : layerPaths)
+  {
+    if (!QFileInfo::exists(path))
+    {
+      writeErr(QStringLiteral("No existe el archivo: %1").arg(QDir::toNativeSeparators(path)));
+      return ExitFileNotFound;
+    }
+
+    Error error;
+    const QStringList names = VectorLayer::layerNames(path, &error);
+    if (names.isEmpty())
+    {
+      // Un raster no aporta capas vectoriales: no es el objeto de esta prueba.
+      logVerbose(QStringLiteral("%1 no es vectorial; se omite").arg(QDir::toNativeSeparators(path)));
+      continue;
+    }
+
+    ExpectedFile file;
+    file.container = QFileInfo(path).fileName();
+    file.layers = names;
+    expected.push_back(file);
+
+    vectorLayers += names.size();
+    if (names.size() > 1)
+      ++expectedGroups;
+  }
+
+  if (expected.isEmpty())
+  {
+    writeErr(QStringLiteral("Ninguno de los archivos indicados contiene capas vectoriales."));
+    return ExitOpenFailed;
+  }
+
+  // Se carga a traves de la ventana real (con su cargador en segundo plano): asi
+  // la comprobacion cubre el mismo camino que usa el usuario.
+  MainWindow window(nullptr, false);
+  window.loadPaths(layerPaths);
+  if (!window.waitForLoading(300000))
+  {
+    writeErr(QStringLiteral("La carga de capas no termino a tiempo."));
+    return ExitOpenFailed;
+  }
+
+  const int loadedLayers = static_cast<int>(window.canvas()->layers().size());
+  check(QStringLiteral("se cargan todas las capas del archivo"), loadedLayers == vectorLayers,
+        QStringLiteral("%1 cargadas, %2 en los archivos").arg(loadedLayers).arg(vectorLayers));
+
+  // Estructura del panel: un item de grupo con las capas como subitems.
+  const std::vector<LayerPanel::TreeRow> rows = window.layerTreeRows();
+
+  struct ShownGroup
+  {
+    QString name;
+    QStringList children;
+  };
+  QVector<ShownGroup> groups;
+
+  for (size_t index = 0; index < rows.size();)
+  {
+    if (!rows[index].isGroup)
+    {
+      ++index;
+      continue;
+    }
+
+    ShownGroup group;
+    group.name = rows[index].name;
+    ++index;
+    while (index < rows.size() && rows[index].depth > 0)
+    {
+      group.children << rows[index].name;
+      ++index;
+    }
+    groups.push_back(group);
+  }
+
+  check(QStringLiteral("el panel agrupa las capas bajo el nombre del archivo"),
+        groups.size() == expectedGroups,
+        QStringLiteral("%1 grupo(s) para %2 archivo(s) con varias capas")
+          .arg(groups.size())
+          .arg(expectedGroups));
+
+  for (const ExpectedFile &file : expected)
+  {
+    if (file.layers.size() < 2)
+    {
+      // Un archivo de una sola capa se muestra como una fila suelta: agruparlo
+      // anadiria una carpeta sin nada que separar.
+      bool found = false;
+      for (const LayerPanel::TreeRow &row : rows)
+      {
+        if (!row.isGroup && file.layers.contains(row.name))
+          found = true;
+      }
+      check(QStringLiteral("«%1» se muestra como una fila suelta").arg(file.container), found,
+            file.layers.join(QStringLiteral(", ")));
+      continue;
+    }
+
+    QStringList shown;
+    for (const ShownGroup &group : groups)
+    {
+      if (group.name == file.container)
+      {
+        shown = group.children;
+        break;
+      }
+    }
+
+    check(QStringLiteral("«%1» aparece como un item con %2 capas")
+            .arg(file.container)
+            .arg(file.layers.size()),
+          shown == file.layers,
+          shown.isEmpty() ? QStringLiteral("no se encontro el grupo")
+                          : QStringLiteral("%1 subitem(s): %2")
+                              .arg(shown.size())
+                              .arg(shown.join(QStringLiteral(", "))));
+  }
+
+  if (asJson)
+  {
+    QJsonObject root;
+    root.insert(QStringLiteral("ok"), ok);
+    root.insert(QStringLiteral("layers"), loadedLayers);
+    root.insert(QStringLiteral("groups"), groups.size());
+    writeOut(QString::fromUtf8(QJsonDocument(root).toJson(QJsonDocument::Indented)).trimmed());
+  }
+
+  return ok ? ExitOk : ExitRenderFailed;
+}
+
+/**
  * Transforma un punto del SRC nativo de la capa a EPSG:4326 con GDAL.
  * Es el oraculo independiente que usa --check-raster para comprobar el encuadre.
  */
@@ -2249,6 +2442,7 @@ int main(int argc, char *argv[])
              || argument == QStringLiteral("--index-shp")
              || argument == QStringLiteral("--check-refresh")
              || argument == QStringLiteral("--check-raster")
+             || argument == QStringLiteral("--check-layers")
              || argument == QStringLiteral("--help") || argument == QStringLiteral("-h")
              || argument == QStringLiteral("--version") || argument == QStringLiteral("-v"))
     {
@@ -2345,6 +2539,9 @@ int main(int argc, char *argv[])
                                              QStringLiteral("Comprueba el etiquetado (campos, escala, solapes, cache)"));
   const QCommandLineOption checkRefreshOption(QStringLiteral("check-refresh"),
                                               QStringLiteral("Comprueba que el mapa se redibuja al cambiar simbologia o visibilidad"));
+  const QCommandLineOption checkLayersOption(
+    QStringLiteral("check-layers"),
+    QStringLiteral("Comprueba que un archivo con varias capas (GeoPackage) se abre entero y el panel las agrupa"));
   const QCommandLineOption checkRasterOption(
     QStringLiteral("check-raster"),
     QStringLiteral("Comprueba el dibujado raster: cuadrantes, extension, reproyeccion, NoData, contraste, "
@@ -2371,8 +2568,8 @@ int main(int argc, char *argv[])
                      layerOption, extentOption, sizeOption, crsOption, maxFeaturesOption, verboseOption,
                      benchOption, benchScenarioOption, benchBudgetOption, rendererOption, vertexBudgetOption,
                      spatialFilterOption, readBudgetOption, indexShpOption, withAttributesOption,
-                     checkRefreshOption, checkLabelsOption, snapshotDialogOption, snapshotRasterDialogOption,
-                     checkRasterOption, labelFieldOption, labelSizeOption,
+                     checkRefreshOption, checkLabelsOption, checkLayersOption, snapshotDialogOption,
+                     snapshotRasterDialogOption, checkRasterOption, labelFieldOption, labelSizeOption,
                      labelMapSizeOption, noLabelsOption, rasterStretchOption, rasterBandsOption,
                      rasterOpacityOption});
   parser.addPositionalArgument(QStringLiteral("archivo"),
@@ -2620,6 +2817,17 @@ int main(int argc, char *argv[])
     return checkRaster(layerPaths, checkSize, parser.isSet(jsonOption));
   }
 
+  if (parser.isSet(checkLayersOption))
+  {
+    if (layerPaths.isEmpty())
+    {
+      writeErr(QStringLiteral("Se necesita un archivo: minigis --check-layers -l capa.gpkg"));
+      return ExitUsage;
+    }
+
+    return checkLayers(layerPaths, parser.isSet(jsonOption));
+  }
+
   if (parser.isSet(checkLabelsOption) || parser.isSet(checkRefreshOption))
   {
     const bool labels = parser.isSet(checkLabelsOption);
@@ -2728,14 +2936,27 @@ int main(int argc, char *argv[])
         return ExitFileNotFound;
       }
 
-      Error error;
-      const std::shared_ptr<VectorLayer> layer = VectorLayer::open(path, &error);
-      if (layer)
+      // Un archivo puede contener varias capas vectoriales (un GeoPackage): se
+      // informa de todas, no solo de la primera.
+      Error listError;
+      const QStringList names = VectorLayer::layerNames(path, &listError);
+      if (!names.isEmpty())
       {
-        if (parser.isSet(jsonOption))
-          jsonLayers.append(layerInfoJson(*layer));
-        else
-          writeOut(layerInfoText(*layer));
+        for (int index = 0; index < names.size(); ++index)
+        {
+          Error error;
+          const std::shared_ptr<VectorLayer> layer = VectorLayer::open(path, index, &error);
+          if (!layer)
+          {
+            writeErr(error.toText());
+            return ExitOpenFailed;
+          }
+
+          if (parser.isSet(jsonOption))
+            jsonLayers.append(layerInfoJson(*layer));
+          else
+            writeOut(layerInfoText(*layer));
+        }
         continue;
       }
 
@@ -2769,7 +2990,7 @@ int main(int argc, char *argv[])
         continue;
       }
 
-      writeErr(error.toText());
+      writeErr(listError.toText());
       return ExitOpenFailed;
     }
 
@@ -2911,15 +3132,28 @@ int main(int argc, char *argv[])
         return ExitFileNotFound;
       }
 
-      Error error;
-      const std::shared_ptr<VectorLayer> layer = VectorLayer::open(path, &error);
-      if (layer)
+      // Un archivo puede contener varias capas (un GeoPackage): se dibujan
+      // todas, igual que hace la interfaz al abrirlo.
+      Error listError;
+      const QStringList names = VectorLayer::layerNames(path, &listError);
+      if (!names.isEmpty())
       {
-        applyLabelOptions(layer, labelOptions);
-        attachGeometryStore(layer, destinationEpsg, useStore);
-        canvas.addLayer(layer, opened == 0);
-        ++opened;
-        logVerbose(QStringLiteral("capa cargada: %1 (%2 elementos)").arg(layer->name()).arg(layer->featureCount()));
+        for (int index = 0; index < names.size(); ++index)
+        {
+          Error error;
+          const std::shared_ptr<VectorLayer> layer = VectorLayer::open(path, index, &error);
+          if (!layer)
+          {
+            writeErr(error.toText());
+            return ExitOpenFailed;
+          }
+
+          applyLabelOptions(layer, labelOptions);
+          attachGeometryStore(layer, destinationEpsg, useStore);
+          canvas.addLayer(layer, opened == 0);
+          ++opened;
+          logVerbose(QStringLiteral("capa cargada: %1 (%2 elementos)").arg(layer->name()).arg(layer->featureCount()));
+        }
         continue;
       }
 
@@ -2927,7 +3161,7 @@ int main(int argc, char *argv[])
       const std::shared_ptr<RasterLayer> raster = RasterLayer::open(path, &rasterError);
       if (!raster)
       {
-        writeErr(error.toText());
+        writeErr(listError.toText());
         return ExitOpenFailed;
       }
 

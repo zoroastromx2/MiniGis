@@ -415,7 +415,11 @@ void MainWindow::onLayerLoaded(const std::shared_ptr<VectorLayer> &layer, bool f
   mCurrentRaster.reset();
   mCanvas->addLayer(layer, zoomToExtent);
   mLastDirectory = QFileInfo(layer->sourcePath()).absolutePath();
-  addRecentFile(layer->sourcePath());
+
+  // Un archivo con varias capas emite una senal por capa: se anota una sola vez
+  // en los recientes para no reescribir la configuracion N veces.
+  if (mRecentFiles.isEmpty() || mRecentFiles.first() != QFileInfo(layer->sourcePath()).absoluteFilePath())
+    addRecentFile(layer->sourcePath());
   updateCrsLabel();
 
   // Si la capa no cabia en memoria se ha indexado por envolventes: se avisa,
@@ -481,23 +485,57 @@ bool MainWindow::openLayer(const QString &path, bool zoomToExtent)
     return false;
   }
 
-  const std::shared_ptr<VectorLayer> layer = VectorLayer::open(path, &error);
-  if (!layer)
+  // Un archivo puede contener varias capas (un GeoPackage): esta apertura
+  // sincrona tambien las anade todas, para no dejar un camino que reproduczca el
+  // fallo de cargar solo la primera.
+  const QStringList names = VectorLayer::layerNames(path, &error);
+  if (names.isEmpty())
   {
     showError(QStringLiteral("No se pudo abrir la capa"), error);
     return false;
   }
 
-  mCurrentRaster.reset();
-  mLastDirectory = QFileInfo(path).absolutePath();
-  mCanvas->addLayer(layer, zoomToExtent);
+  int added = 0;
+  std::shared_ptr<VectorLayer> onlyLayer;
+  for (int index = 0; index < names.size(); ++index)
+  {
+    Error layerError;
+    const std::shared_ptr<VectorLayer> layer = VectorLayer::open(path, index, &layerError);
+    if (!layer)
+    {
+      showError(QStringLiteral("No se pudo abrir la capa «%1»").arg(names.at(index)), layerError);
+      continue;
+    }
+
+    if (names.size() == 1)
+      onlyLayer = layer;
+
+    mCurrentRaster.reset();
+    mLastDirectory = QFileInfo(path).absolutePath();
+    mCanvas->addLayer(layer, zoomToExtent && added == 0);
+    ++added;
+  }
+
+  if (added == 0)
+    return false;
+
   addRecentFile(path);
 
-  statusBar()->showMessage(QStringLiteral("Capa «%1» cargada: %2 elementos (%3)")
-                             .arg(layer->name())
-                             .arg(layer->featureCount())
-                             .arg(layer->crsDescription()),
-                           kStatusTimeoutMs);
+  if (onlyLayer)
+  {
+    statusBar()->showMessage(QStringLiteral("Capa «%1» cargada: %2 elementos (%3)")
+                               .arg(onlyLayer->name())
+                               .arg(onlyLayer->featureCount())
+                               .arg(onlyLayer->crsDescription()),
+                             kStatusTimeoutMs);
+  }
+  else
+  {
+    statusBar()->showMessage(QStringLiteral("%1 capas cargadas de «%2».")
+                               .arg(added)
+                               .arg(QFileInfo(path).fileName()),
+                             kStatusTimeoutMs);
+  }
   return true;
 }
 
@@ -902,6 +940,11 @@ void MainWindow::onStatusMessage(const QString &message, int timeoutMs)
   statusBar()->showMessage(message, timeoutMs);
 }
 
+std::vector<LayerPanel::TreeRow> MainWindow::layerTreeRows() const
+{
+  return mLayerPanel ? mLayerPanel->treeRows() : std::vector<LayerPanel::TreeRow>();
+}
+
 void MainWindow::syncLayerPanel()
 {
   if (mUpdatingUi || !mLayerPanel)
@@ -942,6 +985,10 @@ void MainWindow::syncLayerPanel()
     entry.vector = layer;
     entry.name = layer->name();
     entry.sourcePath = layer->sourcePath();
+    // Solo se agrupa lo que viene de un archivo con varias capas: es lo que el
+    // usuario reconoce como carpetas y evita una carpeta con una sola capa.
+    if (layer->layerCount() > 1)
+      entry.groupName = layer->containerName();
     entry.kindText = Style::kindName(layer->geometryKind());
     entry.countText = QString::number(layer->featureCount());
     entry.crsText = layer->crsDescription();

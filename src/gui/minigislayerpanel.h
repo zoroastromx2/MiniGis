@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QMetaType>
+#include <QSet>
 #include <QWidget>
 
 #include <memory>
@@ -34,6 +35,13 @@ struct LayerEntry
   std::shared_ptr<RasterLayer> raster;
   QString name;
   QString sourcePath;
+  /**
+   * Nombre visible del archivo que contiene la capa. Solo lo llevan las capas de
+   * un archivo con varias (un GeoPackage): las de un archivo de una sola capa lo
+   * dejan vacio y se muestran como filas sueltas. Las filas con el mismo
+   * `sourcePath` se agrupan bajo este nombre.
+   */
+  QString groupName;
   QString kindText;
   QString countText;
   QString crsText;
@@ -44,6 +52,11 @@ struct LayerEntry
  * Panel de capas (arbol + acciones). No guarda estado propio: se reconstruye
  * cada vez que el lienzo avisa de un cambio, para que siempre refleje la
  * realidad del mapa.
+ *
+ * Un archivo con varias capas (un GeoPackage) se muestra como un item con el
+ * nombre del archivo y una capa por subitem. Es lo que hace visible que el
+ * archivo se abrio entero y permite distinguir capas que se llaman igual en
+ * archivos distintos.
  */
 class LayerPanel : public QWidget
 {
@@ -59,9 +72,24 @@ public:
     ColumnCount
   };
 
+  /**
+   * Una fila del arbol tal como la ve el usuario. La usa la comprobacion sin
+   * ventana (`--check-layers`) para verificar que se muestran todas las capas y
+   * agrupadas bajo su archivo.
+   */
+  struct TreeRow
+  {
+    QString name;
+    int depth = 0;
+    bool isGroup = false;
+  };
+
   explicit LayerPanel(QWidget *parent = nullptr);
 
   void setLayers(const std::vector<LayerEntry> &layers, const LayerEntry *current);
+
+  /** Filas del arbol en orden, con la profundidad y las capas de cada grupo. */
+  std::vector<TreeRow> treeRows() const;
 
 signals:
   void addLayerRequested();
@@ -78,6 +106,8 @@ private:
   void onItemChanged(QTreeWidgetItem *item, int column);
   void onSelectionChanged();
   void onItemDoubleClicked(QTreeWidgetItem *item, int column);
+  void onGroupExpansionChanged(QTreeWidgetItem *item, bool expanded);
+  void addLayerRow(QTreeWidgetItem *parent, size_t index, const LayerEntry *current);
   LayerEntry entryForItem(QTreeWidgetItem *item) const;
   void updateButtons();
 
@@ -89,6 +119,13 @@ private:
   QPushButton *mTableButton = nullptr;
 
   std::vector<LayerEntry> mLayers;
+
+  /**
+   * Grupos que el usuario ha plegado. Se recuerda la ruta del archivo (no el
+   * item) porque el arbol se reconstruye en cada cambio del mapa; sin esto,
+   * marcar una casilla volveria a desplegar todos los grupos.
+   */
+  QSet<QString> mCollapsedGroups;
   bool mUpdating = false;
 };
 

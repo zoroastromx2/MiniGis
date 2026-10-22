@@ -1,9 +1,12 @@
 #pragma once
 
+#include "minigislayerpanel.h"
+
 #include <QMainWindow>
 #include <QStringList>
 
 #include <memory>
+#include <vector>
 
 class QAction;
 class QDockWidget;
@@ -47,10 +50,13 @@ public:
 
   MapCanvas *canvas() const { return mCanvas; }
 
-  /** Abre una capa y la anade al lienzo; muestra un dialogo si falla. */
+  /** Abre un archivo y anade todas sus capas al lienzo; muestra un dialogo si falla. */
   bool openLayer(const QString &path, bool zoomToExtent = false);
 
-  /** Abre varias capas (linea de comandos o arrastrar y soltar). Devuelve cuantas se abrieron. */
+  /**
+   * Abre varios archivos (linea de comandos o arrastrar y soltar); de cada uno se
+   * cargan todas sus capas. Devuelve cuantos archivos se encolaron.
+   */
   int loadPaths(const QStringList &paths);
 
   /** True mientras haya una carga en segundo plano en curso. */
@@ -64,6 +70,13 @@ public:
   bool waitForLoading(int timeoutMs = 120000);
 
   void showAttributeTable(bool visible);
+
+  /**
+   * Filas del panel de capas tal como las ve el usuario. La usa el modo
+   * `--check-layers` para comprobar, sin ventana, que un archivo con varias
+   * capas se muestra entero y agrupado bajo su nombre.
+   */
+  std::vector<LayerPanel::TreeRow> layerTreeRows() const;
 
 protected:
   void closeEvent(QCloseEvent *event) override;

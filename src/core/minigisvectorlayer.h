@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QString>
+#include <QStringList>
 #include <QVector>
 
 #include <memory>
@@ -44,15 +45,43 @@ public:
 
   /**
    * Abre una capa vectorial. En caso de fallo devuelve nullptr y rellena
-   * `error` con la causa y la accion sugerida.
+   * `error` con la causa y la accion sugerida. Es la primera capa del archivo.
    */
   static std::shared_ptr<VectorLayer> open(const QString &path, Error *error = nullptr);
+
+  /**
+   * Abre la capa `layerIndex` de un archivo que puede contener varias (un
+   * GeoPackage, por ejemplo), en el orden en que las entrega GDAL.
+   *
+   * Cada capa abre su propio dataset a proposito: el cargador abre e indexa en
+   * un hilo de trabajo y entrega las capas a la interfaz, y dos capas del mismo
+   * archivo no deben compartir un dataset que esos dos hilos usarian a la vez.
+   */
+  static std::shared_ptr<VectorLayer> open(const QString &path, int layerIndex, Error *error = nullptr);
+
+  /**
+   * Nombres de todas las capas vectoriales que contiene un archivo, en orden.
+   *
+   * Es lo que permite cargar un GeoPackage entero sin adivinar cuantas capas
+   * tiene. Si el archivo no se puede abrir como vectorial devuelve una lista
+   * vacia y rellena `error`.
+   */
+  static QStringList layerNames(const QString &path, Error *error = nullptr);
 
   QString sourcePath() const { return mSourcePath; }
   QString name() const { return mName; }
   QString driverName() const { return mDriverName; }
   QString geometryTypeName() const { return mGeometryTypeName; }
   GeometryKind geometryKind() const { return mKind; }
+
+  /** Posicion de la capa dentro de su archivo (0 si es la unica). */
+  int layerIndex() const { return mLayerIndex; }
+
+  /** Numero de capas vectoriales del archivo; 1 en un shapefile o un GeoJSON. */
+  int layerCount() const { return mLayerCount; }
+
+  /** Nombre visible del archivo que contiene la capa, sin ruta. */
+  QString containerName() const { return mContainerName; }
 
   qint64 featureCount() const;
   const QVector<FieldInfo> &fields() const { return mFields; }
@@ -152,6 +181,9 @@ private:
   GDALDatasetH mDatasetHandle = nullptr;
   OGRLayerH mLayerHandle = nullptr;
   QString mSourcePath;
+  QString mContainerName;
+  int mLayerIndex = 0;
+  int mLayerCount = 1;
   QString mName;
   QString mDriverName;
   QString mGeometryTypeName;

@@ -55,24 +55,17 @@ GeometryKind kindForGeometryType(OGRwkbGeometryType geometryType)
   }
 }
 
-} // namespace
-
-VectorLayer::~VectorLayer()
+/**
+ * Abre el dataset vectorial de un archivo. Es el unico sitio que decide como se
+ * informa de un archivo que no existe o que GDAL no reconoce, para que abrir una
+ * capa y enumerar las capas de un archivo den el mismo mensaje.
+ */
+GDALDatasetH openVectorDataset(const QString &path, Error *error)
 {
-  if (mDatasetHandle)
-  {
-    GDALClose(mDatasetHandle);
-    mDatasetHandle = nullptr;
-    mLayerHandle = nullptr;
-  }
-}
-
-std::shared_ptr<VectorLayer> VectorLayer::open(const QString &path, Error *error)
-{
-  const auto fail = [error](const QString &message, const QString &hint) -> std::shared_ptr<VectorLayer> {
+  const auto fail = [error](const QString &message, const QString &hint) -> GDALDatasetH {
     if (error)
       *error = Error {message, hint};
-    return {};
+    return nullptr;
   };
 
   if (path.trimmed().isEmpty())
@@ -81,8 +74,7 @@ std::shared_ptr<VectorLayer> VectorLayer::open(const QString &path, Error *error
                 QStringLiteral("Arrastra un archivo .shp sobre el lienzo o usa Archivo > Abrir capa (Ctrl+O)."));
   }
 
-  const QFileInfo fileInfo(path);
-  if (!fileInfo.exists())
+  if (!QFileInfo::exists(path))
   {
     return fail(QStringLiteral("No existe el archivo «%1».").arg(QDir::toNativeSeparators(path)),
                 QStringLiteral("Comprueba la ruta. Un shapefile necesita sus ficheros .shp, .shx y .dbf en la misma carpeta."));
@@ -105,7 +97,105 @@ std::shared_ptr<VectorLayer> VectorLayer::open(const QString &path, Error *error
     return fail(QStringLiteral("GDAL no pudo abrir «%1».").arg(QDir::toNativeSeparators(path)), hint);
   }
 
-  OGRLayerH layerHandle = GDALDatasetGetLayer(datasetHandle, 0);
+  return datasetHandle;
+}
+
+} // namespace
+
+VectorLayer::~VectorLayer()
+{
+  if (mDatasetHandle)
+  {
+    GDALClose(mDatasetHandle);
+    mDatasetHandle = nullptr;
+    mLayerHandle = nullptr;
+  }
+}
+
+std::shared_ptr<VectorLayer> VectorLayer::open(const QString &path, Error *error)
+{
+  return open(path, 0, error);
+}
+
+QStringList VectorLayer::layerNames(const QString &path, Error *error)
+{
+  const auto fail = [error](const QString &message, const QString &hint) -> QStringList {
+    if (error)
+      *error = Error {message, hint};
+    return {};
+  };
+
+  Error openError;
+  GDALDatasetH datasetHandle = openVectorDataset(path, &openError);
+
+  if (!datasetHandle)
+  {
+    if (error)
+      *error = openError;
+    return {};
+  }
+
+  const int layerCount = GDALDatasetGetLayerCount(datasetHandle);
+  QStringList names;
+  names.reserve(layerCount);
+
+  for (int index = 0; index < layerCount; ++index)
+  {
+    OGRLayerH layerHandle = GDALDatasetGetLayer(datasetHandle, index);
+    if (!layerHandle)
+      continue;
+
+    const char *layerName = OGR_L_GetName(layerHandle);
+    names.append(QString::fromUtf8(layerName ? layerName : ""));
+  }
+
+  GDALClose(datasetHandle);
+
+  if (names.isEmpty())
+  {
+    return fail(QStringLiteral("«%1» no contiene ninguna capa vectorial legible.").arg(QDir::toNativeSeparators(path)),
+                QStringLiteral("Comprueba el contenido con: ogrinfo -so \"%1\"").arg(QDir::toNativeSeparators(path)));
+  }
+
+  return names;
+}
+
+std::shared_ptr<VectorLayer> VectorLayer::open(const QString &path, int layerIndex, Error *error)
+{
+  const auto fail = [error](const QString &message, const QString &hint) -> std::shared_ptr<VectorLayer> {
+    if (error)
+      *error = Error {message, hint};
+    return {};
+  };
+
+  Error openError;
+  GDALDatasetH datasetHandle = openVectorDataset(path, &openError);
+  if (!datasetHandle)
+  {
+    if (error)
+      *error = openError;
+    return {};
+  }
+
+  const int layerCount = GDALDatasetGetLayerCount(datasetHandle);
+  if (layerCount <= 0)
+  {
+    GDALClose(datasetHandle);
+    return fail(QStringLiteral("«%1» no contiene ninguna capa vectorial legible.").arg(QDir::toNativeSeparators(path)),
+                QStringLiteral("Comprueba el contenido con: ogrinfo -so \"%1\"").arg(QDir::toNativeSeparators(path)));
+  }
+
+  if (layerIndex < 0 || layerIndex >= layerCount)
+  {
+    GDALClose(datasetHandle);
+    return fail(QStringLiteral("«%1» no tiene una capa en la posicion %2.")
+                  .arg(QDir::toNativeSeparators(path))
+                  .arg(layerIndex + 1),
+                QStringLiteral("El archivo contiene %1 capa(s); usa un indice entre 1 y %1.")
+                  .arg(layerCount));
+  }
+
+  OGRLayerH layerHandle = GDALDatasetGetLayer(datasetHandle, layerIndex);
   if (!layerHandle)
   {
     GDALClose(datasetHandle);
@@ -117,6 +207,9 @@ std::shared_ptr<VectorLayer> VectorLayer::open(const QString &path, Error *error
   layer->mDatasetHandle = datasetHandle;
   layer->mLayerHandle = layerHandle;
   layer->mSourcePath = path;
+  layer->mContainerName = QFileInfo(path).fileName();
+  layer->mLayerIndex = layerIndex;
+  layer->mLayerCount = layerCount;
 
   const char *layerName = OGR_L_GetName(layerHandle);
   layer->mName = QString::fromUtf8(layerName ? layerName : "");

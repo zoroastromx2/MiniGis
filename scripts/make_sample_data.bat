@@ -40,6 +40,23 @@ rem (ogr2ogr no admite -a_srs junto a -t_srs: el origen se declara con -s_srs).
 if errorlevel 1 goto :error
 
 rem ---------------------------------------------------------------------------
+rem GeoPackage con tres capas: es el archivo que comprueba que al abrir un
+rem contenedor se cargan todas sus capas y el panel las agrupa bajo su nombre.
+rem ---------------------------------------------------------------------------
+set "GPKG_DST=%SRC%\geopackage"
+if not exist "%GPKG_DST%" mkdir "%GPKG_DST%"
+if exist "%GPKG_DST%\ejemplo.gpkg" del "%GPKG_DST%\ejemplo.gpkg"
+
+"%OGR2OGR%" -f GPKG "%GPKG_DST%\ejemplo.gpkg" "%DST%\cities.shp" -nln cities
+if errorlevel 1 goto :error
+
+"%OGR2OGR%" -f GPKG -update -append "%GPKG_DST%\ejemplo.gpkg" "%DST%\parcels.shp" -nln parcels
+if errorlevel 1 goto :error
+
+"%OGR2OGR%" -f GPKG -update -append "%GPKG_DST%\ejemplo.gpkg" "%DST%\parcels_utm30.shp" -nln parcels_utm30
+if errorlevel 1 goto :error
+
+rem ---------------------------------------------------------------------------
 rem GeoTIFF de ejemplo: los genera un script Python con GDAL. Si no hay Python
 rem con GDAL se avisa y se continua: los .tif ya estan versionados.
 rem ---------------------------------------------------------------------------
@@ -69,6 +86,7 @@ if errorlevel 1 goto :raster_error
 echo.
 echo [ok] Datos de ejemplo listos:
 dir /b "%DST%"
+if exist "%SRC%\geopackage" dir /b "%SRC%\geopackage"
 if exist "%SRC%\rasters" dir /b "%SRC%\rasters"
 exit /b 0
 

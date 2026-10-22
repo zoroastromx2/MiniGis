@@ -24,6 +24,10 @@ class VectorLayer;
  * Diseno:
  *   * `start()` lanza el trabajo con QtConcurrent y vuelve inmediatamente: el
  *     hilo de la interfaz nunca se bloquea.
+ *   * Cada archivo se expande en todas sus capas vectoriales: un GeoPackage con
+ *     cinco capas produce cinco `layerReady`. La lista de nombres la da
+ *     `VectorLayer::layerNames()`, de modo que no hay que saber de antemano que
+ *     formatos son multicapa.
  *   * El trabajo (abrir con GDAL + leer geometrias + construir el indice) se
  *     ejecuta en un hilo del pool. Las senales se emiten desde ese hilo y Qt las
  *     entrega en la cola de eventos del hilo de la interfaz (conexion en cola
@@ -31,7 +35,8 @@ class VectorLayer;
  *     ejecutan siempre en el hilo de la GUI.
  *   * Un dataset de GDAL no es seguro entre hilos: cada capa se abre, se lee y se
  *     indexa dentro del mismo hilo de trabajo, y solo despues se entrega a la
- *     interfaz (que ya no comparte el dataset con el hilo de trabajo).
+ *     interfaz (que ya no comparte el dataset con el hilo de trabajo). Por eso
+ *     dos capas del mismo archivo no comparten dataset.
  *   * `cancel()` marca una bandera atomica que los puntos de control consultan
  *     (lectura de geometrias y niveles de detalle), de modo que una carga larga
  *     se puede abortar sin esperar a que termine.
@@ -84,7 +89,8 @@ signals:
 
   /**
    * Una capa esta lista para dibujarse. `first` indica que es la primera de la
-   * tanda (el lienzo la usa para encuadrar la vista).
+   * tanda (el lienzo la usa para encuadrar la vista). Un archivo con varias
+   * capas emite una senal por capa.
    */
   void layerReady(const std::shared_ptr<minigis::VectorLayer> &layer, bool first);
 

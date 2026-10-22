@@ -56,6 +56,62 @@ elseif(MODE STREQUAL "snapshot")
     message(STATUS "minigis --snapshot OK: ${OUT} (${_size} bytes)")
   endif()
 
+elseif(MODE STREQUAL "geopackage")
+  # Un GeoPackage contiene varias capas: --info debe describirlas TODAS y decir a
+  # que archivo y en que posicion pertenece cada una. Antes solo se informaba de
+  # la primera, que es el mismo fallo que dejaba una sola capa en el panel.
+  execute_process(
+    COMMAND "${MINIGIS_EXE}" --info --json --layer "${SAMPLE}"
+    RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+  if(NOT _rc EQUAL EXPECT_EXIT)
+    message(FATAL_ERROR "minigis --info del GeoPackage fallo (codigo ${_rc}, esperado ${EXPECT_EXIT})\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")
+  endif()
+
+  if(EXPECT_EXIT EQUAL 0)
+    # Tres capas vectoriales en el JSON.
+    string(REGEX MATCHALL "\"type\": \"vector\"" _vector_layers "${_out}")
+    list(LENGTH _vector_layers _vector_count)
+    if(NOT _vector_count EQUAL 3)
+      message(FATAL_ERROR "El GeoPackage tiene 3 capas y --info informo de ${_vector_count}:\n${_out}")
+    endif()
+
+    foreach(_key IN ITEMS "\"container\": \"ejemplo.gpkg\"" "\"layerCount\": 3"
+                          "\"layerIndex\": 0" "\"layerIndex\": 1" "\"layerIndex\": 2"
+                          "\"name\": \"cities\"" "\"name\": \"parcels\""
+                          "\"name\": \"parcels_utm30\"")
+      if(NOT _out MATCHES "${_key}")
+        message(FATAL_ERROR "La salida JSON no contiene ${_key}:\n${_out}")
+      endif()
+    endforeach()
+    message(STATUS "minigis --info del GeoPackage OK")
+  endif()
+
+elseif(MODE STREQUAL "check-layers")
+  # Contrato visible en la interfaz: al abrir un GeoPackage se cargan todas sus
+  # capas y el panel muestra un item con el nombre del archivo y una capa por
+  # subitem. La comprobacion se hace sin ventana (--check-layers).
+  execute_process(
+    COMMAND "${MINIGIS_EXE}" --check-layers --layer "${SAMPLE}"
+    RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+  if(NOT _rc EQUAL EXPECT_EXIT)
+    message(FATAL_ERROR "minigis --check-layers fallo (codigo ${_rc}, esperado ${EXPECT_EXIT})\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")
+  endif()
+
+  if(EXPECT_EXIT EQUAL 0)
+    if(_out MATCHES "FALLO")
+      message(FATAL_ERROR "El panel no muestra todas las capas del GeoPackage:\n${_out}")
+    endif()
+    foreach(_key IN ITEMS "se cargan todas las capas del archivo"
+                          "el panel agrupa las capas bajo el nombre del archivo"
+                          "aparece como un item con 3 capas"
+                          "cities, parcels, parcels_utm30")
+      if(NOT _out MATCHES "${_key}")
+        message(FATAL_ERROR "La comprobacion «${_key}» no se ejecuto:\n${_out}")
+      endif()
+    endforeach()
+    message(STATUS "minigis --check-layers OK")
+  endif()
+
 elseif(MODE STREQUAL "bench")
   # Contrato del banco de pruebas: salida JSON estable y presupuesto respetado.
   # Es la base de la puerta de regresion de rendimiento en CI.

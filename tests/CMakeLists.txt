@@ -36,6 +36,29 @@ add_test(NAME minigis.salida-por-error-de-archivo
 set_tests_properties(minigis.info minigis.snapshot PROPERTIES
   ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+# --- GeoPackage multicapa ------------------------------------------------
+# Al abrir un contenedor con varias capas (un GeoPackage) deben cargarse TODAS:
+# el fallo original solo mostraba la primera, tanto en el mapa como en el panel.
+# El archivo de ejemplo tiene tres capas (cities, parcels, parcels_utm30).
+set(MINIGIS_SAMPLE_GPKG "${MINIGIS_ROOT_DIR}/data/sample/geopackage/ejemplo.gpkg")
+
+add_test(NAME minigis.geopackage
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DSAMPLE=${MINIGIS_SAMPLE_GPKG}"
+          -DMODE=geopackage
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
+add_test(NAME minigis.panel-capas
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DSAMPLE=${MINIGIS_SAMPLE_GPKG}"
+          -DMODE=check-layers
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
+set_tests_properties(minigis.geopackage minigis.panel-capas PROPERTIES
+  ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 # --- Banco de pruebas de rendimiento (--bench) ----------------------------
 # Contrato del modo de medida: salida JSON estable y presupuesto respetado. Se
 # ejecuta sobre los datos de ejemplo, que son diminutos: sirve para detectar

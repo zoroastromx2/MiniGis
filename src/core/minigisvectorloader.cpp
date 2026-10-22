@@ -66,6 +66,7 @@ void VectorLayerLoader::run(const QStringList &paths)
   int loaded = 0;
   int failed = 0;
   bool cancelled = false;
+  bool firstLayer = true;
 
   for (int index = 0; index < total; ++index)
   {
@@ -84,72 +85,118 @@ void VectorLayerLoader::run(const QStringList &paths)
 
     reportProgress(base, QStringLiteral("Abriendo «%1» (%2 de %3)...").arg(shortName).arg(index + 1).arg(total));
 
-    Error error;
-    const std::shared_ptr<VectorLayer> layer = VectorLayer::open(path, &error);
-    if (!layer)
+    // Un archivo puede contener varias capas (un GeoPackage, por ejemplo): se
+    // cargan todas, no solo la primera. Asi el panel del mapa muestra el
+    // contenido real del archivo.
+    Error listError;
+    const QStringList layerNames = VectorLayer::layerNames(path, &listError);
+    if (layerNames.isEmpty())
     {
       ++failed;
-      emit layerFailed(path, error.message, error.hint);
+      emit layerFailed(path, listError.message, listError.hint);
       continue;
     }
 
-    if (mBuildGeometryStore)
+    const int layerTotal = layerNames.size();
+
+    for (int layerIndex = 0; layerIndex < layerTotal; ++layerIndex)
     {
-      // Progreso del indice: de base+10 a base+span.
-      const int innerBase = base + std::max(1, span / 10);
-      const int innerSpan = std::max(0, span - std::max(1, span / 10));
-
-      QString storeError;
-      std::shared_ptr<GeometryStore> store = GeometryStore::buildFromLayer(
-        *layer, mDestinationEpsg, mStoreOptions,
-        [this, innerBase, innerSpan, &shortName](int percent, const QString &message) {
-          const int global = innerBase + (innerSpan * percent) / 100;
-          return reportProgress(global, QStringLiteral("%1 — %2").arg(shortName, message));
-        },
-        &storeError);
-
-      // La capa no cabe en memoria (millones de elementos): en lugar de
-      // renunciar a la aceleracion, se indexan solo las envolventes y la
-      // geometria se lee bajo demanda segun lo que se ve.
-      if (!store && mStoreOptions.allowEnvelopeFallback && !mCancelled.load())
-      {
-        reportProgress(innerBase, QStringLiteral("%1 — La capa no cabe en memoria; indexando "
-                                                 "envolventes...").arg(shortName));
-
-        QString envelopeError;
-        store = GeometryStore::buildEnvelopeIndex(
-          *layer, mDestinationEpsg, mStoreOptions,
-          [this, innerBase, innerSpan, &shortName](int percent, const QString &message) {
-            const int global = innerBase + (innerSpan * percent) / 100;
-            return reportProgress(global, QStringLiteral("%1 — %2").arg(shortName, message));
-          },
-          &envelopeError);
-
-        if (!store)
-          storeError = QStringLiteral("%1\nIndice de envolventes: %2").arg(storeError, envelopeError);
-      }
-
-      if (store)
-      {
-        layer->setGeometryStore(store);
-      }
-      else if (mCancelled.load())
+      if (mCancelled.load())
       {
         cancelled = true;
         break;
       }
-      else
+
+      // Franja del progreso que ocupa esta capa dentro del archivo. Se calculan
+      // los dos extremos (no un ancho fijo) para que la ultima capa llegue justo
+      // al final de la franja aunque el reparto no sea divisible.
+      const int layerBase = base + (span * layerIndex) / layerTotal;
+      const int layerEnd = base + (span * (layerIndex + 1)) / layerTotal;
+      const QString layerName = layerNames.at(layerIndex);
+
+      const QString opening = layerTotal > 1
+        ? QStringLiteral("Abriendo «%1» — «%2» (%3 de %4)...")
+            .arg(shortName, layerName).arg(layerIndex + 1).arg(layerTotal)
+        : QStringLiteral("Abriendo «%1»...").arg(shortName);
+      reportProgress(layerBase, opening);
+
+      Error error;
+      const std::shared_ptr<VectorLayer> layer = VectorLayer::open(path, layerIndex, &error);
+      if (!layer)
       {
-        // No es un fallo fatal: la capa se dibujara leyendo de GDAL en cada
-        // cuadro. Se avisa para que el usuario entienda por que va mas lenta.
-        emit layerFailed(path, QStringLiteral("La capa se abrio, pero no se pudo preparar el "
-                                              "indice de dibujo rapido."),
-                         storeError);
+        ++failed;
+        const QString message = layerTotal > 1
+          ? QStringLiteral("Capa «%1»: %2").arg(layerName, error.message)
+          : error.message;
+        emit layerFailed(path, message, error.hint);
+        continue;
       }
+
+      if (mBuildGeometryStore)
+      {
+        // Progreso del indice: deja el primer 10 % de la franja para abrir.
+        const int innerBase = layerBase + std::max(1, (layerEnd - layerBase) / 10);
+        const int innerSpan = std::max(0, layerEnd - innerBase);
+        const QString progressName = layerTotal > 1
+          ? QStringLiteral("«%1» — %2").arg(shortName, layerName)
+          : shortName;
+
+        QString storeError;
+        std::shared_ptr<GeometryStore> store = GeometryStore::buildFromLayer(
+          *layer, mDestinationEpsg, mStoreOptions,
+          [this, innerBase, innerSpan, &progressName](int percent, const QString &message) {
+            const int global = innerBase + (innerSpan * percent) / 100;
+            return reportProgress(global, QStringLiteral("%1 — %2").arg(progressName, message));
+          },
+          &storeError);
+
+        // La capa no cabe en memoria (millones de elementos): en lugar de
+        // renunciar a la aceleracion, se indexan solo las envolventes y la
+        // geometria se lee bajo demanda segun lo que se ve.
+        if (!store && mStoreOptions.allowEnvelopeFallback && !mCancelled.load())
+        {
+          reportProgress(innerBase, QStringLiteral("%1 — La capa no cabe en memoria; indexando "
+                                                   "envolventes...").arg(progressName));
+
+          QString envelopeError;
+          store = GeometryStore::buildEnvelopeIndex(
+            *layer, mDestinationEpsg, mStoreOptions,
+            [this, innerBase, innerSpan, &progressName](int percent, const QString &message) {
+              const int global = innerBase + (innerSpan * percent) / 100;
+              return reportProgress(global, QStringLiteral("%1 — %2").arg(progressName, message));
+            },
+            &envelopeError);
+
+          if (!store)
+            storeError = QStringLiteral("%1\nIndice de envolventes: %2").arg(storeError, envelopeError);
+        }
+
+        if (store)
+        {
+          layer->setGeometryStore(store);
+        }
+        else if (mCancelled.load())
+        {
+          cancelled = true;
+          break;
+        }
+        else
+        {
+          // No es un fallo fatal: la capa se dibujara leyendo de GDAL en cada
+          // cuadro. Se avisa para que el usuario entienda por que va mas lenta.
+          emit layerFailed(path, QStringLiteral("La capa se abrio, pero no se pudo preparar el "
+                                                "indice de dibujo rapido."),
+                           storeError);
+        }
+      }
+
+      ++loaded;
+      emit layerReady(layer, firstLayer);
+      firstLayer = false;
     }
 
-    ++loaded;
-    emit layerReady(layer, index == 0);
+    if (cancelled)
+      break;
   }
 
   mRunning.store(false);

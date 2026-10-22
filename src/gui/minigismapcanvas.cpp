@@ -299,10 +299,12 @@ std::shared_ptr<VectorLayer> MapCanvas::addLayer(const std::shared_ptr<VectorLay
   if (!layer)
     return {};
 
-  // No se admiten duplicados: evita dibujar dos veces el mismo archivo.
+  // No se admiten duplicados: evita dibujar dos veces la misma capa. La
+  // comparacion incluye el nombre porque un GeoPackage entrega varias capas
+  // desde el mismo archivo y todas comparten `sourcePath`.
   for (const std::shared_ptr<VectorLayer> &existing : mLayers)
   {
-    if (existing && existing->sourcePath() == layer->sourcePath())
+    if (existing && existing->sourcePath() == layer->sourcePath() && existing->name() == layer->name())
     {
       setCurrentLayer(existing);
       emit statusMessage(QStringLiteral("La capa «%1» ya estaba cargada.").arg(layer->name()), kStatusTimeoutMs);

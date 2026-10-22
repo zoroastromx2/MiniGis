@@ -12,16 +12,18 @@ en `RENDIMIENTO.md`. No las dupliques aqui: leelas cuando las necesites.
 
 ## Bucle de trabajo
 
-Compilar y probar siempre con el preset de depuracion:
+Compilar y probar con Qt 6.10.3 y el preset `windows-msvc-release` (en este equipo
+vcpkg solo tiene la variante Release de GDAL; `windows-msvc-debug` necesitaria la
+variante Debug, que no esta instalada):
 
 ```bat
-scripts\configure.bat windows-msvc-debug
-scripts\build.bat     windows-msvc-debug
-ctest --preset windows-msvc-debug --output-on-failure
+scripts\configure.bat windows-msvc-release
+scripts\build.bat     windows-msvc-release
+ctest --preset windows-msvc-release --output-on-failure
 ```
 
 - El ejecutable sale en `build\<preset>\bin\minigis.exe`; para lanzarlo usa
-  `scripts\run.bat windows-msvc-debug` o `bin\minigis.exe <args>`.
+  `scripts\run.bat windows-msvc-release` o `bin\minigis.exe <args>`.
 - Si anades o quitas un archivo fuente, edita tambien el `CMakeLists.txt` de su
   carpeta. Las listas de fuentes son explicitas: nunca uses `file(GLOB ...)`.
 

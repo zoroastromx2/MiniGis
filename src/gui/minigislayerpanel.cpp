@@ -3,6 +3,9 @@
 #include "minigisrasterlayer.h"
 #include "minigisvectorlayer.h"
 
+#include <QDir>
+#include <QFileInfo>
+#include <QFont>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QLabel>
@@ -19,11 +22,29 @@ namespace
 
 constexpr int kLayerIndexRole = Qt::UserRole + 1;
 
+/** Ruta del archivo del grupo; solo la llevan los items de grupo. */
+constexpr int kGroupRole = Qt::UserRole + 2;
+
 bool sameEntry(const LayerEntry &left, const LayerEntry &right)
 {
   if (left.kind != right.kind)
     return false;
   return left.kind == LayerEntry::Kind::Vector ? left.vector == right.vector : left.raster == right.raster;
+}
+
+/** Nombre que se muestra en el item del grupo. */
+QString groupLabel(const LayerEntry &entry)
+{
+  if (!entry.groupName.isEmpty())
+    return entry.groupName;
+  return QFileInfo(entry.sourcePath).fileName();
+}
+
+/** Dos filas pertenecen al mismo archivo (y por tanto al mismo grupo). */
+bool sameSource(const LayerEntry &left, const LayerEntry &right)
+{
+  return !left.sourcePath.isEmpty() && !left.groupName.isEmpty()
+         && left.sourcePath == right.sourcePath;
 }
 
 } // namespace
@@ -40,7 +61,9 @@ void LayerPanel::buildUi()
   mTree->setColumnCount(ColumnCount);
   mTree->setHeaderLabels({QStringLiteral("Capa"), QStringLiteral("Tipo"),
                           QStringLiteral("Tamano"), QStringLiteral("SRC")});
-  mTree->setRootIsDecorated(false);
+  // Un archivo con varias capas se muestra como una carpeta con subitems: hace
+  // falta el arbol para poder plegarlo.
+  mTree->setRootIsDecorated(true);
   mTree->setAlternatingRowColors(true);
   mTree->setSelectionMode(QAbstractItemView::SingleSelection);
   mTree->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -52,6 +75,12 @@ void LayerPanel::buildUi()
   connect(mTree, &QTreeWidget::itemChanged, this, &LayerPanel::onItemChanged);
   connect(mTree, &QTreeWidget::itemSelectionChanged, this, &LayerPanel::onSelectionChanged);
   connect(mTree, &QTreeWidget::itemDoubleClicked, this, &LayerPanel::onItemDoubleClicked);
+  connect(mTree, &QTreeWidget::itemExpanded, this, [this](QTreeWidgetItem *item) {
+    onGroupExpansionChanged(item, true);
+  });
+  connect(mTree, &QTreeWidget::itemCollapsed, this, [this](QTreeWidgetItem *item) {
+    onGroupExpansionChanged(item, false);
+  });
 
   const QStyle *widgetStyle = style();
 
@@ -83,7 +112,8 @@ void LayerPanel::buildUi()
 
   auto *emptyHint = new QLabel(
     QStringLiteral("Cada fila es una capa cargada. La casilla controla su visibilidad; "
-                   "el raster se dibuja debajo del vectorial."),
+                   "el raster se dibuja debajo del vectorial. Un archivo con varias capas "
+                   "(un GeoPackage) se muestra como una carpeta con sus capas dentro."),
     this);
   emptyHint->setWordWrap(true);
   emptyHint->setStyleSheet(QStringLiteral("color: palette(mid);"));
@@ -129,25 +159,88 @@ void LayerPanel::setLayers(const std::vector<LayerEntry> &layers, const LayerEnt
   mUpdating = true;
   mTree->clear();
 
-  for (size_t index = 0; index < mLayers.size(); ++index)
+  // Las capas de un mismo archivo se agrupan en una racha consecutiva: el orden
+  // del panel es el orden de apilado del mapa, y el cargador entrega las capas
+  // de un archivo seguidas. Solo se agrupa lo que viene de un archivo multicapa
+  // (`groupName` no vacio): un shapefile no necesita carpeta, y si el usuario
+  // quita capas del grupo este se mantiene, para no perder de vista el archivo.
+  for (size_t index = 0; index < mLayers.size();)
   {
-    const LayerEntry &entry = mLayers[index];
+    size_t runEnd = index + 1;
+    while (runEnd < mLayers.size() && sameSource(mLayers[index], mLayers[runEnd]))
+      ++runEnd;
 
-    auto *item = new QTreeWidgetItem(mTree);
-    item->setText(ColumnName, entry.name);
-    item->setToolTip(ColumnName, entry.sourcePath);
-    item->setText(ColumnGeometry, entry.kindText);
-    item->setText(ColumnFeatures, entry.countText);
-    item->setText(ColumnCrs, entry.crsText);
-    item->setCheckState(ColumnName, entry.visible ? Qt::Checked : Qt::Unchecked);
-    item->setData(ColumnName, kLayerIndexRole, static_cast<int>(index));
+    QTreeWidgetItem *parent = nullptr;
 
-    if (current && sameEntry(entry, *current))
-      mTree->setCurrentItem(item);
+    if (!mLayers[index].groupName.isEmpty())
+    {
+      const LayerEntry &first = mLayers[index];
+      parent = new QTreeWidgetItem(mTree);
+      parent->setText(ColumnName, groupLabel(first));
+      parent->setToolTip(ColumnName, QDir::toNativeSeparators(first.sourcePath));
+      parent->setText(ColumnGeometry, QStringLiteral("%1 capas").arg(runEnd - index));
+      parent->setFlags(parent->flags() & ~Qt::ItemIsUserCheckable);
+      parent->setData(ColumnName, kGroupRole, first.sourcePath);
+
+      QFont groupFont = parent->font(ColumnName);
+      groupFont.setBold(true);
+      parent->setFont(ColumnName, groupFont);
+    }
+
+    for (size_t row = index; row < runEnd; ++row)
+      addLayerRow(parent, row, current);
+
+    if (parent)
+      parent->setExpanded(!mCollapsedGroups.contains(mLayers[index].sourcePath));
+
+    index = runEnd;
   }
 
   mUpdating = false;
   updateButtons();
+}
+
+void LayerPanel::addLayerRow(QTreeWidgetItem *parent, size_t index, const LayerEntry *current)
+{
+  const LayerEntry &entry = mLayers[index];
+
+  auto *item = parent ? new QTreeWidgetItem(parent) : new QTreeWidgetItem(mTree);
+  item->setText(ColumnName, entry.name);
+  item->setToolTip(ColumnName, QDir::toNativeSeparators(entry.sourcePath));
+  item->setText(ColumnGeometry, entry.kindText);
+  item->setText(ColumnFeatures, entry.countText);
+  item->setText(ColumnCrs, entry.crsText);
+  item->setCheckState(ColumnName, entry.visible ? Qt::Checked : Qt::Unchecked);
+  item->setData(ColumnName, kLayerIndexRole, static_cast<int>(index));
+
+  if (current && sameEntry(entry, *current))
+    mTree->setCurrentItem(item);
+}
+
+std::vector<LayerPanel::TreeRow> LayerPanel::treeRows() const
+{
+  std::vector<TreeRow> rows;
+
+  for (int top = 0; top < mTree->topLevelItemCount(); ++top)
+  {
+    const QTreeWidgetItem *item = mTree->topLevelItem(top);
+
+    TreeRow row;
+    row.name = item->text(ColumnName);
+    row.depth = 0;
+    row.isGroup = !item->data(ColumnName, kLayerIndexRole).isValid();
+    rows.push_back(row);
+
+    for (int child = 0; child < item->childCount(); ++child)
+    {
+      TreeRow childRow;
+      childRow.name = item->child(child)->text(ColumnName);
+      childRow.depth = 1;
+      rows.push_back(childRow);
+    }
+  }
+
+  return rows;
 }
 
 void LayerPanel::updateButtons()
@@ -206,6 +299,23 @@ void LayerPanel::onItemDoubleClicked(QTreeWidgetItem *item, int /*column*/)
   const LayerEntry entry = entryForItem(item);
   if (entry.vector || entry.raster)
     emit zoomToLayerRequested(entry);
+}
+
+void LayerPanel::onGroupExpansionChanged(QTreeWidgetItem *item, bool expanded)
+{
+  if (mUpdating || !item)
+    return;
+
+  // Solo los items de grupo llevan la ruta del archivo en kGroupRole; las capas
+  // no, de modo que plegar una capa sin hijos no toca el estado de los grupos.
+  const QString key = item->data(ColumnName, kGroupRole).toString();
+  if (key.isEmpty())
+    return;
+
+  if (expanded)
+    mCollapsedGroups.remove(key);
+  else
+    mCollapsedGroups.insert(key);
 }
 
 } // namespace minigis
