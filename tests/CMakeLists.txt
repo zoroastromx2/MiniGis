@@ -176,6 +176,44 @@ add_test(NAME minigis.raster-ventana
 set_tests_properties(minigis.raster-info minigis.raster-dibujo minigis.raster-dialogo minigis.raster-ventana
   PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+# --- Identificar ----------------------------------------------------------
+# Contrato del clic: geometria exacta (huecos incluidos), radio en pixeles,
+# alcance del arbol, panel, marcador y cache; consulta puntual por CLI y captura
+# de la interfaz con resultados.
+set(MINIGIS_SAMPLE_PARCELS "${MINIGIS_ROOT_DIR}/data/sample/shapefiles/parcels.shp")
+set(MINIGIS_SAMPLE_CITIES "${MINIGIS_ROOT_DIR}/data/sample/shapefiles/cities.shp")
+set(MINIGIS_SAMPLE_UTM "${MINIGIS_ROOT_DIR}/data/sample/shapefiles/parcels_utm30.shp")
+
+add_test(NAME minigis.identificar
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DSAMPLE=${MINIGIS_SAMPLE_PARCELS}"
+          "-DSAMPLE2=${MINIGIS_SAMPLE_CITIES}"
+          "-DSAMPLE3=${MINIGIS_RASTER_ORTHO}"
+          -DMODE=check-identify
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
+add_test(NAME minigis.identificar-cli
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DSAMPLE=${MINIGIS_SAMPLE_PARCELS}"
+          "-DSAMPLE2=${MINIGIS_SAMPLE_CITIES}"
+          "-DSAMPLE3=${MINIGIS_SAMPLE_UTM}"
+          -DMODE=identify-at
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
+add_test(NAME minigis.identificar-ventana
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DSAMPLE=${MINIGIS_SAMPLE_PARCELS}"
+          "-DSAMPLE2=${MINIGIS_SAMPLE_CITIES}"
+          "-DOUT=${CMAKE_BINARY_DIR}/test-output/identify-window.png"
+          -DMODE=identify-window
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
+set_tests_properties(minigis.identificar minigis.identificar-cli minigis.identificar-ventana
+  PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 # Puerta de rendimiento con un raster grande (opcional, como la del vectorial).
 set(MINIGIS_RASTER_BENCH_DATASET "" CACHE FILEPATH "Raster grande para la puerta de rendimiento raster")
 if(MINIGIS_RASTER_BENCH_DATASET)

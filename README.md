@@ -77,12 +77,15 @@ MiniGIS/
 │   │   ├── minigisrasterrenderer.* # dibujo por ventana, LUT, NoData, paleta
 │   │   ├── minigisrasterstyle.h# bandas, estiramiento, muestreo, opacidad
 │   │   ├── minigismaprenderer.*# render a QImage + reproyección al vuelo
+│   │   ├── minigisgeometryhit.*# prueba punto-geometría (paridad + distancia)
+│   │   ├── minigisidentify.*   # Identificar: candidatos, orden, topes y atributos
 │   │   ├── minigisrectangle.*  # extensión/zoom
 │   │   ├── minigisstyle.*      # simbología
 │   │   └── minigiserror.h      # error = mensaje + acción sugerida
 │   ├── gui/                    # widgets (equivalente a qgis_gui)
-│   │   ├── minigismapcanvas.*  # lienzo: zoom, paneo, arrastrar y soltar
+│   │   ├── minigismapcanvas.*  # lienzo: zoom, paneo, clic y marcador
 │   │   ├── minigislayerpanel.* # árbol de capas (vectorial y ráster)
+│   │   ├── minigisidentifypanel.* # dock de resultados de Identificar
 │   │   ├── minigisattributetablemodel.*
 │   │   ├── minigisstyledialog.*
 │   │   ├── minigisrasterstyledialog.* # contraste, bandas y opacidad del ráster
@@ -210,6 +213,10 @@ minigis [opciones] [archivos...]
 | `--raster-opacity <0-100>` | Opacidad de los rásters |
 | `--check-raster` | Comprueba el dibujado ráster: cuadrantes, extensión, warp, NoData, contraste, paleta, paneo y márgenes del warp |
 | `--check-layers` | Comprueba que un archivo con varias capas se carga, se encuadra y se dibuja entero, y que el panel las agrupa bajo el nombre del archivo |
+| `--identify-at <x,y>` | Identifica el elemento bajo esas coordenadas del SRC de destino (texto, o JSON con `--json`) y sale |
+| `--identify-radius <px>` | Radio de búsqueda de Identificar, en píxeles (por defecto `6`) |
+| `--identify-layer <nombre>` | Limita Identificar a la capa con ese nombre (el resto no se consulta) |
+| `--check-identify` | Comprueba Identificar: geometría exacta, huecos, radio, capas sin índice, orden, alcance del árbol, panel, marcador y caché |
 | `--snapshot-raster-dialog <archivo.png>` | Captura el diálogo de estilo ráster y sale |
 | `-V, --verbose` | Trazas en `stderr` (los datos siguen limpios en `stdout`) |
 | `-h, --help` / `-v, --version` | Ayuda con ejemplos / versiones de Qt, GDAL y PROJ y rutas de datos |
@@ -256,6 +263,9 @@ En la interfaz:
 * `Ctrl+ +` / `Ctrl+ -` zoom · `Ctrl+Shift+F` extensión completa · `Ctrl+Shift+L` zoom a la capa
 * rueda del ratón = zoom anclado al cursor · arrastrar con el botón izquierdo = paneo
 * `F6` tabla de atributos · `Ctrl+Shift+Y` simbología (en un ráster, diálogo de contraste)
+* clic izquierdo **sin arrastrar** = Identificar: abre el dock con la capa, el FID y los campos del
+  elemento bajo el cursor; `Ctrl+Shift+I` lo muestra u oculta. Con una capa seleccionada en el árbol
+  solo se consulta esa; sin selección, todas las visibles por apilado y distancia
 * arrastrar un `.shp`, un `.gpkg` o un `.tif` desde el Explorador y soltarlo sobre el mapa
 * un archivo con varias capas (GeoPackage) se abre **entero**: el panel muestra un ítem con
   el nombre del archivo y una capa por subítem, cada una con su visibilidad, simbología,
@@ -290,6 +300,13 @@ En la interfaz:
   recorta a la huella real del ráster, de modo que las hojas de un mosaico encajan sin márgenes
   negros ni costuras.
 * Tabla de atributos paginada y bajo demanda (máximo 100 000 filas mostradas).
+* **Identificar**: un clic sin arrastre muestra en el dock la capa, el FID y todos los campos del
+  elemento bajo el cursor. La prueba es exacta —los polígonos con huecos incluidos— y el radio de
+  búsqueda se mide en píxeles (6 por defecto), así que un clic a 4 px del borde identifica el
+  elemento a cualquier zoom. Con una capa seleccionada en el árbol solo se consulta esa; sin
+  selección, todas las visibles en orden de apilado y distancia, con los topes y el recorte
+  declarados en el panel. El punto del clic queda marcado en el mapa. Todo se comprueba sin ventana
+  con `--check-identify` y `--identify-at`.
 * Simbología: color de relleno/contorno, grosor, tamaño de punto y opacidad.
 * **Etiquetas por capa**: uno o varios campos, familia y tamaño de fuente, negrita/cursiva,
   color, halo (color y grosor), margen de escala en el que aparecen, tamaño en puntos de
@@ -340,6 +357,13 @@ ctest --preset windows-msvc-release --output-on-failure
   sus cuatro capas, que cada una usa un SRC (declarado o heredado), que el panel las agrupa bajo el
   nombre del archivo, que el encuadre inicial las incluye todas (la capa `area_sur` está muy lejos)
   y que cada capa pinta píxeles propios.
+* `minigis.identificar` — `--check-identify` con parcelas, ciudades y la ortofoto: 23 comprobaciones
+  de geometría exacta (huecos incluidos), radio en píxeles, capas sin índice, modo envolventes,
+  prioridad y recorte, alcance del árbol, panel, marcador y reutilización de la caché.
+* `minigis.identificar-cli` — `--identify-at --json` sobre un punto, una capa limitada, una capa en
+  UTM y el hueco de un polígono, con los códigos de salida.
+* `minigis.identificar-ventana` — captura de la interfaz con el panel de resultados lleno y el
+  marcador del clic.
 * `minigis.rendimiento-raster` — puerta opcional de rendimiento con `MINIGIS_RASTER_BENCH_DATASET`.
 
 ### 8.1 Rendimiento
@@ -506,10 +530,14 @@ Todo lo siguiente se ejecutó sobre este equipo con Qt 6.10.3 y el preset `windo
 | `minigis --snapshot-window` sobre ráster + vectorial | Captura de la interfaz con la fila del ráster en el panel |
 | `minigis --info` y `--check-layers` sobre `ejemplo.gpkg` | 4 capas (`cities`, `parcels`, `parcels_utm30`, `area_sur`), 1 grupo con el nombre del archivo, encuadre inicial con todas y píxeles propios de cada una |
 | `minigis --check-layers` sobre un GeoPackage real con 3 capas sin SRC (`srs_id 99999`) | Las 3 capas heredan el SRC de la que sí lo declara, el encuadre queda en México y las 4 se dibujan |
-| `ctest --preset windows-msvc-release` | **15/15 pruebas superadas** |
+| `minigis --check-identify` (parcelas, ciudades y ortofoto) | **23 comprobaciones OK**: punto, huecos, radio de 3/6 px, camino OGR, modo envolventes, recorte, prioridad, alcance, panel, marcador y caché |
+| `minigis --identify-at --json` (Madrid, capa limitada, UTM y hueco) | Contrato JSON y códigos de salida correctos; el hueco no devuelve resultados |
+| `ctest --preset windows-msvc-release` | **18/18 pruebas superadas** |
 
 Las imágenes de esa verificación están en `build\windows-msvc-release\test-output\`
-(`panel-gpkg.png` es la captura del panel con el GeoPackage agrupado).
+(`panel-gpkg.png` es la captura del panel con el GeoPackage agrupado;
+`build\test-output\identify-native.png` es la del dock de Identificar con Madrid y
+la cruz del clic).
 
 ---
 

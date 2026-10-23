@@ -1,8 +1,11 @@
 #pragma once
 
+#include "minigisidentifypanel.h"
 #include "minigislayerpanel.h"
 
 #include <QMainWindow>
+#include <QPoint>
+#include <QPointF>
 #include <QStringList>
 
 #include <memory>
@@ -22,6 +25,7 @@ namespace minigis
 struct Error;
 struct LayerEntry;
 class AttributeTableModel;
+class IdentifyPanel;
 class LayerPanel;
 class MapCanvas;
 class RasterLayer;
@@ -78,6 +82,31 @@ public:
    */
   std::vector<LayerPanel::TreeRow> layerTreeRows() const;
 
+  /**
+   * Ejecuta Identificar en un punto del mapa con el alcance que dicta el arbol
+   * (capa seleccionada o todas las visibles) y muestra el resultado en el dock.
+   * Es el mismo camino que usa el clic del lienzo.
+   */
+  IdentifyResult identifyAtMapPoint(const QPointF &mapPoint);
+
+  /**
+   * Selecciona una capa por nombre, como si se hubiera pulsado en el arbol.
+   * Un nombre vacio quita la seleccion. La usan el arbol de capas y el modo
+   * `--check-identify` para simular la seleccion.
+   */
+  bool selectLayer(const QString &name);
+
+  /** True si el dock de Identificar esta visible. */
+  bool identifyPanelVisible() const;
+
+  /** Filas del panel de Identificar, para el contrato sin ventana. */
+  std::vector<IdentifyPanel::Row> identifyRows() const;
+  QString identifyHeaderText() const;
+
+  /** Amplia (o restringe) la consulta a todas las capas visibles. */
+  void setSearchAllLayers(bool all);
+  bool searchAllLayers() const { return mSearchAllLayers; }
+
 protected:
   void closeEvent(QCloseEvent *event) override;
 
@@ -104,6 +133,12 @@ private slots:
   void onCursorLeft();
   void onScaleChanged(double mapUnitsPerPixel);
   void onStatusMessage(const QString &message, int timeoutMs);
+
+  /** Un clic sin arrastre sobre el lienzo. */
+  void onIdentifyRequested(const QPointF &mapPoint, const QPoint &pixel);
+  /** Muestra u oculta el dock de resultados (menu y atajo). */
+  void showIdentifyPanel(bool visible);
+  void onSearchAllLayersChanged(bool all);
 
   // Carga en segundo plano.
   void onLoadProgress(int percent, const QString &message);
@@ -151,8 +186,13 @@ private:
   QTableView *mAttributeView = nullptr;
   QDockWidget *mLayerDock = nullptr;
   QDockWidget *mAttributeDock = nullptr;
+  QDockWidget *mIdentifyDock = nullptr;
+  IdentifyPanel *mIdentifyPanel = nullptr;
   VectorLayerLoader *mLoader = nullptr;
   std::shared_ptr<RasterLayer> mCurrentRaster;
+  bool mSearchAllLayers = false;
+  QPointF mLastIdentifyPoint;
+  bool mHasLastIdentifyPoint = false;
 
   QLabel *mCoordinateLabel = nullptr;
   QLabel *mScaleLabel = nullptr;
@@ -176,6 +216,7 @@ private:
   QAction *mLabelAction = nullptr;
   QAction *mShowLabelsAction = nullptr;
   QAction *mAttributeAction = nullptr;
+  QAction *mIdentifyAction = nullptr;
   QAction *mAboutAction = nullptr;
   QAction *mSystemInfoAction = nullptr;
 

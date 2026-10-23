@@ -34,6 +34,18 @@ constexpr int kStatusTimeoutMs = 4000;
  */
 constexpr int kQualityDelayMs = 140;
 
+/**
+ * Desplazamiento maximo (px) para que un press+release cuente como clic. Por
+ * encima, el gesto es un paneo y no identifica: pulsar y arrastrar no debe abrir
+ * la ventana de resultados.
+ */
+constexpr double kIdentifyClickTolerancePixels = 3.0;
+
+/** Color de la cruz del ultimo clic; se comprueba en las pruebas. */
+constexpr int kIdentifyMarkerRed = 255;
+constexpr int kIdentifyMarkerGreen = 0;
+constexpr int kIdentifyMarkerBlue = 255;
+
 } // namespace
 
 MapCanvas::MapCanvas(QWidget *parent)
@@ -176,6 +188,47 @@ void MapCanvas::drawLabels(QImage &image, const MapToPixel &transform, const QSi
   labelPainter.setRenderHint(QPainter::Antialiasing, true);
   labelPainter.setRenderHint(QPainter::TextAntialiasing, true);
   mLabelRenderer.paint(labelPainter, labelLayers, transform, size, options);
+}
+
+void MapCanvas::setIdentifyMarker(const QPointF &mapPoint)
+{
+  mIdentifyMarker = mapPoint;
+  mHasIdentifyMarker = true;
+  update();
+}
+
+void MapCanvas::clearIdentifyMarker()
+{
+  if (!mHasIdentifyMarker)
+    return;
+
+  mHasIdentifyMarker = false;
+  update();
+}
+
+void MapCanvas::drawIdentifyMarker(QImage &image, const MapToPixel &transform) const
+{
+  if (!mHasIdentifyMarker || !transform.isValid())
+    return;
+
+  const QPointF point = transform.transform(mIdentifyMarker);
+  if (!std::isfinite(point.x()) || !std::isfinite(point.y()))
+    return;
+
+  const QPoint pixel(qRound(point.x()), qRound(point.y()));
+  if (!image.rect().contains(pixel))
+    return;
+
+  QPainter painter(&image);
+  painter.setRenderHint(QPainter::Antialiasing, false);
+
+  const QColor color(kIdentifyMarkerRed, kIdentifyMarkerGreen, kIdentifyMarkerBlue);
+  painter.setPen(QPen(color, 1.0));
+  painter.drawLine(pixel.x() - 4, pixel.y(), pixel.x() + 4, pixel.y());
+  painter.drawLine(pixel.x(), pixel.y() - 4, pixel.x(), pixel.y() + 4);
+  painter.setPen(Qt::NoPen);
+  painter.setBrush(color);
+  painter.drawRect(QRect(pixel.x() - 1, pixel.y() - 1, 3, 3));
 }
 
 
@@ -592,6 +645,7 @@ QImage MapCanvas::renderToImage(const QSize &size, bool draft)
   QElapsedTimer timer;
   timer.start();
   mLastReuseMs = 0;
+  mLastFrameReused = false;
 
   Rectangle extent = mExtent;
   if (!extent.isValid())
@@ -631,12 +685,14 @@ QImage MapCanvas::renderToImage(const QSize &size, bool draft)
   // misma escala, se copia y solo se vuelve a dibujar la franja descubierta.
   QRegion exposedRegion(QRect(QPoint(0, 0), size));
   const bool reused = reusePreviousFrame(image, size, draft, exposedRegion);
+  mLastFrameReused = reused;
   if (reused && exposedRegion.isEmpty())
   {
     // Cuadro reutilizado entero: la geometria ya esta, pero las etiquetas hay que
     // dibujarlas igualmente (la cache no las guarda).
     mLastReuseMs = timer.elapsed();
     drawLabels(image, transform, size, draft);
+    drawIdentifyMarker(image, transform);
     mLastRenderMs = timer.elapsed();
     return image;
   }
@@ -724,6 +780,7 @@ QImage MapCanvas::renderToImage(const QSize &size, bool draft)
 
   // Las etiquetas se dibujan despues de la geometria y sobre todo el lienzo.
   drawLabels(image, transform, size, draft);
+  drawIdentifyMarker(image, transform);
   mLastRenderMs = timer.elapsed();
   return image;
 }
@@ -815,6 +872,12 @@ void MapCanvas::mousePressEvent(QMouseEvent *event)
 {
   if ((event->button() == Qt::LeftButton || event->button() == Qt::MiddleButton) && mExtent.isValid())
   {
+    if (event->button() == Qt::LeftButton)
+    {
+      mPressPosition = event->position();
+      mPressWasDrag = false;
+    }
+
     mPanning = true;
     mDragOrigin = event->position();
     mDragStartExtent = mExtent;
@@ -832,6 +895,14 @@ void MapCanvas::mouseMoveEvent(QMouseEvent *event)
 
   if (mPanning && mExtent.isValid())
   {
+    // Se recuerda el desplazamiento MAXIMO: soltar donde se pulso no convierte
+    // un arrastre en clic.
+    if (std::hypot(position.x() - mPressPosition.x(), position.y() - mPressPosition.y())
+        > kIdentifyClickTolerancePixels)
+    {
+      mPressWasDrag = true;
+    }
+
     const double unitsPerPixel = mapUnitsPerPixel();
     const QPointF delta = position - mDragOrigin;
 
@@ -857,8 +928,19 @@ void MapCanvas::mouseReleaseEvent(QMouseEvent *event)
 {
   if (mPanning && (event->button() == Qt::LeftButton || event->button() == Qt::MiddleButton))
   {
+    const bool wasLeft = event->button() == Qt::LeftButton;
+    const QPointF releasePosition = event->position();
+
     mPanning = false;
     updateCursorShape();
+
+    if (wasLeft && !mPressWasDrag && mExtent.isValid())
+    {
+      const MapToPixel transform(mExtent, size());
+      if (transform.isValid())
+        emit identifyRequested(transform.toMap(releasePosition), releasePosition.toPoint());
+    }
+
     event->accept();
     return;
   }

@@ -9,6 +9,8 @@ set(MINIGIS_GUI_SRCS
   minigisattributetablemodel.cpp
   minigislayerpanel.h
   minigislayerpanel.cpp
+  minigisidentifypanel.h
+  minigisidentifypanel.cpp
   minigisstyledialog.h
   minigisstyledialog.cpp
   minigisrasterstyledialog.h

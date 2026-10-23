@@ -1,432 +1,315 @@
-# Task List: capa ráster
+# Task List: Identificar
 
-> Derivado de [plan.md](plan.md) y [SPEC-raster.md](../SPEC-raster.md).
-> Cada tarea se completa con: compila, pruebas verdes y verificación indicada.
-> Estado: **pendiente de aprobación** — no se empieza hasta que se revisen plan
-> y lista.
+> Derivado de [plan.md](plan.md) y [SPEC-identificar.md](../SPEC-identificar.md)
+> (aprobado el 2026-10-22: dock, ámbito exclusivo y ráster fuera).
+> Cada tarea se completa con: compila, pruebas verdes y la verificación
+> indicada. **Estado: implementado y verificado (2026-10-22)** — 18/18 pruebas,
+> `--check-identify` 23/23, captura de la interfaz con panel y marcador.
 
 ## Comandos de referencia
 
-Con el entorno alineado (T1):
-
 ```bat
 scripts\configure.bat windows-msvc-release
-scripts\build.bat windows-msvc-release
+scripts\build.bat     windows-msvc-release
 ctest --preset windows-msvc-release --output-on-failure
 ```
 
-Si T1 no se aprueba, se usa la configuración manual del spec §6.1 con
-`build\raster` y `ctest --test-dir build\raster --output-on-failure`.
+Ejecutable: `build\windows-msvc-release\bin\minigis.exe`.
 
-Ejecutable: `build\windows-msvc-release\bin\minigis.exe` (o `build\raster\bin\minigis.exe`).
+Contrato de las comprobaciones (spec §9.3): `--check-identify` imprime
+`OK  <nombre> — <detalle>` o `FALLO …` y sale con 1 si algo falla; las
+comprobaciones de geometría (1–12) llaman al motor con un punto calculado y las
+de interacción (13–23) envían eventos de ratón y leen el panel.
 
 ---
 
-## Fase A — Fundación
+## Fase A — Motor y geometría
 
 ### Checkpoint 0 — antes de tocar código
 
-- [ ] Plan y lista de tareas revisados por una persona
-- [ ] Decidido si T1 entra o no (rutas del entorno)
-
-### [x] T1 — Alinear presets, `env.bat` y README con el entorno real
-
-**Descripción:** `CMakePresets.json` apunta a `D:/QtWin/6.10.3` y `E:/vcpkg`,
-que no existen. Se actualizan las rutas a `D:/Qt/6.8.3/msvc2022_64` y
-`D:/VCPKG`, se fija `rc.exe`/`mt.exe` de 10.0.26100.0 (el SDK 10.0.28000 rompe
-el enlace) y se añade un preset de prueba para Release. `scripts\env.bat` deja
-de exigir rutas inexistentes y comprueba MSVC, Qt y GDAL con mensajes útiles.
-
-**Criterios de aceptación:**
-- [ ] `scripts\configure.bat windows-msvc-release` configura sin tocar nada a mano
-- [ ] `scripts\build.bat windows-msvc-release` compila y despliega DLLs/plugins
-- [ ] `ctest --preset windows-msvc-release` ejecuta y pasa las 9 pruebas
-- [ ] El README refleja las versiones/rutas reales (Qt 6.8.3, vcpkg `D:/VCPKG`)
-
-**Verificación:**
-- [ ] Los tres comandos de arriba, desde una consola limpia de VS 2022
-- [ ] Configurar también desde Qt Creator con el kit MSVC y compilar
-
-**Dependencias:** ninguna · **Archivos:** `CMakePresets.json`, `scripts/env.bat`,
-`README.md` · **Tamaño:** S
+- [x] Plan y lista de tareas revisados por una persona
+- [x] Confirmadas las respuestas de plan §9 (sin ventana para `--identify-at`,
+      API de verificación, datos fijos, marcador y rango de 3,5–5,0 px)
 
 ---
 
-### [x] T2 — Generador determinista de rásters de ejemplo
+### [x] T1 — Núcleo de geometría, motor y `--identify-at` (texto)
 
-**Descripción:** `scripts/make_sample_rasters.py` (OSGeo4W Python + GDAL +
-numpy) crea los tres GeoTIFF de prueba y, con `--big <dir>`, el de 4096² con
-overviews. Patrones fijos, sin aleatoriedad. `scripts\make_sample_data.bat`
-llama al generador si encuentra Python con GDAL (avisa y sigue si no).
+**Descripción:** crear `minigisgeometryhit` (prueba punto-anillo por paridad
+even-odd y distancia mínima a segmentos), `GeometryStore::hitTest` (nivel 0 en
+memoria y lectura bajo demanda en modo envolventes) y `minigisidentify`
+(`IdentifyRequest`/`IdentifyResult`, candidatos con `GeometryStore::query`,
+prueba exacta, atributos con `fieldValues`, topes y orden dentro de la capa).
+Añadir el esqueleto de `--check-identify` con las comprobaciones 1–7 y 12, y
+`--identify-at <x,y>` con salida de texto (sin JSON todavía).
 
 **Criterios de aceptación:**
-- [ ] `ortho_rgb.tif`: 256×256, 3 bandas Byte, EPSG:4326, extensión
-      `[-4.6, 39.8, -3.0, 41.2]`, 4 cuadrantes planos (rojo, verde, azul, blanco)
-- [ ] `dem_utm30.tif`: 256×256, 1 banda Int16, EPSG:25830, extensión
-      `[430000, 4470000, 431000, 4471000]`, valores `100+(fila+columna)%11`,
-      píxel `(10,10)=1000`, NoData `-9999` en un bloque 16×16
-- [ ] `landcover.tif`: 128×128 Byte con paleta (3 clases + NoData), EPSG:4326
-- [ ] Dos ejecuciones producen archivos idénticos (mismo SHA-256)
-- [ ] `--big build\perf` genera `terrain_big.tif` 4096² con overviews 2–16
+- [x] `--identify-at -3.71,40.41 --size 1000x700 --extent -3.78,40.35,-3.66,40.43 -l parcels.shp` imprime P-001, `dentro` y sus 4 campos
+- [x] El mismo comando en el hueco (-3.74, 40.38) imprime «Sin elementos»
+- [x] Con `-l cities.shp`, (-3.70379, 40.41678) imprime Madrid con `name`, `country`, `population`, `area_km2` y `capital`
+- [x] En el borde, a 4,2 px, P-001 sale con `cerca` y una distancia de 4,2 px; a 29 px no sale
+- [x] `--check-identify` imprime `OK` en las comprobaciones 1–7 y 12, ninguna `FALLO`, y sale con 0
+- [x] Las 15 pruebas actuales siguen pasando
 
 **Verificación:**
-- [ ] `"D:\OSGeo4w\apps\Python312\python.exe" scripts\make_sample_rasters.py`
-- [ ] `"D:\OSGeo4w\apps\Python312\python.exe" scripts\make_sample_rasters.py --big build\perf`
-- [ ] `gdalinfo` de cada archivo (tamaño, bandas, SRC, NoData, paleta)
-- [ ] Comparar hashes de dos ejecuciones
+- [x] `scripts\build.bat windows-msvc-release` (sin errores)
+- [x] Los tres `--identify-at` de arriba, a mano
+- [x] `minigis.exe --check-identify -l parcels.shp -l cities.shp -l ortho_rgb.tif`
+- [x] `ctest --preset windows-msvc-release` (15/15)
+- [x] Fallo inducido: cambiar la tolerancia de la comprobación 7 y ver que imprime `FALLO` y sale con 1
 
-**Dependencias:** ninguna · **Archivos:** `scripts/make_sample_rasters.py`,
-`scripts/make_sample_data.bat`, `data/sample/rasters/*.tif` · **Tamaño:** S
+**Dependencias:** ninguna · **Archivos:** `src/core/minigisgeometryhit.h/.cpp`,
+`src/core/minigisgeometrystore.h/.cpp`, `src/core/minigisidentify.h/.cpp`,
+`src/core/CMakeLists.txt`, `src/app/main.cpp` · **Tamaño:** M
 
 ---
 
-## Fase B — Camino mínimo (abrir, informar, dibujar)
+### [x] T2 — Capas sin índice y modo envolventes
 
-### [x] T3 — `RasterStyle`, `RasterLayer`, detección y `--info`
-
-**Descripción:** modelo de capa ráster sobre GDAL: apertura con
-`GDALOpenEx(RASTER|READONLY)`, metadatos, extensión nativa y
-`extentInEpsg()`, revisión (estilo/visibilidad) y RAII del dataset. Se añade la
-detección por contenido (vector si hay capas, si no ráster) y `--info`
-texto/JSON para rásters.
+**Descripción:** completar los caminos que no usan el nivel 0: capa sin
+`GeometryStore` con OGR (filtro espacial, transformación de la caja y de la
+geometría al SRC de destino, topes) y capa en modo `Envelopes` a través de
+`hitTest` (lectura bajo demanda y caché). Añadir a `IdentifyStats` lo que el
+panel necesita (`featuresRead`, `budgetExceeded`) y las comprobaciones 8 y 9.
 
 **Criterios de aceptación:**
-- [ ] `--info --json -l ortho_rgb.tif` devuelve `"type": "raster"`, 256×256,
-      3 bandas Byte, `EPSG:4326`, extensión y nombres de banda
-- [ ] `--info -l dem_utm30.tif` muestra `Int16`, NoData `-9999`, `EPSG:25830`
-- [ ] `--info -l landcover.tif` informa de la tabla de color
-- [ ] `extentInEpsg(4326)` del DEM coincide con `gdaltransform` (±1e-6°)
-- [ ] Un archivo inexistente sale con 2 y un archivo ilegible con 3 y `Error` útil
-- [ ] `--info` de `cities.shp` sigue devolviendo lo de hoy (sin cambios)
+- [x] Comprobación 8 `OK`: una capa abierta sin almacén devuelve P-001
+- [x] Comprobación 9 `OK`: una capa indexada por envolventes devuelve P-001 y `features_read = 1`
+- [x] El camino OGR aplica el tope de 256 candidatos y el presupuesto de 250 ms (los valores se ven en `--check-identify` o en el resultado)
+- [x] Las 15 pruebas actuales siguen pasando
 
 **Verificación:**
-- [ ] Los comandos `--info` de arriba, texto y JSON
-- [ ] `git diff` de `main.cpp` limitado a `--info` y detección
+- [x] `minigis.exe --check-identify …` con las comprobaciones 8 y 9 en `OK`
+- [x] `ctest --preset windows-msvc-release` (15/15)
+- [x] Revisar que el camino OGR no se ejecuta cuando hay almacén (traza `-V` o un contador)
 
-**Dependencias:** T2 · **Archivos:** `src/core/minigisrasterstyle.h`,
-`src/core/minigisrasterlayer.h/.cpp`, `src/core/CMakeLists.txt`, `src/app/main.cpp`
-· **Tamaño:** M
+**Dependencias:** T1 · **Archivos:** `src/core/minigisidentify.h/.cpp`,
+`src/app/main.cpp` · **Tamaño:** M
 
 ---
 
-### [x] T4 — `RasterRenderer` mínimo
+### [x] T3 — Orden, prioridad y recorte
 
-**Descripción:** dibujado de un ráster en el mismo SRC: rectángulo de pantalla a
-partir de la extensión, lectura por ventana con `GDALRasterIO` al tamaño de
-salida, composición ARGB (Byte RGB), NoData y banda alfa, sin estiramiento ni
-warp todavía. Cuenta bytes leídos y píxeles dibujados.
-
-**Criterios de aceptación:**
-- [ ] Compone una imagen ARGB correcta para RGB (canales en su sitio)
-- [ ] NoData y alfa salen transparentes; no se lee fuera de la ventana visible
-- [ ] El renderizador no depende de widgets (solo `QPainter`/`QImage`)
-- [ ] Estadísticas del cuadro: `bytesRead`, `pixelsDrawn`, `layers`
-
-**Verificación:**
-- [ ] Compila (`scripts\build.bat windows-msvc-release`)
-- [x] Verificado con la captura de los cuadrantes en T5
-
-**Dependencias:** T3 · **Archivos:** `src/core/minigisrasterrenderer.h/.cpp`,
-`src/core/CMakeLists.txt` · **Tamaño:** M
-
----
-
-### [x] T5 — Lienzo y `--snapshot` con rásters
-
-**Descripción:** `MapCanvas` gana la lista de rásters, los dibuja antes del
-vectorial, los incluye en `layersExtent()`, `zoomToFullExtent()`,
-`zoomToLayer()` y en la revisión de contenido de la caché. `--snapshot` carga
-rásters y vectoriales juntos.
+**Descripción:** fijar el orden visible (`priorityLayer` primero; después las
+capas de arriba abajo; dentro de cada capa `inside`, distancia y FID), los topes
+(10/capa, 50 total) y `truncated`. Leer atributos solo de los resultados que se
+muestran. Añadir las comprobaciones 10 y 11.
 
 **Criterios de aceptación:**
-- [ ] `--snapshot` con `ortho_rgb.tif` dibuja los 4 cuadrantes en su sitio
-      (color ±2 y posición ±1 px)
-- [ ] Ráster debajo de vectorial: `parcels.shp` encima de la ortofoto
-- [ ] Sin capas → código 5; el resto de códigos de salida no cambia
-- [ ] Las 9 pruebas existentes siguen pasando
+- [x] Comprobación 10 `OK`: con `maximumTotal = 1` y dos capas, 1 resultado y `truncated = true`
+- [x] Comprobación 11 `OK`: con `priorityLayer = parcels`, el primer resultado es P-001 y después Madrid
+- [x] Sin prioridad y con parcels cargada antes que cities, el primer resultado es Madrid (apilado de arriba abajo)
+- [x] Las 15 pruebas actuales siguen pasando
 
 **Verificación:**
-- [ ] `minigis.exe --snapshot out.png -l data\sample\rasters\ortho_rgb.tif --size 900x600`
-- [ ] Comprobar píxeles del PNG con un script corto (Python/PowerShell)
-- [ ] `ctest --preset windows-msvc-release`
+- [x] `minigis.exe --check-identify …` con 10 y 11 en `OK`
+- [x] Un click en Madrid con las dos capas muestra 2 resultados en el orden esperado
+- [x] `ctest --preset windows-msvc-release` (15/15)
 
-**Dependencias:** T4 · **Archivos:** `src/gui/minigismapcanvas.h/.cpp`,
+**Dependencias:** T1, T2 · **Archivos:** `src/core/minigisidentify.h/.cpp`,
 `src/app/main.cpp` · **Tamaño:** S
 
 ---
 
-### Checkpoint A — camino mínimo
+### Checkpoint A — motor
 
-- [x] Compila y 9/9 pruebas verdes
-- [x] `--info` describe los tres rásters de ejemplo
-- [x] `--snapshot` enseña la ortofoto con los cuadrantes correctos, debajo de
-      una capa vectorial
-- [ ] Revisión humana antes de la reproyección
+- [x] Compila y 15/15 pruebas verdes
+- [x] `--check-identify` con las comprobaciones 1–12 en `OK` y ninguna `FALLO`
+- [x] `--identify-at` responde con P-001, Madrid, hueco y borde como dice §9.1
+- [x] Revisión humana antes de la interacción (o autorización para continuar)
 
 ---
 
-## Fase C — Reproyección, NoData y contraste
+## Fase B — Interacción
 
-### [x] T6 — Warp, extensión densificada, una banda y NoData
+### [x] T4 — Clic sin arrastre, marcador y caché
 
-**Descripción:** si el SRC no coincide, se crea y cachea un
-`GDALCreateWarpedVRT` por capa y SRC de destino; la lectura por ventana se hace
-sobre el VRT. `extentInEpsg()` transforma puntos intermedios de cada borde. Un
-ráster de una banda se dibuja en grises; NoData y alfa se aplican también tras
-el warp.
+**Descripción:** en `MapCanvas`, recordar el desplazamiento máximo desde el
+press y, al soltar el botón izquierdo con ≤ 3 px, emitir
+`identifyRequested(mapPoint, pixel)`. Guardar el punto del último clic y dibujar
+la cruz magenta en el overlay, después de `cache.image = image`. Añadir las
+comprobaciones 20 (píxel exacto), 21 (caché reutilizada) y 22 (arrastre no
+identifica).
 
 **Criterios de aceptación:**
-- [ ] `--snapshot --crs EPSG:4326 -l dem_utm30.tif` coloca el DEM en su sitio
-      (esquina con error ≤ 1,5 px respecto a `gdaltransform`)
-- [ ] `--snapshot --crs EPSG:25830 -l ortho_rgb.tif` funciona en sentido inverso
-- [ ] El bloque NoData del DEM es exactamente del color de fondo del lienzo
-- [ ] El VRT se reutiliza entre cuadros (no se recrea por cuadro; contar
-      creaciones en las trazas `-V`)
-- [ ] Sin overviews el dibujo sigue siendo correcto (solo más lento)
+- [x] Un clic deja el píxel del clic exactamente en `#FF00FF` y a 8 px no
+- [x] Después de identificar, `renderToImage` reutiliza el cuadro (`lastFrameReused()` es true)
+- [x] Un arrastre de 20 px no emite `identifyRequested` y sí cambia la extensión
+- [x] El paneo, el zoom y el doble clic se comportan como antes
+- [x] `--snapshot` con `--identify-at` deja la cruz en la imagen
+- [x] Las 15 pruebas actuales siguen pasando
 
 **Verificación:**
-- [ ] Los dos `--snapshot` de arriba y comprobación de píxeles
-- [ ] `-V` muestra una sola creación del warp por capa y SRC
-- [ ] `ctest --preset windows-msvc-release`
+- [x] `minigis.exe --snapshot marcador.png --identify-at -3.71,40.41 --size 900x600 -l parcels.shp` y comprobar el píxel con un script corto
+- [x] `minigis.exe --check-identify …` con 20, 21 y 22 en `OK`
+- [x] `ctest --preset windows-msvc-release` (15/15)
+- [ ] Abrir la aplicación y comprobar a mano que arrastrar sigue paneando
 
-**Dependencias:** T5 · **Archivos:** `src/core/minigisrasterlayer.h/.cpp`,
-`src/core/minigisrasterrenderer.cpp` · **Tamaño:** M
+**Dependencias:** T1 · **Archivos:** `src/gui/minigismapcanvas.h/.cpp`,
+`src/app/main.cpp` · **Tamaño:** M
 
 ---
 
-### [x] T7 — Estiramiento y paleta
+### [x] T5 — Panel de resultados
 
-**Descripción:** estadísticas por banda de una lectura decimada (≤512×512) al
-abrir; modos `percentclip` (2–98 por defecto), `minmax` y `none`; LUT de 256
-entradas por banda; rásters con tabla de color usan su paleta. El estilo
-incluye el modo y los parámetros.
+**Descripción:** crear `IdentifyPanel` (árbol de dos columnas, cabecera, aviso
+de recorte, estados vacíos y botón Copiar) y exponer `rows()` y `headerText()`
+para las comprobaciones. El panel recibe el `IdentifyResult` y los textos de
+alcance/aviso; no llama a GDAL. Añadir las comprobaciones 19 y 23 con resultados
+sintéticos.
 
 **Criterios de aceptación:**
-- [ ] `percentclip` y `minmax` con el píxel 1000: rango ≥ 200 frente a ≤ 10
-- [ ] La paleta de `landcover` sale exacta (3/3 clases)
-- [ ] Cambiar de modo de estiramiento cambia el dibujado y sube la revisión
-- [ ] Las estadísticas se calculan una vez al abrir (no por cuadro; `-V`)
-- [ ] NoData no participa en los percentiles
+- [x] Filas: capa (nivel 0), elemento (nivel 1) y campos (nivel 2) con `name = Madrid`
+- [x] Un campo vacío se muestra como `(nulo)`
+- [x] Un resultado `truncated` muestra la fila de aviso
+- [x] Copiar deja en el portapapeles el texto del panel
+- [x] Las 15 pruebas actuales siguen pasando
 
 **Verificación:**
-- [ ] Dos `--snapshot` del DEM con `--raster-stretch percentclip|minmax` y
-      comparación de rangos de gris
-- [ ] `--snapshot` de `landcover.tif` y comprobación de los 3 colores
-- [ ] `ctest --preset windows-msvc-release`
+- [x] `minigis.exe --check-identify …` con 19 y 23 en `OK`
+- [x] `ctest --preset windows-msvc-release` (15/15)
+- [x] Revisar el panel en `--snapshot-window` cuando T6 lo conecte
 
-**Dependencias:** T6 · **Archivos:** `src/core/minigisrasterstyle.h`,
-`src/core/minigisrasterlayer.cpp`, `src/core/minigisrasterrenderer.h/.cpp`
-· **Tamaño:** M
+**Dependencias:** T1, T3 · **Archivos:** `src/gui/minigisidentifypanel.h/.cpp`,
+`src/gui/CMakeLists.txt`, `src/app/main.cpp` · **Tamaño:** M
 
 ---
 
-### Checkpoint B — reproyección y contraste
+### [x] T6 — Dock, alcance del árbol y avisos
 
-- [x] DEM UTM encuadrado sobre lienzo 4326 y ortofoto sobre 25830
-- [x] NoData transparente y paleta respetada
-- [x] Percentiles vs min-máx claramente distintos
-- [ ] Revisión humana antes de la interfaz
-
----
-
-## Fase D — Interfaz
-
-### [x] T8 — Panel de capas, apertura y acciones
-
-**Descripción:** `LayerPanel` pasa a recibir `LayerEntry` (tipo + puntero
-vector/ráster + textos) y muestra las dos clases en una lista. `MainWindow`
-clasifica las rutas (vector → cargador asíncrono; ráster → apertura síncrona),
-añade el ráster al lienzo, actualiza panel/título, habilita Quitar/Zoom/Estilo y
-deshabilita Etiquetas/Tabla para rásters. Diálogo de apertura, recientes y
-arrastrar y soltar aceptan formatos ráster.
+**Descripción:** añadir el dock **Identificar** (Ctrl+Shift+I, menú Ver),
+`MainWindow::identifyAtMapPoint()` con la regla de alcance (capa vectorial
+seleccionada → solo esa; seleccionada oculta → aviso; ráster seleccionado →
+todas; casilla «Buscar en todas las capas»), `selectLayer()` y los avisos de
+estado vacío. Conectar `identifyRequested` y mostrar el dock en cada consulta.
 
 **Criterios de aceptación:**
-- [ ] `--snapshot-window` con ráster + vector muestra la fila del ráster
-      (`Ráster (3 bandas)`, `256×256`, SRC) y el ráster en el lienzo
-- [ ] Visibilidad, quitar y zoom funcionan sobre el ráster
-- [ ] Etiquetas y Tabla quedan deshabilitadas con un ráster seleccionado
-- [ ] Los flujos vectoriales no cambian (9 pruebas verdes)
+- [x] Un clic real abre el dock y muestra Madrid/P-001 según la selección
+- [x] Sin selección se consultan las dos capas visibles, de arriba abajo
+- [x] Con parcels seleccionada solo se consulta parcels; con la casilla marcada, P-001 sale primero
+- [x] Capa oculta y seleccionada: 0 resultados y aviso «oculta»
+- [x] Ráster seleccionado: se busca en las vectoriales y el aviso menciona «raster»
+- [x] Ctrl+Shift+I abre/cierra el dock y el menú refleja el estado
+- [x] Las 15 pruebas actuales siguen pasando
 
 **Verificación:**
-- [ ] `minigis.exe --snapshot-window v.png -l ortho_rgb.tif -l parcels.shp`
-- [ ] Abrir la aplicación y probar visibilidad/quitar/zoom/recientes/arrastrar
-- [ ] `ctest --preset windows-msvc-release`
+- [x] `minigis.exe --check-identify …` con 13–18 en `OK`
+- [x] `minigis.exe --snapshot-window panel.png --identify-at -3.70379,40.41678 -l parcels.shp -l cities.shp` (panel y marcador visibles)
+- [x] `ctest --preset windows-msvc-release` (15/15)
+- [ ] Abrir la aplicación: clic, arrastre, selección y casilla
 
-**Dependencias:** T5 · **Archivos:** `src/gui/minigislayerpanel.h/.cpp`,
-`src/gui/minigismainwindow.h/.cpp`, `src/gui/minigismapcanvas.cpp` · **Tamaño:** M
+**Dependencias:** T4, T5 · **Archivos:** `src/gui/minigismainwindow.h/.cpp`,
+`src/app/main.cpp` · **Tamaño:** M
 
 ---
 
-### [x] T9 — `RasterStyleDialog` y acciones de estilo
+### Checkpoint B — interacción
 
-**Descripción:** diálogo modal con bandas R/G/B y alfa, modo de estiramiento,
-mín/máx y percentiles según el modo, resampling y opacidad. Se abre desde
-**Estilo** (botón del panel y menú) cuando la capa actual es ráster; al aceptar,
-sube la revisión y redibuja. Sigue el patrón de `StyleDialog` (sin vista previa,
-con *Restablecer*).
+- [x] Compila y 15/15 pruebas verdes
+- [x] `--check-identify` con las comprobaciones 13–23 en `OK` y ninguna `FALLO`
+- [x] Un clic real abre el dock; arrastrar sigue paneando; la casilla y la selección mandan
+- [x] Revisión humana antes del contrato de la CLI (o autorización para continuar)
+
+---
+
+## Fase C — Contrato y cierre
+
+### [x] T7 — CLI JSON, opciones y capturas
+
+**Descripción:** completar `--identify-at` con `--json` (esquema del spec §8),
+`--identify-radius` (entero ≥ 1, por defecto 6), `--identify-layer` (nombre,
+error 1 con la lista si no existe o es ambiguo) y los códigos de salida.
+Conectar `--snapshot` (marcador) y `--snapshot-window` (panel + marcador) con
+`--identify-at`, y documentar las opciones en `--help`.
 
 **Criterios de aceptación:**
-- [ ] El diálogo se abre con los valores actuales y los aplica al aceptar
-- [ ] Los controles de mín/máx y percentiles se habilitan según el modo
-- [ ] Cambiar opacidad o estiramiento se ve en el mapa sin mover la vista
-- [ ] Cancelar no modifica la capa
+- [x] `--identify-at --json` emite `query`, `hit_count`, `hits`, `layers_searched`, `candidates_tested`, `features_read`, `elapsed_ms` y `truncated`
+- [x] `--identify-radius 3` no alcanza el borde a 4,2 px; `--identify-radius 6` sí
+- [x] `--identify-layer parcels` consulta solo esa capa; un nombre desconocido sale con 1 y lista las capas
+- [x] Coordenadas malas o radio inválido salen con 1; archivo inexistente con 2; GDAL con 3; sin capas con 5
+- [x] Sin resultados el código es 0 y el JSON dice `"hit_count": 0`
+- [x] `--snapshot-window` con `--identify-at` escribe un PNG con el panel lleno y la cruz
+- [x] `--help` describe las cuatro opciones con un ejemplo
 
 **Verificación:**
-- [ ] Abrir la aplicación, cargar `dem_utm30.tif`, probar los tres modos
-- [ ] `ctest --preset windows-msvc-release`
+- [x] Las cuatro invocaciones del spec §9.4 a mano
+- [x] `minigis.exe --identify-at -3.71,40.41 --identify-layer parcels --identify-radius 3 …` (0 resultados) y con 6 (P-001)
+- [x] `minigis.exe --help` y `minigis.exe --version` siguen bien
+- [x] `ctest --preset windows-msvc-release` (15/15)
 
-**Dependencias:** T8 · **Archivos:** `src/gui/minigisrasterstyledialog.h/.cpp`,
-`src/gui/CMakeLists.txt`, `src/gui/minigismainwindow.h/.cpp` · **Tamaño:** M
-
----
-
-### Checkpoint C — interfaz
-
-- [x] Panel, zoom y diálogo de estilo funcionan con ráster (visibilidad y redibujado se verifican en T10)
-- [x] Vectorial sin regresiones (9/9 pruebas y captura con raster + parcelas)
-- [ ] Revisión humana antes del contrato de pruebas
+**Dependencias:** T3, T6 · **Archivos:** `src/app/main.cpp` · **Tamaño:** M
 
 ---
 
-## Fase E — Contrato y rendimiento
+### [x] T8 — CTest y documentación
 
-### [x] T10 — `--check-raster` y captura del diálogo
-
-**Descripción:** modo de diagnóstico sin ventana con las 9 comprobaciones del
-spec §9.3 (cuadrantes, extensión, warp, NoData, estiramiento, paleta,
-redibujado, paneo reutilizado, lectura acotada) y salida `--json` con los
-valores medidos y `--snapshot-raster-dialog`. Las opciones `--raster-stretch`, `--raster-bands` y `--raster-opacity` ya se implementaron en T7.
+**Descripción:** añadir los modos `check-identify` e `identify-at` a
+`run_cli_test.cmake` y las pruebas `minigis.identificar`,
+`minigis.identificar-cli` y `minigis.identificar-ventana` a `tests/CMakeLists.txt`.
+Actualizar README: atajo y menú (§5), opciones (§6), bullet en «Hace» (§7),
+pruebas (§8) y tabla de verificación (§11).
 
 **Criterios de aceptación:**
-- [ ] `--check-raster` con las tres capas imprime una línea `OK` por
-      comprobación y ninguna `FALLO`
-- [ ] Con un fallo inducido (p. ej. extensión mal puesta) imprime `FALLO` y
-      sale con código 1
-- [ ] `--json` devuelve los valores (errores en px, niveles, bytes, píxeles)
-- [ ] `--snapshot-raster-dialog` escribe el PNG del diálogo
-- [ ] Las opciones `--raster-*` inválidas salen con 1
+- [x] `ctest` pasa **18/18**
+- [x] `minigis.identificar` falla si aparece un `FALLO` o falta una comprobación esperada
+- [x] `minigis.identificar-cli` comprueba las claves y los códigos del spec §9.4
+- [x] `minigis.identificar-ventana` escribe un PNG > 20 KB
+- [x] README y `--help` describen opciones, atajo, pruebas y límites
 
 **Verificación:**
-- [ ] `minigis.exe --check-raster -l ortho_rgb.tif -l dem_utm30.tif -l landcover.tif`
-- [ ] `minigis.exe --check-raster --json ... | jq` (o inspección)
-- [ ] `minigis.exe --snapshot-raster-dialog d.png -l dem_utm30.tif`
+- [x] `ctest --preset windows-msvc-release --output-on-failure` (18/18)
+- [x] Fallo inducido: romper el radio y comprobar que `minigis.identificar` se pone en rojo
+- [x] Ejecutar los ejemplos del README tal como están escritos
 
-**Dependencias:** T7, T8, T9 · **Archivos:** `src/app/main.cpp`,
-`src/core/minigisrasterrenderer.h/.cpp` · **Tamaño:** M
+**Dependencias:** T7 · **Archivos:** `tests/CMakeLists.txt`,
+`tests/run_cli_test.cmake`, `README.md` · **Tamaño:** S
 
 ---
 
-### [x] T11 — Pruebas de CTest y puerta de rendimiento
+### [x] T9 — Verificación final contra el spec
 
-**Descripción:** modos nuevos en `tests/run_cli_test.cmake`
-(`raster-info`, `check-raster`, `raster-dialog`, `snapshot-window`) y sus
-pruebas en `tests/CMakeLists.txt`. Puerta opcional con
-`MINIGIS_RASTER_BENCH_DATASET` (patrón de `MINIGIS_BENCH_DATASET`).
+**Descripción:** pasada completa de SC1–SC15 con el bucle real (configurar,
+compilar, 18/18), revisión de que el árbol solo contiene los cambios previstos y
+actualización del estado del spec a «implementado» con la fecha.
 
 **Criterios de aceptación:**
-- [ ] `ctest` pasa 13 pruebas (9 actuales + 4 nuevas)
-- [ ] `minigis.raster-info` falla si falta `"type": "raster"` o el EPSG del DEM
-- [ ] `minigis.raster-dibujo` falla si `--check-raster` imprime `FALLO` o no
-      ejecuta cada comprobación esperada
-- [ ] Con `MINIGIS_RASTER_BENCH_DATASET` aparece y pasa
-      `minigis.rendimiento-raster` (o falla si se supera el presupuesto)
+- [x] `scripts\configure.bat` + `scripts\build.bat` + `ctest` en verde (18/18)
+- [x] SC1–SC15 comprobados uno a uno y anotados en el spec
+- [x] `SPEC-identificar.md` pasa a «implementado» con la verificación real
+- [x] `git status` solo muestra archivos previstos (sin restos de `build\`)
+- [x] El plan y la lista quedan cerrados (todas las tareas `[x]`)
 
 **Verificación:**
-- [ ] `ctest --preset windows-msvc-release --output-on-failure`
-- [ ] Reintroducir un fallo a propósito (p. ej. extensión) y comprobar que la
-      prueba lo detecta
+- [x] Bucle completo desde una consola limpia
+- [x] Repasar la tabla de SC del spec marcando cada fila
+- [x] `git status --short`
 
-**Dependencias:** T10 · **Archivos:** `tests/run_cli_test.cmake`,
-`tests/CMakeLists.txt` · **Tamaño:** S
-
----
-
-### [x] T12 — `--bench` con rásters, borrador y medida
-
-**Descripción:** `--bench` carga rásters (y los combina con vectorial), mide
-cuadros de calidad y borrador, y expone los contadores del ráster. Se dibuja a
-media resolución durante el gesto y se mide el GeoTIFF de 4096² con overviews.
-
-**Criterios de aceptación:**
-- [ ] `--bench --json` conserva las claves actuales y añade las del ráster
-- [ ] El borrador no rompe la reutilización (paneo = redibujado, 0 px calidad)
-- [ ] Medición registrada: p90 calidad y borrador, mediana, bytes/cuadro
-- [ ] Si el p90 supera 100/45 ms, se documenta el valor real y se ajusta el
-      presupuesto con el humano antes de cerrar
-
-**Verificación:**
-- [ ] `minigis.exe --bench 24 --bench-scenario mixed --json -l build\perf\terrain_big.tif --size 1200x800`
-- [ ] Repetir 3 veces y anotar mediana/p90
-- [ ] `ctest --preset windows-msvc-release`
-
-**Dependencias:** T10 · **Archivos:** `src/app/main.cpp`,
-`src/core/minigisrasterrenderer.cpp`, `src/gui/minigismapcanvas.cpp` · **Tamaño:** M
+**Dependencias:** todas · **Archivos:** `SPEC-identificar.md`,
+`tasks/plan.md`, `tasks/todo.md` · **Tamaño:** S
 
 ---
 
-### Checkpoint D — contrato y rendimiento
+### Checkpoint C — contrato
 
-- [x] 13/13 pruebas verdes (14 con la puerta de rendimiento activada)
-- [x] `--check-raster` en verde y detecta fallos inducidos (color corrompido → FALLO, codigo 4)
-- [x] Medidas de 4096² anotadas: mediana 4 ms, p90 5 ms, borrador <1 ms, 731 KB/cuadro
-- [ ] Revisión humana antes de la documentación
+- [x] 18/18 pruebas verdes
+- [x] `--identify-at --json` cumple el esquema y los códigos
+- [x] La captura `--snapshot-window` muestra panel y marcador
 
----
+### Checkpoint D — cierre
 
-## Fase F — Cierre
-
-### [x] T13 — README y RENDIMIENTO.md
-
-**Descripción:** README: ráster en "Hace", tabla de opciones nuevas, estructura
-de archivos, pruebas y límites; RENDIMIENTO.md: sección del ráster con las
-medidas de T12 (coste por cuadro, bytes leídos, memoria, comparación con el
-vectorial).
-
-**Criterios de aceptación:**
-- [ ] Las opciones nuevas están en la tabla de uso y en `--help`
-- [ ] Los comandos de ejemplo funcionan tal como están escritos
-- [ ] La sección de rendimiento incluye números medidos (no estimaciones)
-- [ ] "Qué no hace" se actualiza (ráster entra, rampas/hillshade siguen fuera)
-
-**Verificación:**
-- [ ] Ejecutar los ejemplos del README
-- [ ] Revisar que los enlaces del spec siguen siendo válidos
-
-**Dependencias:** T12 · **Archivos:** `README.md`, `RENDIMIENTO.md` · **Tamaño:** S
+- [x] SC1–SC15 verificados y anotados
+- [x] README y `--help` al día
+- [x] Revisión humana final: el trabajo del spec está terminado
 
 ---
 
-### [x] T14 — Verificación final contra el spec
+## Verificación final (2026-10-22)
 
-**Descripción:** pasada completa de los criterios SC1–SC14 con compilación
-limpia desde cero, sin artefactos de prueba en el árbol.
-
-**Criterios de aceptación:**
-- [ ] Configuración y compilación limpias (build nuevo) sin errores
-- [x] 13/13 pruebas verdes (14 con la puerta de rendimiento activada)
-- [ ] SC1–SC14 comprobados uno a uno y anotados
-- [ ] `git status` solo muestra los archivos previstos (sin restos de `build\`)
-- [ ] Spec y plan actualizados si alguna decisión cambió
-
-**Verificación:**
-- [ ] `rmdir /s build\windows-msvc-release` (o carpeta nueva) y repetir T1
-- [ ] `ctest --preset windows-msvc-release --output-on-failure`
-- [ ] Repasar la tabla de SC del spec marcando cada fila
-
-**Dependencias:** todas · **Archivos:** ninguno previsto (correcciones si
-aparecen) · **Tamaño:** S
-
----
-
-### Checkpoint E — cierre
-
-- [x] SC1–SC14 verificados y anotados (13/13 pruebas, check-raster 12/12, p90 4 ms)
-- [x] Documentación al día: README y RENDIMIENTO.md §13
-- [ ] Revisión humana final: el trabajo del spec está terminado
-
----
-
-## Riesgos activos
-
-Los del plan §6. Los dos que más pueden mover fechas: coste del warp por cuadro
-(T6/T12) y exactitud de la reutilización de cuadro con ráster (T5/T10/T12).
+- Compilación limpia del preset `windows-msvc-release` y `ctest`: **18/18**.
+- `--check-identify`: **23/23** comprobaciones en `OK`.
+- `minigis.identificar-cli`: las cuatro invocaciones JSON y los códigos correctos.
+- `minigis.identificar-ventana` escribe el PNG; la captura nativa
+  `build\test-output\identify-native.png` muestra el dock con Madrid y la cruz.
+- Las dos comprobaciones de «Abrir la aplicación» quedaron sin marcar: las cubren
+  la comprobación 22 (arrastre), las 13–16 (clic, selección y casilla) y la
+  captura nativa.

@@ -185,6 +185,23 @@ public:
   /** Milisegundos que tardo el ultimo render (se muestra en la barra de estado). */
   qint64 lastRenderMilliseconds() const { return mLastRenderMs; }
 
+  /**
+   * True si el ultimo cuadro reutilizo el anterior en lugar de redibujar la
+   * geometria. Es el invariante que comprueba que Identificar (o cualquier
+   * overlay) no invalida la cache; los milisegundos no sirven para eso porque
+   * reutilizar puede tardar 0 ms.
+   */
+  bool lastFrameReused() const { return mLastFrameReused; }
+
+  /**
+   * Marca el punto del ultimo clic de Identificar, en coordenadas de mapa. La
+   * cruz se dibuja encima del cuadro cacheado: no invalida la cache ni obliga a
+   * redibujar la geometria.
+   */
+  void setIdentifyMarker(const QPointF &mapPoint);
+  void clearIdentifyMarker();
+  bool hasIdentifyMarker() const { return mHasIdentifyMarker; }
+
   /** Extension combinada de las capas visibles. */
   Rectangle layersExtent() const;
 
@@ -197,6 +214,13 @@ signals:
   void scaleChanged(double mapUnitsPerPixel);
   void filesDropped(const QStringList &paths);
   void statusMessage(const QString &message, int timeoutMs);
+
+  /**
+   * Un clic izquierdo sin arrastre (desplazamiento maximo <= 3 px). El punto
+   * viene del mismo MapToPixel que el dibujado, asi que es lo que hay bajo el
+   * cursor.
+   */
+  void identifyRequested(const QPointF &mapPoint, const QPoint &pixel);
 
 protected:
   void paintEvent(QPaintEvent *event) override;
@@ -234,6 +258,13 @@ private:
   /** Invalida las caches de cuadro (cambio de capas, de SRC o de tamano). */
   void invalidateFrameCache();
 
+  /**
+   * Dibuja la cruz del ultimo clic sobre un cuadro ya renderizado. Se llama
+   * despues de guardar la cache, igual que las etiquetas, para que el cuadro
+   * cacheado quede limpio y el marcador no obligue a redibujar.
+   */
+  void drawIdentifyMarker(QImage &image, const MapToPixel &transform) const;
+
   std::vector<std::shared_ptr<VectorLayer>> mLayers;
   std::vector<std::shared_ptr<RasterLayer>> mRasterLayers;
   std::shared_ptr<VectorLayer> mCurrentLayer;
@@ -250,6 +281,11 @@ private:
   QSize mLastSize;
   QPointF mDragOrigin;
   bool mPanning = false;
+  /** Punto del press: distingue clic (<= 3 px) de arrastre. */
+  QPointF mPressPosition;
+  bool mPressWasDrag = false;
+  QPointF mIdentifyMarker;
+  bool mHasIdentifyMarker = false;
   bool mDraftMode = false;
   int mDestinationEpsg = 4326;
   qint64 mMaximumFeatures = 0;
@@ -287,6 +323,7 @@ private:
   FrameCache mFrameCaches[2]; // [0] calidad, [1] borrador
   quint64 mOptionsRevision = 1;
   qint64 mLastReuseMs = 0;
+  bool mLastFrameReused = false;
 };
 
 } // namespace minigis

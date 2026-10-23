@@ -45,6 +45,12 @@ namespace
 constexpr int kMaximumRecentFiles = 8;
 constexpr int kStatusTimeoutMs = 5000;
 
+/**
+ * Radio de busqueda de Identificar, en pixeles de pantalla. Se convierte con la
+ * escala del lienzo, asi que "cerca" significa lo mismo a cualquier zoom.
+ */
+constexpr int kIdentifyRadiusPixels = 6;
+
 /** Formatos que ofrece el dialogo de apertura: vectoriales y raster. */
 const char *kOpenFilter =
   "Capas (*.shp *.geojson *.json *.gpkg *.kml *.gml *.gpx *.csv *.tab *.mif *.fgb *.sqlite *.db "
@@ -82,6 +88,7 @@ MainWindow::MainWindow(QWidget *parent, bool restoreSettings)
   connect(mCanvas, &MapCanvas::scaleChanged, this, &MainWindow::onScaleChanged);
   connect(mCanvas, &MapCanvas::filesDropped, this, [this](const QStringList &paths) { loadPaths(paths); });
   connect(mCanvas, &MapCanvas::statusMessage, this, &MainWindow::onStatusMessage);
+  connect(mCanvas, &MapCanvas::identifyRequested, this, &MainWindow::onIdentifyRequested);
 
   // Carga en segundo plano: abrir y leer una capa pesada ya no bloquea la
   // ventana, y el progreso se puede mostrar mientras tanto.
@@ -166,6 +173,12 @@ void MainWindow::createActions()
   mAttributeAction->setCheckable(true);
   connect(mAttributeAction, &QAction::toggled, this, &MainWindow::showAttributeTable);
 
+  mIdentifyAction = new QAction(QStringLiteral("Identificar"), this);
+  mIdentifyAction->setCheckable(true);
+  mIdentifyAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+I")));
+  mIdentifyAction->setStatusTip(QStringLiteral("Muestra la información del elemento bajo el clic"));
+  connect(mIdentifyAction, &QAction::toggled, this, &MainWindow::showIdentifyPanel);
+
   mAboutAction = new QAction(QStringLiteral("Acerca de MiniGIS"), this);
   connect(mAboutAction, &QAction::triggered, this, &MainWindow::showAboutDialog);
 
@@ -197,6 +210,7 @@ void MainWindow::createMenusAndToolBar()
   viewMenu->addSeparator();
   viewMenu->addAction(mShowLabelsAction);
   viewMenu->addAction(mAttributeAction);
+  viewMenu->addAction(mIdentifyAction);
 
   QMenu *helpMenu = menuBar()->addMenu(QStringLiteral("A&yuda"));
   helpMenu->addAction(mSystemInfoAction);
@@ -311,6 +325,24 @@ void MainWindow::createDocks()
     if (mAttributeAction->isChecked() != visible)
       mAttributeAction->setChecked(visible);
   });
+
+  mIdentifyDock = new QDockWidget(QStringLiteral("Identificar"), this);
+  mIdentifyDock->setObjectName(QStringLiteral("identifyDock"));
+  mIdentifyDock->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea);
+
+  mIdentifyPanel = new IdentifyPanel(mIdentifyDock);
+  mIdentifyDock->setWidget(mIdentifyPanel);
+  addDockWidget(Qt::RightDockWidgetArea, mIdentifyDock);
+
+  // Empieza oculto: aparece con el primer clic, con el menu Ver o con
+  // Ctrl+Shift+I. Cerrarlo no borra el ultimo resultado.
+  mIdentifyDock->hide();
+  connect(mIdentifyDock, &QDockWidget::visibilityChanged, this, [this](bool visible) {
+    if (mIdentifyAction && mIdentifyAction->isChecked() != visible)
+      mIdentifyAction->setChecked(visible);
+  });
+  connect(mIdentifyPanel, &IdentifyPanel::searchAllLayersChanged, this,
+          &MainWindow::onSearchAllLayersChanged);
 }
 
 void MainWindow::createStatusBar()
@@ -998,6 +1030,216 @@ void MainWindow::onStatusMessage(const QString &message, int timeoutMs)
 std::vector<LayerPanel::TreeRow> MainWindow::layerTreeRows() const
 {
   return mLayerPanel ? mLayerPanel->treeRows() : std::vector<LayerPanel::TreeRow>();
+}
+
+bool MainWindow::identifyPanelVisible() const
+{
+  return mIdentifyDock && mIdentifyDock->isVisible();
+}
+
+std::vector<IdentifyPanel::Row> MainWindow::identifyRows() const
+{
+  return mIdentifyPanel ? mIdentifyPanel->rows() : std::vector<IdentifyPanel::Row>();
+}
+
+QString MainWindow::identifyHeaderText() const
+{
+  return mIdentifyPanel ? mIdentifyPanel->headerText() : QString();
+}
+
+void MainWindow::setSearchAllLayers(bool all)
+{
+  mSearchAllLayers = all;
+  if (mIdentifyPanel)
+    mIdentifyPanel->setSearchAllLayers(all);
+
+  if (mHasLastIdentifyPoint)
+    identifyAtMapPoint(mLastIdentifyPoint);
+}
+
+bool MainWindow::selectLayer(const QString &name)
+{
+  const QString wanted = name.trimmed();
+
+  if (wanted.isEmpty())
+  {
+    mCurrentRaster.reset();
+    mCanvas->setCurrentLayer(nullptr);
+    syncLayerPanel();
+    updateWindowTitle();
+    updateCrsLabel();
+    replaceAttributeModel();
+    return true;
+  }
+
+  for (const std::shared_ptr<VectorLayer> &layer : mCanvas->layers())
+  {
+    if (layer && layer->name().compare(wanted, Qt::CaseInsensitive) == 0)
+    {
+      mCurrentRaster.reset();
+      mCanvas->setCurrentLayer(layer);
+      syncLayerPanel();
+      updateWindowTitle();
+      updateCrsLabel();
+      replaceAttributeModel();
+      return true;
+    }
+  }
+
+  for (const std::shared_ptr<RasterLayer> &raster : mCanvas->rasterLayers())
+  {
+    if (raster && raster->name().compare(wanted, Qt::CaseInsensitive) == 0)
+    {
+      mCurrentRaster = raster;
+      mCanvas->setCurrentLayer(nullptr);
+      syncLayerPanel();
+      updateWindowTitle();
+      updateCrsLabel();
+      replaceAttributeModel();
+      return true;
+    }
+  }
+
+  return false;
+}
+
+IdentifyResult MainWindow::identifyAtMapPoint(const QPointF &mapPoint)
+{
+  mLastIdentifyPoint = mapPoint;
+  mHasLastIdentifyPoint = true;
+
+  if (mCanvas)
+    mCanvas->setIdentifyMarker(mapPoint);
+
+  const int radiusPixels = kIdentifyRadiusPixels;
+  const double tolerance = mCanvas ? mCanvas->mapUnitsPerPixel() * radiusPixels : 0.0;
+
+  const std::shared_ptr<VectorLayer> selected = mCanvas ? mCanvas->currentLayer() : nullptr;
+
+  std::vector<std::shared_ptr<VectorLayer>> visible;
+  if (mCanvas)
+  {
+    for (const std::shared_ptr<VectorLayer> &layer : mCanvas->layers())
+    {
+      if (layer && layer->isVisible())
+        visible.push_back(layer);
+    }
+  }
+
+  std::vector<std::shared_ptr<VectorLayer>> scope;
+  std::shared_ptr<VectorLayer> priority;
+  QString scopeText;
+  QStringList notes;
+
+  if (selected)
+  {
+    if (!selected->isVisible())
+    {
+      // Ni se busca ni se da prioridad: una capa oculta no esta en el mapa.
+      scopeText = QStringLiteral("Solo la capa «%1» (oculta)").arg(selected->name());
+      notes << QStringLiteral("La capa seleccionada «%1» está oculta: no se busca nada.")
+                 .arg(selected->name());
+    }
+    else if (!mSearchAllLayers)
+    {
+      priority = selected;
+      scope.push_back(selected);
+      scopeText = QStringLiteral("Solo la capa «%1» (seleccionada)").arg(selected->name());
+    }
+    else
+    {
+      priority = selected;
+      scope = visible;
+      scopeText = QStringLiteral("Capa «%1» primero; además todas las visibles (%2)")
+                    .arg(selected->name())
+                    .arg(visible.size());
+    }
+  }
+  else if (mCurrentRaster)
+  {
+    scope = visible;
+    scopeText = QStringLiteral("Todas las capas visibles (%1)").arg(visible.size());
+    notes << QStringLiteral("La capa seleccionada es un ráster: se buscan las capas vectoriales visibles.");
+  }
+  else
+  {
+    scope = visible;
+    scopeText = QStringLiteral("Todas las capas visibles (%1)").arg(visible.size());
+  }
+
+  if (scope.empty() && notes.isEmpty())
+    notes << QStringLiteral("No hay capas vectoriales visibles.");
+
+  IdentifyRequest request;
+  request.mapPoint = mapPoint;
+  request.destinationEpsg = mCanvas ? mCanvas->destinationEpsg() : 4326;
+  request.layers = scope;
+  request.priorityLayer = priority;
+  request.options.tolerance = tolerance;
+
+  const IdentifyResult result = identifyAtPoint(request);
+
+  if (result.hits.isEmpty() && notes.isEmpty())
+  {
+    QString note = QStringLiteral("No hay ningún elemento a menos de %1 px.").arg(radiusPixels);
+    if (selected && !mSearchAllLayers)
+      note += QStringLiteral(" Marca «Buscar en todas las capas» para consultar el resto.");
+    notes << note;
+  }
+
+  if (mIdentifyPanel)
+  {
+    IdentifyPanel::View view;
+    view.result = result;
+    view.radiusPixels = radiusPixels;
+    view.scopeText = scopeText;
+    view.notes = notes;
+    view.priorityLayer = priority;
+    mIdentifyPanel->setResult(view);
+  }
+
+  if (mIdentifyDock)
+  {
+    if (!mIdentifyDock->isVisible())
+      mIdentifyDock->show();
+    mIdentifyDock->raise();
+  }
+
+  statusBar()->showMessage(result.hits.isEmpty()
+                             ? QStringLiteral("Identificar: sin elementos.")
+                             : QStringLiteral("Identificar: %1 elemento(s).").arg(result.hits.size()),
+                           kStatusTimeoutMs);
+
+  return result;
+}
+
+void MainWindow::onIdentifyRequested(const QPointF &mapPoint, const QPoint &pixel)
+{
+  Q_UNUSED(pixel)
+  identifyAtMapPoint(mapPoint);
+}
+
+void MainWindow::showIdentifyPanel(bool visible)
+{
+  if (!mIdentifyDock)
+    return;
+
+  if (visible)
+  {
+    mIdentifyDock->show();
+    mIdentifyDock->raise();
+  }
+  else
+  {
+    mIdentifyDock->hide();
+  }
+}
+
+void MainWindow::onSearchAllLayersChanged(bool all)
+{
+  mSearchAllLayers = all;
+  if (mHasLastIdentifyPoint)
+    identifyAtMapPoint(mLastIdentifyPoint);
 }
 
 void MainWindow::syncLayerPanel()

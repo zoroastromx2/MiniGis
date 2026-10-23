@@ -1,205 +1,201 @@
-# Implementation Plan: capa ráster en MiniGIS
+# Implementation Plan: Identificar en MiniGIS
 
-> Plan técnico derivado de [SPEC-raster.md](../SPEC-raster.md) (aprobado).
-> Tareas concretas en [todo.md](todo.md). No se empieza a implementar hasta que
-> este plan y la lista de tareas se aprueben.
+> Plan técnico derivado de [SPEC-identificar.md](../SPEC-identificar.md), aprobado
+> el 2026-10-22 con estas decisiones: **dock** no modal, la capa seleccionada
+> **limita** el ámbito y los valores de píxel del ráster quedan **fuera**.
+> Tareas concretas en [todo.md](todo.md).
+> **Estado: implementado y verificado (2026-10-22)** — ver el cierre de
+> `todo.md`.
 
 ## 1. Resumen
 
-Añadir capas ráster de solo lectura a MiniGIS: abrir cualquier ráster de GDAL,
-dibujarlo bajo el vectorial, reproyectarlo al SRC del lienzo, ajustar bandas,
-contraste y opacidad, y verificarlo sin ventana con `--info`, `--snapshot`,
-`--bench` y un nuevo `--check-raster`.
+Añadir **Identificar**: un clic sin arrastre sobre el lienzo muestra, en un dock,
+la capa, el FID y todos los campos del elemento —o de los elementos— que hay bajo
+el clic. Con una capa seleccionada en el árbol la consulta se limita a ella; sin
+selección se consultan todas las visibles, ordenadas por apilado y distancia. La
+prueba es exacta (polígonos con huecos incluidos) y todo se verifica sin ventana
+con un `--check-identify` de 23 comprobaciones, un `--identify-at --json` y una
+captura de la interfaz.
 
 El trabajo se corta en **rebanadas verticales**: primero un camino completo que
-abra, informe y dibuje un GeoTIFF en su SRC (sin warp), después la reproyección
-y el contraste, después la integración en la interfaz y, al final, el contrato
-de pruebas y las medidas. Cada corte deja el programa usable y las 9 pruebas
-actuales verdes.
+prueba la geometría y responde por CLI con texto, después los casos difíciles del
+almacén (sin índice y modo envolventes), luego el orden y el recorte, después la
+interacción (clic, marcador, panel, alcance) y, al final, el contrato JSON, las
+pruebas de CTest y la documentación. Cada corte deja el programa usable y las 15
+pruebas actuales verdes.
 
 ## 2. Arquitectura
 
 ```
-                 ┌───────────────────────────────┐
-                 │ src/app/main.cpp              │
-                 │  · detección vector/ráster     │
-                 │  · --info --snapshot --bench   │
-                 │  · --check-raster              │
-                 └───────────────┬───────────────┘
-                                 │
-        ┌────────────────────────┴────────────────────────┐
-        │                                                 │
-┌───────▼──────────────┐                       ┌──────────▼─────────────┐
-│ src/gui              │                       │ src/core               │
-│  MapCanvas           │  usa                  │  RasterLayer           │
-│   · lista de rásters │ ────────────────────▶ │   · dataset GDAL (RAII)│
-│   · orden de dibujo  │                       │   · metadatos, SRC     │
-│   · zoom/extensión   │                       │   · estilo + revisión  │
-│  LayerPanel          │                       │  RasterRenderer        │
-│  MainWindow          │                       │   · warp cacheado      │
-│  RasterStyleDialog   │                       │   · lectura por ventana│
-└──────────────────────┘                       │   · LUT, NoData, alfa  │
-                                               │   · estadísticas        │
-                                               └────────────────────────┘
+                    ┌──────────────────────────────────────────┐
+                    │ src/app/main.cpp                         │
+                    │  --identify-at / --identify-radius       │
+                    │  --identify-layer / --check-identify     │
+                    │  --snapshot(-window) + marcador          │
+                    └───────────────┬──────────────────────────┘
+                                    │
+              ┌─────────────────────┴─────────────────────┐
+              ▼                                           ▼
+┌──────────────────────────────┐            ┌──────────────────────────────┐
+│ src/gui                      │            │ src/core                     │
+│  MainWindow                  │  petición  │  identifyAtPoint()           │
+│   · alcance (árbol + casilla)│ ─────────▶ │   · capas y prioridad        │
+│   · identifyAtMapPoint()     │            │   · candidatos (R-tree)      │
+│   · selectLayer()            │  resultado │   · orden, topes, atributos  │
+│  IdentifyPanel (dock)        │ ◀───────── │  IdentifyRequest/Result      │
+│  MapCanvas                   │            │                              │
+│   · clic sin arrastre        │            │  GeometryStore::hitTest()    │
+│   · marcador en el overlay   │            │   · nivel 0 / caché de       │
+│                              │            │     envolventes              │
+└──────────────────────────────┘            │  minigisgeometryhit          │
+                                            │   · paridad + distancia      │
+                                            └──────────────────────────────┘
 ```
 
-Flujo de dibujo de un cuadro:
+Flujo de un clic:
 
-1. `MapCanvas::renderToImage()` reutiliza el cuadro anterior si procede (igual
-   que hoy) y deja una región expuesta.
-2. `RasterRenderer::paint()` recorre los rásters visibles en orden de carga,
-   antes de cualquier capa vectorial y con el mismo recorte.
-3. Para cada capa calcula el rectángulo de pantalla de su extensión, la ventana
-   de píxeles que hay que leer (con warp si el SRC no coincide), lee solo esa
-   ventana al tamaño en píxeles del lienzo y la convierte a `QImage` ARGB con la
-   LUT de contraste, NoData/alfa y paleta.
-4. El motor vectorial dibuja encima como hasta ahora.
-5. Al terminar, la caché de cuadro guarda la imagen y la **revisión de
-   contenido**, que ahora incluye el estado de las capas ráster.
+1. `MapCanvas` detecta press + release con desplazamiento máximo ≤ 3 px y emite
+   `identifyRequested(mapPoint, pixel)`. El punto se calcula con el mismo
+   `MapToPixel` del dibujado.
+2. `MainWindow` construye la petición: capas visibles en orden de apilado, capa
+   prioritaria (la del árbol) y tolerancia = `radioPx × mapUnitsPerPixel()`.
+3. `identifyAtPoint()` consulta el R-tree por capa, prueba la geometría exacta
+   (`hitTest`), ordena, recorta y lee los atributos solo de lo que se va a mostrar.
+4. `IdentifyPanel` pinta cabecera, grupos por capa, elementos y campos; el lienzo
+   guarda el punto y dibuja la cruz **después** de cachear el cuadro.
 
 ## 3. Decisiones de implementación
 
 | Decisión | Motivo |
 |---|---|
-| `RasterLayer` y `RasterRenderer` en `core`, sin `QWidget` | Coherente con `VectorLayer`/`FastMapRenderer`; el renderizador ya usa `QPainter` en `core` |
-| Lista de rásters paralela a la de vectores en `MapCanvas` | Evita refactorizar el motor vectorial y sus 9 pruebas (spec §4.1); el ráster va siempre debajo |
-| El dataset de GDAL se abre, se lee y se dibuja en el hilo de la GUI | Un `GDALDatasetH` no es seguro entre hilos; no hay cargador en segundo plano para ráster (spec R2/A5) |
-| Warp con `GDALCreateWarpedVRT` cacheado por SRC de destino, dentro de `RasterLayer` | Crear el VRT por cuadro cuesta más que dibujar; el SRC cambia poco |
-| Lectura por ventana con `GDALRasterIO` al tamaño de salida y `GRIORA_Bilinear` | Acota memoria y tiempo por cuadro; usa overviews si existen |
-| Composición a ARGB con LUT de 256 entradas por banda | Evita ramas por píxel; es el grueso del coste en un ráster Byte |
-| Estadísticas de contraste de una lectura decimada ≤ 512×512 | Percentiles "suficientes" en milisegundos; nunca recorre el ráster completo |
-| Modo borrador a media resolución, dibujado escalado | Mantiene 60 fps mientras se arrastra; el cuadro de calidad llega al parar |
-| El ráster participa en la caché de cuadro, con revisión | Es una traslación pura; la revisión evita el fallo de "cambio el estilo y no se ve" |
-| `LayerPanel` recibe una lista de entradas (`LayerEntry`) con tipo y punteros | Una sola tabla para las dos clases sin tocar `VectorLayer`; señales tipadas |
-| Detección por contenido con `GDALOpenEx(RASTER|VECTOR)` y conteo de capas/bandas | No depende de extensiones; vectorial gana si el archivo tiene ambas cosas |
+| `GeometryStore::hitTest(index, x, y, tol, inside, distance)` | El almacén conoce sus dos modos y la disposición de los anillos; una interfaz estrecha evita copiar geometrías y el problema de que `acquireSubset` no devuelve una entrada por candidato en modo envolventes |
+| `minigisgeometryhit` separado de `minigisidentify` | La prueba punto-anillo la usan el almacén y el camino OGR; separarla evita que `GeometryStore` dependa del motor de consulta |
+| `IdentifyRequest.layers` en orden de apilado (fondo → techo) + `priorityLayer` | Es el orden que ya tiene el lienzo; el motor decide el orden visible (prioritaria primero, luego de arriba abajo) |
+| La tolerancia llega al núcleo en unidades de mapa | El núcleo no conoce píxeles ni widgets; la GUI convierte con `mapUnitsPerPixel()` |
+| `--identify-at` usa un `MapCanvas` (sin ventana), no `MainWindow` | Es una consulta de datos: no necesita docks ni carga en segundo plano, y así sirve en scripts y en `--snapshot` |
+| `MainWindow::selectLayer()` para `--check-identify`, no solo para pruebas | Es la misma operación que hace el árbol; el chequeo la usa para simular la selección sin depender de la interfaz de usuario |
+| `IdentifyPanel::rows()` y `headerText()` públicos | Permiten verificar el contenido del panel sin leer píxeles, igual que `layerTreeRows()` con el panel de capas |
+| El marcador se dibuja después de `cache.image = image` | La caché se queda con la geometría limpia y el marcador no obliga a redibujar: es el patrón de las etiquetas |
+| Umbral de clic de 3 px, recordando el desplazamiento **máximo** | Distingue clic de paneo aunque el botón se suelte en el punto de partida; el botón central y el doble clic no cambian |
+| Atributos después de ordenar y recortar | Leer 256 candidatos para descartar 250 es I/O inútil |
+| Topes y presupuesto visibles en `IdentifyResult` | Un clic en una capa enorme no puede devolver «nada» en silencio |
+| Las comprobaciones 1–12 llaman al motor; 13–23 usan eventos reales | Permite construir y verificar la geometría antes del panel, sin perder la cobertura del clic y del alcance (spec §9.3) |
+| Sin dependencias nuevas | Qt y GDAL ya están; el núcleo solo usa `QPointF`, `QElapsedTimer` y contenedores Qt |
 
 ## 4. Orden de implementación
 
-Dependencias (flechas = "necesita antes"):
+Dependencias (flechas = «necesita antes»):
 
 ```
-T1 entorno* ─┐
-T2 datos ────┼──▶ T3 RasterLayer ──▶ T4 RasterRenderer ──▶ T5 lienzo + snapshot
-             │                                                  │
-             │                                                  ▼
-             │                                    T6 warp + NoData + gris
-             │                                                  │
-             │                                                  ▼
-             │                                    T7 estiramiento + paleta
-             │                                          │              │
-             │                                          ▼              ▼
-             │                              T8 panel/MainWindow   T10 --check-raster
-             │                                          │              │
-             │                                          ▼              ▼
-             │                              T9 diálogo de estilo  T11 CTest
-             │                                          └──────┬───────┘
-             │                                                 ▼
-             │                                   T12 bench + borrador + rendimiento
-             │                                                 │
-             └─────────────────────────────────────────────────▼
-                                                        T13 documentación
-                                                               │
-                                                               ▼
-                                                        T14 verificación final
+T1 motor + --identify-at texto (checks 1-7, 12)
+ ├──▶ T2 capas sin índice / envolventes (8-9)
+ │         │
+ │         ▼
+ ├──▶ T3 prioridad, apilado, recorte (10-11)
+ │         │
+ │         ├──────────────┐
+ │         ▼              ▼
+ └──▶ T4 clic, marcador, caché (20-22)   T5 panel (19, 23)
+                     │                    │
+                     └────────┬───────────┘
+                              ▼
+                    T6 dock, alcance y avisos (13-18)
+                              │
+                              ▼
+                    T7 CLI JSON, opciones y capturas
+                              │
+                              ▼
+                    T8 CTest y documentación
+                              │
+                              ▼
+                    T9 verificación final (SC1-SC15)
 ```
 
-\* T1 (actualizar presets/`env.bat`) es independiente y está pendiente de
-confirmación; si se descarta, los comandos manuales del spec §6.1 siguen siendo
-la referencia.
+### Fase A — Motor y geometría (T1–T3)
 
-### Fase A — Fundación (T1–T2)
+La consulta completa por CLI con texto: prueba exacta, huecos, radio, capas sin
+índice, modo envolventes, orden, prioridad y recorte. Checkpoint A al cerrar T3.
 
-Datos deterministas y, si se confirma, un entorno que compile con un comando.
+### Fase B — Interacción (T4–T6)
 
-### Fase B — Camino mínimo (T3–T5)
+Clic sin arrastre, marcador, panel, dock, alcance del árbol y avisos de capa
+oculta y ráster. Checkpoint B al cerrar T6.
 
-Abrir un GeoTIFF, informarlo por `--info` y dibujarlo en `--snapshot` sin
-reproyección. Es la rebanada vertical más pequeña que ya enseña algo.
+### Fase C — Contrato y cierre (T7–T9)
 
-### Fase C — Reproyección y composición (T6–T7)
-
-DEM en UTM sobre lienzo EPSG:4326, NoData transparente, una banda en grises,
-estiramiento y paleta.
-
-### Fase D — Interfaz (T8–T9)
-
-Panel, apertura, visibilidad, zoom, diálogo de estilo y captura del diálogo.
-
-### Fase E — Contrato y rendimiento (T10–T12)
-
-`--check-raster`, pruebas de CTest, `--bench` con ráster, modo borrador y las
-medidas que fijan los presupuestos.
-
-### Fase F — Cierre (T13–T14)
-
-README, RENDIMIENTO.md y pasada completa de criterios de éxito.
+JSON, opciones de la CLI, capturas, pruebas de CTest, README y pasada final.
+Checkpoints C y D.
 
 ## 5. Índice de tareas
 
-Detalle completo (criterios, verificación, archivos, dependencias y tamaño) en
+Detalle completo (criterios, verificación, archivos y tamaño) en
 [todo.md](todo.md).
 
 | # | Tarea | Fase | Dep. | Tamaño |
 |---|---|---|---|---|
-| T1 | Alinear presets, `env.bat` y README con el entorno real *(pendiente de confirmar)* | A | — | S |
-| T2 | Generador determinista de rásters de ejemplo | A | — | S |
-| T3 | `RasterStyle` + `RasterLayer`, detección y `--info` | B | T2 | M |
-| T4 | `RasterRenderer` mínimo (mismo SRC, RGB, NoData/alfa) | B | T3 | M |
-| T5 | Lienzo y `--snapshot` con rásters | B | T4 | S |
-| T6 | Reproyección con warp, extensión densificada, una banda y NoData | C | T5 | M |
-| T7 | Estiramiento (percentiles/min-máx/ninguno) y paleta | C | T6 | M |
-| T8 | Panel de capas, apertura y acciones con rásters | D | T5 | M |
-| T9 | `RasterStyleDialog` y acciones de estilo | D | T8 | M |
-| T10 | `--check-raster`, opciones `--raster-*` y captura del diálogo | E | T7, T8, T9 | M |
-| T11 | Pruebas de CTest del ráster y puerta de rendimiento | E | T10 | S |
-| T12 | `--bench` con rásters, borrador y medida de rendimiento | E | T10 | M |
-| T13 | README y RENDIMIENTO.md con el ráster y sus medidas | F | T12 | S |
-| T14 | Verificación final contra el spec (SC1–SC14) | F | todas | S |
+| T1 | Núcleo de geometría, motor y `--identify-at` (texto) | A | — | M |
+| T2 | Capas sin índice y modo envolventes | A | T1 | M |
+| T3 | Orden, prioridad y recorte | A | T1, T2 | S |
+| T4 | Clic sin arrastre, marcador y caché | B | T1 | M |
+| T5 | Panel de resultados | B | T1, T3 | M |
+| T6 | Dock, alcance del árbol y avisos | B | T4, T5 | M |
+| T7 | CLI JSON, opciones y capturas | C | T3, T6 | M |
+| T8 | CTest y documentación | C | T7 | S |
+| T9 | Verificación final contra el spec | C | todas | S |
 
 ## 6. Riesgos y mitigaciones
 
 | Riesgo | Impacto | Mitigación |
 |---|---|---|
-| El warp por cuadro cuesta más de lo previsto | Alto | VRT cacheado, lectura solo de la ventana visible, borrador a media resolución; se mide en T6/T12 y, si hace falta, se ajusta el presupuesto antes de seguir |
-| La reutilización de cuadro con ráster deja costuras o desplazamientos | Alto | El ráster es traslación pura; se prueba reutilizar vs. redibujar en las 8 direcciones (T10) y se mide sin tolerancia en calidad |
-| Colores o alfa distintos por premultiplicación | Medio | `QImage::Format_ARGB32_Premultiplied` y comparación exacta de cuadrantes/paleta; si hay desvío, se compara con tolerancia ±2 |
-| El VRT o el dataset se comparte entre hilos por accidente | Alto | Apertura y dibujo en el hilo de la GUI; el cargador en segundo plano solo se usa para vectorial; regla en el código |
-| `GDALOpenEx` con ambos modos falla en algún driver | Medio | Si la detección combinada falla, se reintenta con solo vector y solo ráster; GeoPackage mixto documentado como vectorial |
-| Cambiar el panel rompe el flujo vectorial | Medio | `LayerEntry` envuelve los punteros existentes; las 9 pruebas y `--snapshot-window` se ejecutan tras T8 |
-| El presupuesto p90 no se cumple en este equipo | Medio | Se mide en T12 con el GeoTIFF de 4096²; el presupuesto es un objetivo del spec y se documenta el valor real |
-| El SDK 10.0.28000 vuelve a romper el enlace al reconfigurar | Bajo | T1 fija `rc.exe`/`mt.exe` en presets; si no se aprueba, el spec §6.1 ya lo indica |
-| Los datos de ejemplo ocupan demasiado en git | Bajo | 3 GeoTIFF de 256²/128² (≈200 KB); el grande de rendimiento va a `build\` (ignorado) |
+| El umbral de clic rompe el paneo o identifica tras un arrastre | Alto | Se recuerda el desplazamiento máximo en `mouseMoveEvent`; la comprobación 22 arrastra 20 px y exige que las filas del panel no cambien y que la extensión sí |
+| El marcador queda horneado en la caché y se duplica o no se mueve | Alto | Se dibuja después de `cache.image = image` (como las etiquetas); las comprobaciones 20 y 21 miran el píxel y la reutilización del cuadro |
+| En modo envolventes `acquireSubset` no es 1:1 con los candidatos | Alto | Se usa `hitTest`, que resuelve la lectura bajo demanda por índice; la comprobación 9 mide `features_read = 1` |
+| Un polígono con huecos mal probado identifica el hueco | Alto | Paridad even-odd sobre todos los anillos; la comprobación 3 usa el hueco real de P-005 |
+| La prueba por envolvente deja pasar elementos lejanos | Medio | Prueba exacta de distancia a segmentos; las comprobaciones 5 (4 px) y 6 (29 px) acotan el radio |
+| El camino OGR sin almacén recorre una capa enorme | Medio | Filtro espacial (transformando la caja al SRC de la capa), tope de 256 candidatos y presupuesto de 250 ms con aviso |
+| `syncLayerPanel()` reconstruye el árbol y pierde la selección | Medio | El panel ya recibe la entrada actual; las comprobaciones 13–16 hacen clic después de un cambio de visibilidad para forzar la reconstrucción |
+| Simular ratón en offscreen da coordenadas distintas según el tamaño | Medio | Las expectativas se calculan con el `MapToPixel` real del lienzo; el tamaño se estabiliza procesando eventos, como en `--snapshot-window` |
+| `fieldValues(row)` asume FID = fila | Bajo | Es el convenio ya usado por la tabla y el índice de envolventes; los datos de ejemplo lo cumplen (Madrid y P-001 son fid 0) y el camino OGR usa el FID de OGR |
+| El JSON o los códigos de salida se desvían del contrato | Medio | `minigis.identificar-cli` compara claves y códigos; el JSON se documenta en el spec §8 |
+| Se olvida añadir un archivo a `CMakeLists.txt` (listas explícitas) | Bajo | Cada tarea que crea un `.h/.cpp` actualiza la lista de su carpeta en la misma tarea |
 
 ## 7. Paralelización
 
-* **En paralelo:** T1 y T2 (entorno vs. datos) al principio; T11 (pruebas) y T12
-  (medida) una vez cerrado T10.
-* **Secuencial:** T3 → T4 → T5 → T6 → T7 (el renderizador crece por capas);
-  T10 → T11 → T12 (el contrato antes que las pruebas y la medida).
-* **Coordinación:** T8 y T10 comparten `MapCanvas` (extensión, orden, revisión).
-  T10 se hace después de T8 para no tocar el lienzo dos veces.
+* **En paralelo:** T4 (lienzo) y T5 (panel) tras T3, porque tocan archivos
+  distintos; T8 (pruebas + README) se puede preparar mientras T7 estabiliza el
+  JSON, pero se valida después.
+* **Secuencial:** T1 → T2 → T3 (comparten `minigisidentify.cpp`); T4 + T5 → T6
+  (comparten `MainWindow`/`MapCanvas`); T7 → T8 → T9.
+* **Coordinación:** el contrato de `IdentifyResult` (T1) no cambia después de T3;
+  si cambia, se actualizan panel y CLI en la misma tarea.
 
 ## 8. Puntos de control
 
 | Checkpoint | Después de | Exige |
 |---|---|---|
-| A — Camino mínimo | T5 | Compila, 9/9 pruebas, `--info` y `--snapshot` de `ortho_rgb` con los cuadrantes en su sitio |
-| B — Reproyección y contraste | T7 | DEM UTM encuadrado sobre el lienzo 4326; NoData transparente; percentiles vs min-máx distinguibles |
-| C — Interfaz | T9 | `--snapshot-window` escribe PNG; panel lista el ráster; el diálogo de estilo se abre y aplica cambios |
-| D — Contrato y rendimiento | T12 | `--check-raster` en verde, pruebas nuevas en CTest, p90 medido y documentado |
-| E — Cierre | T14 | SC1–SC14 del spec verificados; README/RENDIMIENTO actualizados |
+| A — Motor | T3 | Compila, 15/15 pruebas, `--check-identify` con las comprobaciones 1–12 en `OK` y ninguna `FALLO` |
+| B — Interacción | T6 | Comprobaciones 13–23 en `OK`; un clic real abre el dock; arrastrar sigue paneando; 15/15 |
+| C — Contrato | T8 | 18/18 en CTest; `--identify-at --json` cumple el esquema; la captura de la interfaz muestra panel y marcador |
+| D — Cierre | T9 | SC1–SC15 verificados uno a uno; README y `--help` al día |
 
-Cada checkpoint implica **revisión humana** antes de seguir con la fase
-siguiente.
+Cada checkpoint implica **revisión humana** antes de seguir con la fase siguiente
+(salvo autorización expresa para continuar).
 
 ## 9. Preguntas abiertas para esta revisión
 
-1. **Presets y `env.bat` (T1):** ¿se actualizan a `D:/Qt/6.8.3`, `D:/VCPKG` y el
-   `rc.exe` de 10.0.26100? Propuesto: sí; si no, se omite T1 y se trabaja con
-   la línea de configuración del spec.
-2. **Presupuesto de rendimiento:** se mantiene p90 ≤ 100 ms (calidad) y ≤ 45 ms
-   (borrador) sobre 4096² con overviews; se confirma con la primera medida de
-   T12 antes de fijarlo en la documentación.
-
-Las decisiones de alcance (sin rampas de color, sin hillshade, ráster debajo del
-vectorial) ya están cerradas en el spec y no se reabren aquí.
+1. **`--identify-at` sin ventana:** propuesto construir un `MapCanvas` (no un
+   `MainWindow`) para que la consulta sea rápida y headless; `--snapshot-window`
+   sí usa la ventana cuando hay que rellenar el panel.
+2. **API pública para las comprobaciones:** `IdentifyPanel::rows()`,
+   `headerText()` y `MainWindow::selectLayer()` se exponen como parte del contrato
+   de verificación (mismo patrón que `layerTreeRows()` y `waitForLoading()`), no
+   como API de usuario.
+3. **Datos de `--check-identify`:** se exigen las tres capas de ejemplo por `-l`
+   (parcels, cities, ortho) y el chequeo falla con un mensaje accionable si los
+   nombres no son los esperados; no busca archivos por su cuenta.
+4. **Marcador:** cruz de 1 px en magenta puro dibujada en el píxel redondeado del
+   clic; es lo que hace determinista la comprobación 20 en la plataforma
+   `offscreen`.
+5. **Tolerancia en píxeles de la comprobación 5:** se acepta el rango 3,5–5,0 px
+   porque el clic se redondea al píxel entero antes de convertirlo a mapa (±0,5 px
+   sobre los 4,2 px teóricos).

@@ -1,5 +1,6 @@
 #include "minigisgeometrystore.h"
 
+#include "minigisgeometryhit.h"
 #include "minigisshapefileindex.h"
 #include "minigisvectorlayer.h"
 
@@ -1479,6 +1480,92 @@ void GeometryStore::query(double minX, double minY, double maxX, double maxY, st
         mStack.push_back(mChildIds[node.first + i]);
     }
   }
+}
+
+bool GeometryStore::hitTest(uint32_t index, double x, double y, double tolerance,
+                            bool &inside, double &distance) const
+{
+  inside = false;
+  distance = 0.0;
+
+  if (index >= mFeatures.size())
+    return false;
+
+  const Feature &feature = mFeatures[index];
+
+  // Descarte por envolvente: la distancia a la geometria nunca es menor que la
+  // distancia a su envolvente, asi que por encima de la tolerancia no hace falta
+  // leer nada (en modo envolventes esto ahorra I/O).
+  const double dx = std::max({feature.minX - x, 0.0, x - feature.maxX});
+  const double dy = std::max({feature.minY - y, 0.0, y - feature.maxY});
+  const double envelopeDistance = std::hypot(dx, dy);
+  if (envelopeDistance > tolerance)
+  {
+    distance = envelopeDistance;
+    return true;
+  }
+
+  const std::vector<double> *coords = nullptr;
+  const std::vector<uint32_t> *ringFirst = nullptr;
+  const std::vector<uint32_t> *ringCount = nullptr;
+  size_t ringBegin = 0;
+  size_t ringEnd = 0;
+  GeometryKind kind = GeometryKind::Unknown;
+
+  std::shared_ptr<CachedGeometry> cached;
+
+  if (mMode == Mode::InMemory)
+  {
+    const Level *levelData = acquireLevel(0);
+    if (!levelData || index >= mEntryFirstRing.size() || index >= mEntryRingCount.size())
+      return false;
+
+    ringBegin = mEntryFirstRing[index];
+    ringEnd = ringBegin + mEntryRingCount[index];
+    if (ringEnd > levelData->ringFirst.size() || ringEnd > levelData->ringCount.size()
+        || ringBegin >= mRingKinds.size())
+      return false;
+
+    kind = static_cast<GeometryKind>(mRingKinds[ringBegin]);
+    coords = &levelData->coords;
+    ringFirst = &levelData->ringFirst;
+    ringCount = &levelData->ringCount;
+  }
+  else
+  {
+    {
+      std::lock_guard<std::mutex> lock(mMutex);
+      if (!fetchGeometry(index))
+        return false;
+
+      const auto found = mCache.find(index);
+      if (found == mCache.end())
+        return false;
+
+      cached = found->second;
+      // El shared_ptr mantiene viva la geometria aunque la cache la desaloje.
+      evictCacheIfNeeded();
+    }
+
+    if (cached->ringFirst.empty() || cached->ringKind.empty())
+      return false;
+
+    ringBegin = 0;
+    ringEnd = cached->ringFirst.size();
+    kind = static_cast<GeometryKind>(cached->ringKind.front());
+    coords = &cached->coords;
+    ringFirst = &cached->ringFirst;
+    ringCount = &cached->ringCount;
+  }
+
+  const PointGeometryTest test =
+    testPointAgainstGeometry(*coords, *ringFirst, *ringCount, ringBegin, ringEnd, kind, x, y);
+
+  // Un elemento puntual no tiene interior: si ha pasado el filtro de la
+  // envolvente es que se ha pulsado su simbolo.
+  inside = kind == GeometryKind::Point ? true : test.inside;
+  distance = inside ? 0.0 : test.distance;
+  return true;
 }
 
 qint64 GeometryStore::cachedVertices() const

@@ -296,6 +296,124 @@ elseif(MODE STREQUAL "snapshot-window")
     message(STATUS "minigis --snapshot-window OK: ${_size} bytes")
   endif()
 
+elseif(MODE STREQUAL "check-identify")
+  # Contrato de Identificar: geometria, huecos, radio, capas sin indice, modo
+  # envolventes, orden, alcance del arbol, panel, marcador y cache.
+  execute_process(
+    COMMAND "${MINIGIS_EXE}" --check-identify --layer "${SAMPLE}" --layer "${SAMPLE2}" --layer "${SAMPLE3}"
+    RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+  if(NOT _rc EQUAL EXPECT_EXIT)
+    message(FATAL_ERROR "minigis --check-identify fallo (codigo ${_rc}, esperado ${EXPECT_EXIT})\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")
+  endif()
+
+  if(EXPECT_EXIT EQUAL 0)
+    if(_out MATCHES "FALLO")
+      message(FATAL_ERROR "Identificar no cumple su contrato:\n${_out}")
+    endif()
+    foreach(_key IN ITEMS "clic en un punto identifica la ciudad"
+                          "el hueco del poligono no se identifica"
+                          "el radio es el que se pide"
+                          "una capa sin indice se identifica"
+                          "una capa indexada por envolventes"
+                          "el recorte de resultados se declara"
+                          "sin seleccion se consultan todas las capas visibles"
+                          "la capa seleccionada manda"
+                          "la capa seleccionada va primero"
+                          "una capa oculta no se identifica"
+                          "una capa raster seleccionada no limita"
+                          "el panel agrupa por capa y muestra los campos"
+                          "el marcador del clic se dibuja"
+                          "identificar no invalida el cuadro cacheado"
+                          "arrastrar no identifica")
+      if(NOT _out MATCHES "${_key}")
+        message(FATAL_ERROR "La comprobacion «${_key}» no se ejecuto:\n${_out}")
+      endif()
+    endforeach()
+    message(STATUS "minigis --check-identify OK")
+  endif()
+
+elseif(MODE STREQUAL "identify-at")
+  # Consulta puntual: punto, capa limitada, capa reproyectada y hueco.
+  execute_process(
+    COMMAND "${MINIGIS_EXE}" --identify-at -3.70379,40.41678 --json
+            --size 1000x700 --extent -3.78,40.35,-3.66,40.43
+            --layer "${SAMPLE}" --layer "${SAMPLE2}"
+    RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+  if(NOT _rc EQUAL 0)
+    message(FATAL_ERROR "minigis --identify-at fallo (codigo ${_rc})\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")
+  endif()
+  foreach(_key IN ITEMS "\"layer\": \"cities\"" "\"name\": \"Madrid\"" "\"inside\": true"
+                        "\"layers_searched\": 2" "\"truncated\": false" "\"hit_count\": 2")
+    if(NOT _out MATCHES "${_key}")
+      message(FATAL_ERROR "La salida JSON de --identify-at no contiene ${_key}:\n${_out}")
+    endif()
+  endforeach()
+
+  execute_process(
+    COMMAND "${MINIGIS_EXE}" --identify-at -3.70379,40.41678 --identify-layer parcels --json
+            --size 1000x700 --extent -3.78,40.35,-3.66,40.43
+            --layer "${SAMPLE}" --layer "${SAMPLE2}"
+    RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+  if(NOT _rc EQUAL 0)
+    message(FATAL_ERROR "minigis --identify-at --identify-layer fallo (codigo ${_rc})\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")
+  endif()
+  foreach(_key IN ITEMS "\"layer\": \"parcels\"" "\"parcel_id\": \"P-001\""
+                        "\"layers_searched\": 1" "\"scope\": \"layer\"")
+    if(NOT _out MATCHES "${_key}")
+      message(FATAL_ERROR "La salida JSON de --identify-layer no contiene ${_key}:\n${_out}")
+    endif()
+  endforeach()
+
+  execute_process(
+    COMMAND "${MINIGIS_EXE}" --identify-at -3.71,40.41 --json
+            --size 1000x700 --extent -3.78,40.35,-3.66,40.43 --layer "${SAMPLE3}"
+    RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+  if(NOT _rc EQUAL 0)
+    message(FATAL_ERROR "minigis --identify-at (UTM) fallo (codigo ${_rc})\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")
+  endif()
+  foreach(_key IN ITEMS "\"parcel_id\": \"P-001\"" "\"inside\": true")
+    if(NOT _out MATCHES "${_key}")
+      message(FATAL_ERROR "La salida JSON de la capa UTM no contiene ${_key}:\n${_out}")
+    endif()
+  endforeach()
+
+  execute_process(
+    COMMAND "${MINIGIS_EXE}" --identify-at -3.74,40.38 --json
+            --size 1000x700 --extent -3.78,40.35,-3.66,40.43 --layer "${SAMPLE}"
+    RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+  if(NOT _rc EQUAL 0)
+    message(FATAL_ERROR "minigis --identify-at (hueco) fallo (codigo ${_rc})\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")
+  endif()
+  if(NOT _out MATCHES "\"hit_count\": 0")
+    message(FATAL_ERROR "El hueco del poligono devolvio resultados:\n${_out}")
+  endif()
+  message(STATUS "minigis --identify-at OK")
+
+elseif(MODE STREQUAL "identify-window")
+  # Captura de la interfaz con el panel de Identificar lleno y el marcador.
+  get_filename_component(_outdir "${OUT}" DIRECTORY)
+  file(MAKE_DIRECTORY "${_outdir}")
+  if(EXISTS "${OUT}")
+    file(REMOVE "${OUT}")
+  endif()
+  execute_process(
+    COMMAND "${MINIGIS_EXE}" --snapshot-window "${OUT}" --identify-at -3.70379,40.41678
+            --size 1000x700 --layer "${SAMPLE}" --layer "${SAMPLE2}"
+    RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+  if(NOT _rc EQUAL EXPECT_EXIT)
+    message(FATAL_ERROR "minigis --snapshot-window con --identify-at fallo (codigo ${_rc})\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")
+  endif()
+  if(EXPECT_EXIT EQUAL 0)
+    if(NOT EXISTS "${OUT}")
+      message(FATAL_ERROR "No se genero la captura: ${OUT}\nSTDOUT:\n${_out}")
+    endif()
+    file(SIZE "${OUT}" _size)
+    if(_size LESS 10000)
+      message(FATAL_ERROR "La captura con el panel parece vacia (${_size} bytes)")
+    endif()
+    message(STATUS "minigis --snapshot-window + --identify-at OK: ${_size} bytes")
+  endif()
+
 else()
   message(FATAL_ERROR "MODE no soportado: ${MODE}")
 endif()

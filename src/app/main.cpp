@@ -24,6 +24,7 @@
 #include <QElapsedTimer>
 #include <QFileInfo>
 #include <QImage>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -54,6 +55,8 @@ constexpr unsigned int kUtf8CodePage = 65001;
 
 #include "minigisgdalinit.h"
 #include "minigisgeometrystore.h"
+#include "minigisidentify.h"
+#include "minigisidentifypanel.h"
 #include "minigislabeldialog.h"
 #include "minigislayerpanel.h"
 #include "minigismainwindow.h"
@@ -187,6 +190,8 @@ QString helpText(const QCommandLineParser &parser)
                           "  minigis --snapshot m.png -l capa.tif -l c.shp raster debajo del vectorial\n"
                           "  minigis --check-raster -l a.tif -l b.tif  comprueba el dibujado raster\n"
                           "  minigis --check-layers -l capa.gpkg      todas las capas del archivo, en el panel\n"
+                          "  minigis --identify-at -3.70,40.41 -l c.shp  identifica el elemento en x,y\n"
+                          "  minigis --check-identify -l p.shp -l c.shp -l o.tif  contrato de Identificar\n"
                           "\nRendimiento (sin ventana):\n"
                           "  minigis --bench 40 -l capa.gpkg                 mide 40 cuadros de paneo/zoom\n"
                           "  minigis --bench 40 --bench-scenario zoom -l c.gpkg\n"
@@ -440,6 +445,24 @@ bool parseEpsg(const QString &text, int *epsg)
     return false;
 
   *epsg = value;
+  return true;
+}
+
+/** Coordenadas de un clic: "x,y" en el SRC de destino. */
+bool parsePoint(const QString &text, QPointF *point)
+{
+  const QStringList parts = text.split(QRegularExpression(QStringLiteral("[,\\s]+")), Qt::SkipEmptyParts);
+  if (parts.size() != 2)
+    return false;
+
+  bool xOk = false;
+  bool yOk = false;
+  const double x = parts.at(0).trimmed().toDouble(&xOk);
+  const double y = parts.at(1).trimmed().toDouble(&yOk);
+  if (!xOk || !yOk)
+    return false;
+
+  *point = QPointF(x, y);
   return true;
 }
 
@@ -2523,6 +2546,721 @@ void attachGeometryStore(const std::shared_ptr<VectorLayer> &layer, int destinat
   }
 }
 
+/** Valor de un campo de un resultado de Identificar, por nombre. */
+QString identifyFieldValue(const IdentifyResult &result, int hitIndex, const QString &field)
+{
+  if (hitIndex < 0 || hitIndex >= result.hits.size())
+    return {};
+
+  const IdentifyHit &hit = result.hits[hitIndex];
+  const QVector<VectorLayer::FieldInfo> &fields = hit.layer->fields();
+  for (int i = 0; i < fields.size() && i < hit.values.size(); ++i)
+  {
+    if (fields.at(i).name.compare(field, Qt::CaseInsensitive) == 0)
+      return hit.values.at(i);
+  }
+  return {};
+}
+
+/**
+ * Consulta puntual sin ventana (--identify-at). Abre las capas vectoriales,
+ * construye el almacen (como los demas modos sin ventana), fija la extension y
+ * llama al mismo motor que usa el clic.
+ */
+int runIdentifyAt(const QStringList &layerPaths, const QPointF &mapPoint, int radiusPixels,
+                  const QString &layerName, const Rectangle &requestedExtent, const QSize &size,
+                  int destinationEpsg, bool asJson)
+{
+  if (layerPaths.isEmpty())
+  {
+    writeErr(QStringLiteral("Se necesita al menos una capa vectorial: "
+                            "minigis --identify-at x,y -l capa.shp"));
+    return ExitNoLayers;
+  }
+
+  MapCanvas canvas;
+  canvas.setDestinationEpsg(destinationEpsg);
+  canvas.resize(size);
+
+  for (const QString &path : layerPaths)
+  {
+    if (!QFileInfo::exists(path))
+    {
+      writeErr(QStringLiteral("No existe el archivo: %1").arg(QDir::toNativeSeparators(path)));
+      return ExitFileNotFound;
+    }
+
+    Error listError;
+    const QStringList names = VectorLayer::layerNames(path, &listError);
+    if (names.isEmpty())
+    {
+      logVerbose(QStringLiteral("%1 no es vectorial; se omite").arg(QDir::toNativeSeparators(path)));
+      continue;
+    }
+
+    for (int index = 0; index < names.size(); ++index)
+    {
+      Error error;
+      const std::shared_ptr<VectorLayer> layer = VectorLayer::open(path, index, &error);
+      if (!layer)
+      {
+        writeErr(error.toText());
+        return ExitOpenFailed;
+      }
+
+      attachGeometryStore(layer, destinationEpsg, true);
+      canvas.addLayer(layer, false);
+    }
+  }
+
+  if (canvas.layers().empty())
+  {
+    writeErr(QStringLiteral("No hay capas vectoriales que identificar."));
+    return ExitNoLayers;
+  }
+
+  if (requestedExtent.isValid())
+    canvas.setExtent(requestedExtent);
+  else
+    canvas.zoomToFullExtent();
+
+  const double unitsPerPixel = canvas.mapUnitsPerPixel();
+  if (!(unitsPerPixel > 0.0))
+  {
+    writeErr(QStringLiteral("No se pudo calcular la escala del lienzo; indica --extent y --size."));
+    return ExitUsage;
+  }
+
+  std::vector<std::shared_ptr<VectorLayer>> layers;
+  std::shared_ptr<VectorLayer> priority;
+
+  const QString wanted = layerName.trimmed();
+  if (!wanted.isEmpty())
+  {
+    for (const std::shared_ptr<VectorLayer> &layer : canvas.layers())
+    {
+      if (layer && layer->name().compare(wanted, Qt::CaseInsensitive) == 0)
+      {
+        if (priority)
+        {
+          writeErr(QStringLiteral("El nombre «%1» es ambiguo: hay varias capas con ese nombre.").arg(wanted));
+          return ExitUsage;
+        }
+        priority = layer;
+      }
+    }
+
+    if (!priority)
+    {
+      QStringList available;
+      for (const std::shared_ptr<VectorLayer> &layer : canvas.layers())
+        available << layer->name();
+      writeErr(QStringLiteral("No hay ninguna capa llamada «%1». Capas: %2")
+                 .arg(wanted, available.join(QStringLiteral(", "))));
+      return ExitUsage;
+    }
+
+    layers.push_back(priority);
+  }
+  else
+  {
+    for (const std::shared_ptr<VectorLayer> &layer : canvas.layers())
+    {
+      if (layer && layer->isVisible())
+        layers.push_back(layer);
+    }
+  }
+
+  IdentifyRequest request;
+  request.mapPoint = mapPoint;
+  request.destinationEpsg = destinationEpsg;
+  request.layers = layers;
+  request.priorityLayer = priority;
+  request.options.tolerance = radiusPixels * unitsPerPixel;
+
+  const IdentifyResult result = identifyAtPoint(request);
+
+  if (asJson)
+  {
+    QJsonObject query;
+    query.insert(QStringLiteral("x"), mapPoint.x());
+    query.insert(QStringLiteral("y"), mapPoint.y());
+    query.insert(QStringLiteral("epsg"), destinationEpsg);
+    query.insert(QStringLiteral("radius_px"), radiusPixels);
+    query.insert(QStringLiteral("radius_map_units"), result.tolerance);
+    query.insert(QStringLiteral("scope"), wanted.isEmpty() ? QStringLiteral("all") : QStringLiteral("layer"));
+    query.insert(QStringLiteral("layer"), priority ? QJsonValue(priority->name()) : QJsonValue());
+
+    QJsonArray hits;
+    for (const IdentifyHit &hit : result.hits)
+    {
+      QJsonObject object;
+      object.insert(QStringLiteral("layer"), hit.layer->name());
+      object.insert(QStringLiteral("container"), QFileInfo(hit.layer->sourcePath()).fileName());
+      object.insert(QStringLiteral("fid"), static_cast<double>(hit.fid));
+      object.insert(QStringLiteral("geometry"), hit.layer->geometryTypeName());
+      object.insert(QStringLiteral("inside"), hit.inside);
+      object.insert(QStringLiteral("distance_map_units"), hit.distance);
+      object.insert(QStringLiteral("distance_px"), hit.distance / unitsPerPixel);
+
+      QJsonObject fields;
+      const QVector<VectorLayer::FieldInfo> &infos = hit.layer->fields();
+      for (int i = 0; i < infos.size() && i < hit.values.size(); ++i)
+        fields.insert(infos.at(i).name, hit.values.at(i));
+      object.insert(QStringLiteral("fields"), fields);
+
+      hits.append(object);
+    }
+
+    QJsonObject root;
+    root.insert(QStringLiteral("query"), query);
+    root.insert(QStringLiteral("hit_count"), result.hits.size());
+    root.insert(QStringLiteral("hits"), hits);
+    root.insert(QStringLiteral("layers_searched"), result.stats.layersSearched);
+    root.insert(QStringLiteral("candidates_tested"), static_cast<double>(result.stats.candidatesTested));
+    root.insert(QStringLiteral("features_read"), static_cast<double>(result.stats.featuresRead));
+    root.insert(QStringLiteral("elapsed_ms"), static_cast<double>(result.stats.elapsedMs));
+    root.insert(QStringLiteral("truncated"), result.truncated);
+
+    writeOut(QString::fromUtf8(QJsonDocument(root).toJson(QJsonDocument::Indented)).trimmed());
+    return ExitOk;
+  }
+
+  writeOut(QStringLiteral("x: %1  y: %2  (EPSG:%3)  radio %4 px (%5 u.m.)")
+             .arg(QString::number(mapPoint.x(), 'f', 6), QString::number(mapPoint.y(), 'f', 6))
+             .arg(destinationEpsg)
+             .arg(radiusPixels)
+             .arg(QString::number(result.tolerance, 'g', 6)));
+
+  if (result.hits.isEmpty())
+  {
+    writeOut(QStringLiteral("Sin elementos a menos de %1 px (%2, %3).")
+               .arg(radiusPixels)
+               .arg(QString::number(mapPoint.x(), 'f', 6), QString::number(mapPoint.y(), 'f', 6)));
+    return ExitOk;
+  }
+
+  for (const IdentifyHit &hit : result.hits)
+  {
+    writeOut(QStringLiteral("%1 — %2").arg(hit.layer->name(), hit.layer->geometryTypeName()));
+    writeOut(QStringLiteral("  #%1 · %2")
+               .arg(hit.fid)
+               .arg(hit.inside ? QStringLiteral("dentro")
+                               : QStringLiteral("a %1 px").arg(QString::number(hit.distance / unitsPerPixel, 'f', 1))));
+
+    const QVector<VectorLayer::FieldInfo> &infos = hit.layer->fields();
+    for (int i = 0; i < infos.size() && i < hit.values.size(); ++i)
+      writeOut(QStringLiteral("  %1: %2").arg(infos.at(i).name, hit.values.at(i)));
+  }
+
+  return ExitOk;
+}
+
+/**
+ * Contrato de Identificar sin ventana (--check-identify). Las comprobaciones de
+ * geometria llaman al motor con un punto calculado; las de interaccion envian
+ * eventos de raton al lienzo y leen el panel.
+ */
+int checkIdentify(const QStringList &layerPaths, bool asJson)
+{
+  if (layerPaths.isEmpty())
+  {
+    writeErr(QStringLiteral("Se necesitan las capas de ejemplo:"));
+    writeErr(QStringLiteral("  minigis --check-identify "
+                            "-l data/sample/shapefiles/parcels.shp "
+                            "-l data/sample/shapefiles/cities.shp "
+                            "-l data/sample/rasters/ortho_rgb.tif"));
+    return ExitUsage;
+  }
+
+  bool ok = true;
+  const auto check = [&ok](const QString &name, bool passed, const QString &detail) {
+    writeOut(QStringLiteral("%1 %2%3")
+               .arg(passed ? QStringLiteral("OK  ") : QStringLiteral("FALLO"))
+               .arg(name, detail.isEmpty() ? QString() : QStringLiteral(" — ") + detail));
+    if (!passed)
+      ok = false;
+  };
+
+  MainWindow window(nullptr, false);
+  window.resize(1000, 700);
+  window.show();
+  QApplication::processEvents();
+  window.canvas()->setDestinationEpsg(4326);
+  window.loadPaths(layerPaths);
+  if (!window.waitForLoading(300000))
+  {
+    writeErr(QStringLiteral("La carga de capas no termino a tiempo."));
+    return ExitOpenFailed;
+  }
+
+  // El layout de la ventana fija el tamano del lienzo: se espera a que se
+  // estabilice antes de calcular la escala de la prueba.
+  QSize lastCanvasSize;
+  for (int iteration = 0; iteration < 5 && window.canvas()->size() != lastCanvasSize; ++iteration)
+  {
+    lastCanvasSize = window.canvas()->size();
+    QApplication::processEvents();
+  }
+
+  std::shared_ptr<VectorLayer> parcels;
+  std::shared_ptr<VectorLayer> cities;
+  std::shared_ptr<RasterLayer> ortho;
+  for (const std::shared_ptr<VectorLayer> &layer : window.canvas()->layers())
+  {
+    if (!layer)
+      continue;
+    if (layer->name().compare(QStringLiteral("parcels"), Qt::CaseInsensitive) == 0)
+      parcels = layer;
+    else if (layer->name().compare(QStringLiteral("cities"), Qt::CaseInsensitive) == 0)
+      cities = layer;
+  }
+  for (const std::shared_ptr<RasterLayer> &raster : window.canvas()->rasterLayers())
+  {
+    if (raster && raster->sourcePath().contains(QStringLiteral("ortho_rgb"), Qt::CaseInsensitive))
+      ortho = raster;
+  }
+
+  if (!parcels || !cities || !ortho)
+  {
+    writeErr(QStringLiteral("Faltan las capas de ejemplo esperadas (parcels, cities y ortho_rgb)."));
+    writeErr(QStringLiteral("Carga: -l parcels.shp -l cities.shp -l ortho_rgb.tif"));
+    return ExitUsage;
+  }
+
+  // Escala fija (0,00012 u.m./px) calculada con el tamano real del lienzo: asi
+  // las distancias en pixeles no dependen del tamano de la ventana.
+  const double unitsPerPixel = 0.00012;
+  const QSize canvasSize = window.canvas()->size();
+  const double centerX = -3.72;
+  const double centerY = 40.40;
+  window.canvas()->setExtent(Rectangle(centerX - unitsPerPixel * canvasSize.width() / 2.0,
+                                       centerY - unitsPerPixel * canvasSize.height() / 2.0,
+                                       centerX + unitsPerPixel * canvasSize.width() / 2.0,
+                                       centerY + unitsPerPixel * canvasSize.height() / 2.0));
+
+  if (std::abs(window.canvas()->mapUnitsPerPixel() - unitsPerPixel) > 1e-9)
+  {
+    writeErr(QStringLiteral("No se pudo fijar la escala de la prueba (u.m./px = %1).")
+               .arg(window.canvas()->mapUnitsPerPixel(), 0, 'g', 12));
+    return ExitUsage;
+  }
+
+  const auto runCore = [&](const std::vector<std::shared_ptr<VectorLayer>> &layers,
+                           const std::shared_ptr<VectorLayer> &priority, const QPointF &point,
+                           double tolerancePx, int maximumTotal = 0) {
+    IdentifyRequest request;
+    request.mapPoint = point;
+    request.destinationEpsg = 4326;
+    request.layers = layers;
+    request.priorityLayer = priority;
+    request.options.tolerance = tolerancePx * unitsPerPixel;
+    if (maximumTotal > 0)
+      request.options.maximumTotal = maximumTotal;
+    return identifyAtPoint(request);
+  };
+
+  const auto single = [&](const std::shared_ptr<VectorLayer> &layer, const QPointF &point,
+                          double tolerancePx) {
+    return runCore({layer}, nullptr, point, tolerancePx);
+  };
+
+  const auto distancePx = [&](const IdentifyResult &result, int hitIndex) {
+    return hitIndex >= 0 && hitIndex < result.hits.size() ? result.hits.at(hitIndex).distance / unitsPerPixel
+                                                          : -1.0;
+  };
+
+  // 1) Punto.
+  {
+    const IdentifyResult result = single(cities, QPointF(-3.70379, 40.41678), 6.0);
+    const bool passed = result.hits.size() == 1 && result.hits.at(0).layer == cities
+                        && result.hits.at(0).fid == 0 && result.hits.at(0).inside
+                        && identifyFieldValue(result, 0, QStringLiteral("name")) == QStringLiteral("Madrid");
+    check(QStringLiteral("clic en un punto identifica la ciudad"), passed,
+          QStringLiteral("%1 resultado(s)").arg(result.hits.size()));
+  }
+
+  // 2) Dentro de un poligono.
+  {
+    const IdentifyResult result = single(parcels, QPointF(-3.71, 40.41), 6.0);
+    const bool passed = result.hits.size() == 1 && result.hits.at(0).inside
+                        && identifyFieldValue(result, 0, QStringLiteral("parcel_id")) == QStringLiteral("P-001");
+    check(QStringLiteral("clic dentro de un poligono identifica la parcela"), passed,
+          QStringLiteral("%1 resultado(s)").arg(result.hits.size()));
+  }
+
+  // 3) Hueco de P-005.
+  {
+    const IdentifyResult result = single(parcels, QPointF(-3.74, 40.38), 6.0);
+    check(QStringLiteral("el hueco del poligono no se identifica"), result.hits.isEmpty(),
+          QStringLiteral("%1 resultado(s)").arg(result.hits.size()));
+  }
+
+  // 4) Parte solida del poligono con hueco.
+  {
+    const IdentifyResult result = single(parcels, QPointF(-3.755, 40.375), 6.0);
+    const bool passed = result.hits.size() == 1 && result.hits.at(0).inside
+                        && identifyFieldValue(result, 0, QStringLiteral("parcel_id")) == QStringLiteral("P-005");
+    check(QStringLiteral("la parte solida de un poligono con hueco si se identifica"), passed,
+          QStringLiteral("%1 resultado(s)").arg(result.hits.size()));
+  }
+
+  // 5) Cerca del borde (4,2 px) con radio de 6.
+  {
+    const IdentifyResult result = single(parcels, QPointF(-3.7205, 40.41), 6.0);
+    const double px = distancePx(result, 0);
+    const bool passed = result.hits.size() == 1 && !result.hits.at(0).inside && px >= 3.5 && px <= 5.0;
+    check(QStringLiteral("un clic a 4 px del borde identifica el poligono como cercano"), passed,
+          QStringLiteral("%1 resultado(s), %2 px").arg(result.hits.size()).arg(px, 0, 'f', 2));
+  }
+
+  // 6) Fuera del radio (29 px).
+  {
+    const IdentifyResult result = single(parcels, QPointF(-3.7235, 40.41), 6.0);
+    check(QStringLiteral("a 29 px no se identifica nada"), result.hits.isEmpty(),
+          QStringLiteral("%1 resultado(s)").arg(result.hits.size()));
+  }
+
+  // 7) El radio se respeta.
+  {
+    const IdentifyResult narrow = single(parcels, QPointF(-3.7205, 40.41), 3.0);
+    const IdentifyResult wide = single(parcels, QPointF(-3.7205, 40.41), 6.0);
+    check(QStringLiteral("el radio es el que se pide: 3 px no alcanza, 6 px si"),
+          narrow.hits.isEmpty() && wide.hits.size() == 1,
+          QStringLiteral("3 px: %1, 6 px: %2").arg(narrow.hits.size()).arg(wide.hits.size()));
+  }
+
+  // 8) Capa sin almacen: camino OGR.
+  {
+    Error openError;
+    const std::shared_ptr<VectorLayer> bare = VectorLayer::open(parcels->sourcePath(), &openError);
+    if (!bare)
+    {
+      check(QStringLiteral("una capa sin indice se identifica por el camino OGR"), false, openError.toText());
+    }
+    else
+    {
+      const IdentifyResult result = single(bare, QPointF(-3.71, 40.41), 6.0);
+      const bool passed = result.hits.size() == 1
+                          && identifyFieldValue(result, 0, QStringLiteral("parcel_id")) == QStringLiteral("P-001");
+      check(QStringLiteral("una capa sin indice se identifica por el camino OGR"), passed,
+            QStringLiteral("%1 resultado(s), %2 leidos").arg(result.hits.size()).arg(result.stats.featuresRead));
+    }
+  }
+
+  // 9) Modo envolventes: solo se lee la geometria del candidato.
+  {
+    Error openError;
+    const std::shared_ptr<VectorLayer> envelopeLayer = VectorLayer::open(parcels->sourcePath(), &openError);
+    QString storeError;
+    std::shared_ptr<GeometryStore> envelopeStore;
+    if (envelopeLayer)
+    {
+      envelopeStore = GeometryStore::buildEnvelopeIndex(*envelopeLayer, 4326, GeometryStore::Options(), {},
+                                                        &storeError);
+    }
+
+    if (!envelopeLayer || !envelopeStore)
+    {
+      check(QStringLiteral("una capa indexada por envolventes lee solo la geometria del candidato"), false,
+            envelopeLayer ? storeError : openError.toText());
+    }
+    else
+    {
+      envelopeLayer->setGeometryStore(envelopeStore);
+      const qint64 readBefore = envelopeStore->stats().geometriesRead;
+      const IdentifyResult result = single(envelopeLayer, QPointF(-3.71, 40.41), 6.0);
+      const qint64 read = envelopeStore->stats().geometriesRead - readBefore;
+      const bool passed = result.hits.size() == 1 && read == 1
+                          && identifyFieldValue(result, 0, QStringLiteral("parcel_id")) == QStringLiteral("P-001");
+      check(QStringLiteral("una capa indexada por envolventes lee solo la geometria del candidato"), passed,
+            QStringLiteral("features_read = %1").arg(read));
+    }
+  }
+
+  // 10) Recorte de resultados.
+  {
+    const IdentifyResult result = runCore({parcels, cities}, nullptr, QPointF(-3.70379, 40.41678), 6.0, 1);
+    check(QStringLiteral("el recorte de resultados se declara"),
+          result.hits.size() == 1 && result.truncated,
+          QStringLiteral("%1 resultado(s), truncated = %2")
+            .arg(result.hits.size())
+            .arg(result.truncated ? QStringLiteral("true") : QStringLiteral("false")));
+  }
+
+  // 11) La capa prioritaria va primero.
+  {
+    const IdentifyResult result = runCore({parcels, cities}, parcels, QPointF(-3.70379, 40.41678), 6.0);
+    const bool passed = result.hits.size() >= 2 && result.hits.at(0).layer == parcels
+                        && result.hits.at(1).layer == cities;
+    check(QStringLiteral("la capa prioritaria va primero"), passed,
+          QStringLiteral("%1 resultado(s)").arg(result.hits.size()));
+  }
+
+  // 12) Rapidez sobre los datos de ejemplo.
+  {
+    const IdentifyResult result = single(parcels, QPointF(-3.71, 40.41), 6.0);
+    check(QStringLiteral("la consulta es rapida"), result.stats.elapsedMs <= 50,
+          QStringLiteral("%1 ms").arg(result.stats.elapsedMs));
+  }
+
+  // --- Interaccion: clics reales sobre el lienzo y panel --------------------
+  MapCanvas *canvas = window.canvas();
+
+  const auto clickAtMap = [&](const QPointF &point) -> QPoint {
+    // La transformacion se recalcula en cada clic: mostrar el dock o
+    // reconstruir el panel de capas puede cambiar el tamano del lienzo y, con
+    // el, la extension (el centro y la escala se conservan).
+    const MapToPixel current(canvas->extent(), canvas->size());
+    const QPointF pixelF = current.transform(point);
+    const QPoint pixel(qRound(pixelF.x()), qRound(pixelF.y()));
+    const QPointF local(pixel);
+    const QPointF global = canvas->mapToGlobal(pixel);
+
+    QMouseEvent press(QEvent::MouseButtonPress, local, global, Qt::LeftButton, Qt::LeftButton,
+                      Qt::NoModifier);
+    QCoreApplication::sendEvent(canvas, &press);
+
+    QMouseEvent release(QEvent::MouseButtonRelease, local, global, Qt::LeftButton, Qt::NoButton,
+                        Qt::NoModifier);
+    QCoreApplication::sendEvent(canvas, &release);
+    QApplication::processEvents();
+    return pixel;
+  };
+
+  const auto featureRowCount = [](const std::vector<IdentifyPanel::Row> &rows) {
+    int count = 0;
+    for (const IdentifyPanel::Row &row : rows)
+      if (row.kind == IdentifyPanel::RowKind::Feature)
+        ++count;
+    return count;
+  };
+
+  const auto firstFeatureLayer = [](const std::vector<IdentifyPanel::Row> &rows) {
+    QString current;
+    for (const IdentifyPanel::Row &row : rows)
+    {
+      if (row.kind == IdentifyPanel::RowKind::Layer)
+        current = row.label;
+      else if (row.kind == IdentifyPanel::RowKind::Feature)
+        return current;
+    }
+    return QString();
+  };
+
+  const auto rowsContain = [](const std::vector<IdentifyPanel::Row> &rows, const QString &text) {
+    for (const IdentifyPanel::Row &row : rows)
+    {
+      if (row.label.contains(text, Qt::CaseInsensitive)
+          || row.value.contains(text, Qt::CaseInsensitive))
+        return true;
+    }
+    return false;
+  };
+
+  const auto rowsHaveNote = [](const std::vector<IdentifyPanel::Row> &rows, const QString &text) {
+    for (const IdentifyPanel::Row &row : rows)
+    {
+      if (row.kind == IdentifyPanel::RowKind::Note
+          && row.label.contains(text, Qt::CaseInsensitive))
+        return true;
+    }
+    return false;
+  };
+
+  // 13) Clic sin arrastre: abre el panel y muestra el elemento.
+  window.selectLayer(QString());
+  window.setSearchAllLayers(false);
+  clickAtMap(QPointF(-3.70379, 40.41678));
+  std::vector<IdentifyPanel::Row> rows = window.identifyRows();
+  check(QStringLiteral("un clic sin arrastre abre el panel y muestra el elemento"),
+        window.identifyPanelVisible() && rowsContain(rows, QStringLiteral("Madrid"))
+          && rowsContain(rows, QStringLiteral("#0")),
+        QStringLiteral("%1 fila(s)").arg(rows.size()));
+
+  // 14) Sin seleccion: todas las capas visibles, de arriba abajo.
+  window.selectLayer(QString());
+  clickAtMap(QPointF(-3.70379, 40.41678));
+  rows = window.identifyRows();
+  check(QStringLiteral("sin seleccion se consultan todas las capas visibles, de arriba abajo"),
+        featureRowCount(rows) == 2
+          && firstFeatureLayer(rows).contains(QStringLiteral("cities"), Qt::CaseInsensitive),
+        QStringLiteral("%1 elemento(s), primera capa: %2")
+          .arg(featureRowCount(rows))
+          .arg(firstFeatureLayer(rows)));
+
+  // 15) La capa seleccionada limita la consulta.
+  const bool parcelsSelected = window.selectLayer(QStringLiteral("parcels"));
+  clickAtMap(QPointF(-3.70379, 40.41678));
+  rows = window.identifyRows();
+  check(QStringLiteral("la capa seleccionada manda"),
+        parcelsSelected && featureRowCount(rows) == 1 && rowsContain(rows, QStringLiteral("P-001"))
+          && !rowsContain(rows, QStringLiteral("Madrid")),
+        QStringLiteral("%1 elemento(s)").arg(featureRowCount(rows)));
+
+  // 16) Con "buscar en todas", la seleccionada va primero.
+  window.selectLayer(QStringLiteral("parcels"));
+  window.setSearchAllLayers(true);
+  clickAtMap(QPointF(-3.70379, 40.41678));
+  rows = window.identifyRows();
+  check(QStringLiteral("la capa seleccionada va primero si se buscan todas"),
+        featureRowCount(rows) == 2
+          && firstFeatureLayer(rows).contains(QStringLiteral("parcels"), Qt::CaseInsensitive),
+        QStringLiteral("%1 elemento(s), primera capa: %2")
+          .arg(featureRowCount(rows))
+          .arg(firstFeatureLayer(rows)));
+  window.setSearchAllLayers(false);
+
+  // 17) Una capa oculta no se identifica y se avisa.
+  window.selectLayer(QStringLiteral("parcels"));
+  parcels->setVisible(false);
+  clickAtMap(QPointF(-3.70379, 40.41678));
+  rows = window.identifyRows();
+  const bool hiddenSelected = featureRowCount(rows) == 0
+                              && rowsHaveNote(rows, QStringLiteral("oculta"));
+
+  // Con la capa aun oculta y sin seleccion, no debe aparecer en los resultados.
+  window.selectLayer(QString());
+  clickAtMap(QPointF(-3.70379, 40.41678));
+  rows = window.identifyRows();
+  const bool hiddenExcluded = featureRowCount(rows) == 1
+                              && rowsContain(rows, QStringLiteral("Madrid"))
+                              && !rowsContain(rows, QStringLiteral("P-001"));
+  parcels->setVisible(true);
+  check(QStringLiteral("una capa oculta no se identifica y se avisa"), hiddenSelected && hiddenExcluded,
+        QStringLiteral("seleccionada oculta: %1, sin seleccion: %2")
+          .arg(hiddenSelected ? QStringLiteral("si") : QStringLiteral("no"),
+               hiddenExcluded ? QStringLiteral("si") : QStringLiteral("no")));
+
+  // 18) Un raster seleccionado no limita la busqueda.
+  window.setSearchAllLayers(false);
+  window.selectLayer(QString());
+  const bool rasterSelected = window.selectLayer(ortho->name());
+  clickAtMap(QPointF(-3.71, 40.41));
+  rows = window.identifyRows();
+  check(QStringLiteral("una capa raster seleccionada no limita la busqueda"),
+        rasterSelected && featureRowCount(rows) >= 1 && rowsContain(rows, QStringLiteral("P-001"))
+          && rowsHaveNote(rows, QStringLiteral("ráster")),
+        QStringLiteral("%1 elemento(s)").arg(featureRowCount(rows)));
+  window.selectLayer(QString());
+
+  // 19) El panel agrupa por capa y muestra los campos.
+  window.selectLayer(QString());
+  clickAtMap(QPointF(-3.70379, 40.41678));
+  rows = window.identifyRows();
+  {
+    QString nameValue;
+    int nameDepth = -1;
+    for (const IdentifyPanel::Row &row : rows)
+    {
+      if (row.kind == IdentifyPanel::RowKind::Field
+          && row.label.compare(QStringLiteral("name"), Qt::CaseInsensitive) == 0)
+      {
+        nameValue = row.value;
+        nameDepth = row.depth;
+      }
+    }
+
+    const bool grouped = !rows.empty() && rows.front().kind == IdentifyPanel::RowKind::Layer
+                         && rows.front().depth == 0;
+    check(QStringLiteral("el panel agrupa por capa y muestra los campos"),
+          grouped && nameValue == QStringLiteral("Madrid") && nameDepth == 2,
+          QStringLiteral("name = %1, profundidad = %2").arg(nameValue).arg(nameDepth));
+  }
+
+  // 20) Marcador en el pixel pulsado. Se oculta la capa de puntos: sus cuadros
+  // dependen del encuadre exacto (muestreo) y no se pueden reutilizar, que es
+  // justo lo que comprueba la 21.
+  window.selectLayer(QStringLiteral("parcels"));
+  cities->setVisible(false);
+  const QPoint markerPixel = clickAtMap(QPointF(-3.71, 40.41));
+  const QImage marked = canvas->renderToImage(canvas->size(), false);
+  const QColor markerColor(255, 0, 255);
+  const bool markerCentered = marked.pixelColor(markerPixel) == markerColor;
+  const bool markerBounded = marked.pixelColor(markerPixel.x() + 8, markerPixel.y()) != markerColor;
+  check(QStringLiteral("el marcador del clic se dibuja en el pixel pulsado"),
+        markerCentered && markerBounded,
+        QStringLiteral("pixel (%1,%2)").arg(markerPixel.x()).arg(markerPixel.y()));
+
+  // 21) Identificar no invalida el cuadro cacheado: el repintado reutiliza el
+  // cuadro anterior en lugar de redibujar la geometria.
+  const QImage reused = canvas->renderToImage(canvas->size(), false);
+  Q_UNUSED(reused)
+  check(QStringLiteral("identificar no invalida el cuadro cacheado"),
+        canvas->lastFrameReused(),
+        QStringLiteral("reutilizado: %1").arg(canvas->lastFrameReused() ? QStringLiteral("si")
+                                                                       : QStringLiteral("no")));
+  cities->setVisible(true);
+
+  // 22) Arrastrar no identifica: sigue siendo paneo.
+  {
+    const qint64 rowsBefore = static_cast<qint64>(window.identifyRows().size());
+    const Rectangle extentBefore = canvas->extent();
+    const MapToPixel current(canvas->extent(), canvas->size());
+    const QPointF startF = current.transform(QPointF(-3.71, 40.41));
+    const QPoint start(qRound(startF.x()), qRound(startF.y()));
+    const QPoint end = start + QPoint(20, 0);
+    const QPointF startLocal(start);
+    const QPointF endLocal(end);
+
+    QMouseEvent press(QEvent::MouseButtonPress, startLocal, canvas->mapToGlobal(start), Qt::LeftButton,
+                      Qt::LeftButton, Qt::NoModifier);
+    QCoreApplication::sendEvent(canvas, &press);
+
+    QMouseEvent move(QEvent::MouseMove, endLocal, canvas->mapToGlobal(end), Qt::NoButton,
+                     Qt::LeftButton, Qt::NoModifier);
+    QCoreApplication::sendEvent(canvas, &move);
+
+    QMouseEvent release(QEvent::MouseButtonRelease, endLocal, canvas->mapToGlobal(end), Qt::LeftButton,
+                        Qt::NoButton, Qt::NoModifier);
+    QCoreApplication::sendEvent(canvas, &release);
+    QApplication::processEvents();
+
+    check(QStringLiteral("arrastrar no identifica: sigue siendo paneo"),
+          static_cast<qint64>(window.identifyRows().size()) == rowsBefore && canvas->extent() != extentBefore,
+          QStringLiteral("%1 fila(s)").arg(window.identifyRows().size()));
+  }
+
+  // 23) El panel avisa del recorte de resultados.
+  {
+    IdentifyPanel panel;
+    IdentifyPanel::View view;
+    view.result.mapPoint = QPointF(-3.71, 40.41);
+    view.result.destinationEpsg = 4326;
+    view.result.tolerance = 6.0 * unitsPerPixel;
+
+    IdentifyHit hit;
+    hit.layer = parcels;
+    hit.fid = 0;
+    hit.inside = true;
+    hit.values = parcels->fieldValues(0);
+    view.result.hits.append(hit);
+    view.result.truncated = true;
+
+    view.radiusPixels = 6;
+    view.priorityLayer = parcels;
+    panel.setResult(view);
+
+    bool truncatedNote = false;
+    for (const IdentifyPanel::Row &row : panel.rows())
+    {
+      if (row.kind == IdentifyPanel::RowKind::Note && row.label.contains(QStringLiteral("hay mas")))
+        truncatedNote = true;
+    }
+
+    check(QStringLiteral("el panel avisa del recorte de resultados"), truncatedNote, QString());
+  }
+
+  if (asJson)
+  {
+    QJsonObject root;
+    root.insert(QStringLiteral("ok"), ok);
+    writeOut(QString::fromUtf8(QJsonDocument(root).toJson(QJsonDocument::Indented)).trimmed());
+  }
+
+  return ok ? ExitOk : ExitUsage;
+}
+
 } // namespace
 
 int main(int argc, char *argv[])
@@ -2552,6 +3290,8 @@ int main(int argc, char *argv[])
              || argument == QStringLiteral("--check-refresh")
              || argument == QStringLiteral("--check-raster")
              || argument == QStringLiteral("--check-layers")
+             || argument == QStringLiteral("--check-identify")
+             || argument == QStringLiteral("--identify-at")
              || argument == QStringLiteral("--help") || argument == QStringLiteral("-h")
              || argument == QStringLiteral("--version") || argument == QStringLiteral("-v"))
     {
@@ -2656,6 +3396,21 @@ int main(int argc, char *argv[])
     QStringLiteral("check-raster"),
     QStringLiteral("Comprueba el dibujado raster: cuadrantes, extension, reproyeccion, NoData, contraste, "
                    "paleta, redibujado, paneo y lectura acotada"));
+  const QCommandLineOption identifyAtOption(
+    QStringLiteral("identify-at"),
+    QStringLiteral("Identifica el elemento bajo <x,y> (coordenadas del SRC de destino) y sale"),
+    QStringLiteral("x,y"));
+  const QCommandLineOption identifyRadiusOption(
+    QStringLiteral("identify-radius"),
+    QStringLiteral("Radio de busqueda de Identificar, en pixeles"),
+    QStringLiteral("px"), QStringLiteral("6"));
+  const QCommandLineOption identifyLayerOption(
+    QStringLiteral("identify-layer"),
+    QStringLiteral("Limita Identificar a la capa con ese nombre"),
+    QStringLiteral("nombre"));
+  const QCommandLineOption checkIdentifyOption(
+    QStringLiteral("check-identify"),
+    QStringLiteral("Comprueba Identificar: geometria, huecos, radio, alcance, orden, panel y marcador"));
   const QCommandLineOption withAttributesOption(QStringLiteral("with-attributes"),
                                                QStringLiteral("Con --snapshot-window: incluye la tabla de atributos en la captura"));
   const QCommandLineOption indexShpOption(QStringLiteral("index-shp"),
@@ -2681,7 +3436,8 @@ int main(int argc, char *argv[])
                      checkRefreshOption, checkLabelsOption, checkLayersOption, snapshotDialogOption,
                      snapshotRasterDialogOption, checkRasterOption, labelFieldOption, labelSizeOption,
                      labelMapSizeOption, noLabelsOption, rasterStretchOption, rasterBandsOption,
-                     rasterOpacityOption});
+                     rasterOpacityOption, identifyAtOption, identifyRadiusOption, identifyLayerOption,
+                     checkIdentifyOption});
   parser.addPositionalArgument(QStringLiteral("archivo"),
                               QStringLiteral("Capas a cargar (opcional, se puede repetir)"),
                               QStringLiteral("[archivo...]"));
@@ -2707,6 +3463,36 @@ int main(int argc, char *argv[])
   }
 
   g_verbose = parser.isSet(verboseOption);
+
+  // Opciones de Identificar. Se validan antes de inicializar GDAL: un error de
+  // uso no debe abrirGDAL ni registrar drivers.
+  QPointF identifyPoint;
+  bool hasIdentifyPoint = false;
+  if (parser.isSet(identifyAtOption))
+  {
+    if (!parsePoint(parser.value(identifyAtOption), &identifyPoint))
+    {
+      writeErr(QStringLiteral("Coordenadas no validas: «%1». Ejemplo: --identify-at -3.70379,40.41678")
+                 .arg(parser.value(identifyAtOption)));
+      return ExitUsage;
+    }
+    hasIdentifyPoint = true;
+  }
+
+  int identifyRadiusPixels = 6;
+  if (parser.isSet(identifyRadiusOption))
+  {
+    bool ok = false;
+    identifyRadiusPixels = parser.value(identifyRadiusOption).toInt(&ok);
+    if (!ok || identifyRadiusPixels < 1)
+    {
+      writeErr(QStringLiteral("Radio no valido: «%1». Debe ser un entero >= 1 (pixeles).")
+                 .arg(parser.value(identifyRadiusOption)));
+      return ExitUsage;
+    }
+  }
+
+  const QString identifyLayerName = parser.value(identifyLayerOption).trimmed();
 
   // Registro de drivers y localizacion de proj.db / GDAL_DATA. Sin esto, GDAL
   // no reconoce ningun formato y toda apertura de capa falla.
@@ -2938,6 +3724,18 @@ int main(int argc, char *argv[])
     return checkLayers(layerPaths, parser.isSet(jsonOption));
   }
 
+  if (parser.isSet(checkIdentifyOption))
+  {
+    if (layerPaths.isEmpty())
+    {
+      writeErr(QStringLiteral("Se necesitan las capas de ejemplo: minigis --check-identify "
+                              "-l parcels.shp -l cities.shp -l ortho_rgb.tif"));
+      return ExitUsage;
+    }
+
+    return checkIdentify(layerPaths, parser.isSet(jsonOption));
+  }
+
   if (parser.isSet(checkLabelsOption) || parser.isSet(checkRefreshOption))
   {
     const bool labels = parser.isSet(checkLabelsOption);
@@ -3115,9 +3913,40 @@ int main(int argc, char *argv[])
   }
 
   // ---------------------------------------------------------------------
-  // Modos de captura (sin ventana visible)
+  // Consulta puntual (sin ventana y sin dibujar)
   // ---------------------------------------------------------------------
   const bool snapshotRequested = parser.isSet(snapshotOption) || parser.isSet(snapshotWindowOption);
+  if (hasIdentifyPoint && !snapshotRequested)
+  {
+    QSize identifySize(1200, 800);
+    if (!parseSize(parser.value(sizeOption), &identifySize))
+    {
+      writeErr(QStringLiteral("Tamano no valido: «%1». Ejemplo: --size 1600x900").arg(parser.value(sizeOption)));
+      return ExitUsage;
+    }
+
+    int identifyEpsg = 4326;
+    if (!parseEpsg(parser.value(crsOption), &identifyEpsg))
+    {
+      writeErr(QStringLiteral("SRC no valido: «%1». Ejemplo: --crs EPSG:25830").arg(parser.value(crsOption)));
+      return ExitUsage;
+    }
+
+    Rectangle identifyExtent;
+    if (parser.isSet(extentOption) && !parseExtent(parser.value(extentOption), &identifyExtent))
+    {
+      writeErr(QStringLiteral("Extension no valida: «%1». Ejemplo: --extent -4,40,-3,41")
+                 .arg(parser.value(extentOption)));
+      return ExitUsage;
+    }
+
+    return runIdentifyAt(layerPaths, identifyPoint, identifyRadiusPixels, identifyLayerName, identifyExtent,
+                         identifySize, identifyEpsg, parser.isSet(jsonOption));
+  }
+
+  // ---------------------------------------------------------------------
+  // Modos de captura (sin ventana visible)
+  // ---------------------------------------------------------------------
   if (snapshotRequested)
   {
     QSize imageSize(1200, 800);
@@ -3203,6 +4032,13 @@ int main(int argc, char *argv[])
         window.canvas()->setExtent(requestedExtent);
       else
         window.canvas()->zoomToFullExtent();
+
+      // Identificar antes de la captura: deja el panel lleno y el marcador.
+      if (hasIdentifyPoint)
+      {
+        window.identifyAtMapPoint(identifyPoint);
+        QApplication::processEvents();
+      }
 
       QApplication::processEvents();
 
@@ -3307,6 +4143,10 @@ int main(int argc, char *argv[])
       canvas.setExtent(requestedExtent);
     else
       canvas.zoomToFullExtent();
+
+    // El marcador del clic tambien aparece en la captura del lienzo.
+    if (hasIdentifyPoint)
+      canvas.setIdentifyMarker(identifyPoint);
 
     const QString outputPath = parser.value(snapshotOption);
     const QImage image = canvas.renderToImage(imageSize);

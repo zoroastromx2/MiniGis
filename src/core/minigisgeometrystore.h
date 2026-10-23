@@ -246,6 +246,20 @@ public:
   /** Elementos cuya envolvente corta `env`; se anaden a `out` (no se limpia). */
   void query(double minX, double minY, double maxX, double maxY, std::vector<uint32_t> &out) const;
 
+  /**
+   * Prueba si el punto cae dentro del elemento `index` o a menos de `tolerance`.
+   *
+   * Es la consulta puntual de Identificar: usa el nivel 0 (sin simplificar) y,
+   * en modo `Envelopes`, lee del archivo solo la geometria de ese elemento.
+   * Devuelve false si la geometria no esta disponible (lectura fallida o indice
+   * fuera de rango); en ese caso `inside` y `distance` quedan sin valor.
+   *
+   * `inside` es la pertenencia a un poligono; el llamador trata los elementos
+   * puntuales como "dentro" cuando pasan el filtro (se ha pulsado su simbolo) y
+   * las lineas siempre como "cerca".
+   */
+  bool hitTest(uint32_t index, double x, double y, double tolerance, bool &inside, double &distance) const;
+
   qint64 cachedVertices() const;
 
 private:
