@@ -324,7 +324,15 @@ elseif(MODE STREQUAL "check-identify")
                           "el panel agrupa por capa y muestra los campos"
                           "el marcador del clic se dibuja"
                           "identificar no invalida el cuadro cacheado"
-                          "arrastrar no identifica")
+                          "arrastrar no identifica"
+                          "identificar selecciona el primer resultado"
+                          "el objeto seleccionado se resalta en el mapa"
+                          "un clic sin resultados limpia la seleccion"
+                          "la tabla se mueve al registro seleccionado"
+                          "la tabla cambia a la capa del objeto"
+                          "la tabla oculta no se mueve"
+                          "la seleccion no invalida el cuadro cacheado"
+                          "el panel marca el elemento seleccionado")
       if(NOT _out MATCHES "${_key}")
         message(FATAL_ERROR "La comprobacion «${_key}» no se ejecuto:\n${_out}")
       endif()
@@ -343,7 +351,8 @@ elseif(MODE STREQUAL "identify-at")
     message(FATAL_ERROR "minigis --identify-at fallo (codigo ${_rc})\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")
   endif()
   foreach(_key IN ITEMS "\"layer\": \"cities\"" "\"name\": \"Madrid\"" "\"inside\": true"
-                        "\"layers_searched\": 2" "\"truncated\": false" "\"hit_count\": 2")
+                        "\"layers_searched\": 2" "\"truncated\": false" "\"hit_count\": 2"
+                        "\"selection\": {" "\"fid\": 0")
     if(NOT _out MATCHES "${_key}")
       message(FATAL_ERROR "La salida JSON de --identify-at no contiene ${_key}:\n${_out}")
     endif()
@@ -387,10 +396,14 @@ elseif(MODE STREQUAL "identify-at")
   if(NOT _out MATCHES "\"hit_count\": 0")
     message(FATAL_ERROR "El hueco del poligono devolvio resultados:\n${_out}")
   endif()
+  if(NOT _out MATCHES "\"selection\": null")
+    message(FATAL_ERROR "El hueco del poligono dejo una seleccion:\n${_out}")
+  endif()
   message(STATUS "minigis --identify-at OK")
 
 elseif(MODE STREQUAL "identify-window")
-  # Captura de la interfaz con el panel de Identificar lleno y el marcador.
+  # Captura de la interfaz con el panel de Identificar lleno, el resalte y la
+  # tabla de atributos en la fila del objeto.
   get_filename_component(_outdir "${OUT}" DIRECTORY)
   file(MAKE_DIRECTORY "${_outdir}")
   if(EXISTS "${OUT}")
@@ -398,7 +411,7 @@ elseif(MODE STREQUAL "identify-window")
   endif()
   execute_process(
     COMMAND "${MINIGIS_EXE}" --snapshot-window "${OUT}" --identify-at -3.70379,40.41678
-            --size 1000x700 --layer "${SAMPLE}" --layer "${SAMPLE2}"
+            --with-attributes --size 1000x700 --layer "${SAMPLE}" --layer "${SAMPLE2}"
     RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
   if(NOT _rc EQUAL EXPECT_EXIT)
     message(FATAL_ERROR "minigis --snapshot-window con --identify-at fallo (codigo ${_rc})\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")

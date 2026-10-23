@@ -1568,6 +1568,80 @@ bool GeometryStore::hitTest(uint32_t index, double x, double y, double tolerance
   return true;
 }
 
+bool GeometryStore::featureRings(uint32_t index, std::vector<double> &coords,
+                                 std::vector<uint32_t> &ringFirst,
+                                 std::vector<uint32_t> &ringCount, GeometryKind &kind) const
+{
+  coords.clear();
+  ringFirst.clear();
+  ringCount.clear();
+  kind = GeometryKind::Unknown;
+
+  if (index >= mFeatures.size())
+    return false;
+
+  const auto appendRing = [&](const double *xy, uint32_t count) {
+    if (count == 0)
+      return;
+    ringFirst.push_back(static_cast<uint32_t>(coords.size() / 2));
+    ringCount.push_back(count);
+    coords.insert(coords.end(), xy, xy + 2 * static_cast<size_t>(count));
+  };
+
+  if (mMode == Mode::InMemory)
+  {
+    const Level *level = acquireLevel(0);
+    if (!level || index >= mEntryFirstRing.size() || index >= mEntryRingCount.size())
+      return false;
+
+    const uint32_t first = mEntryFirstRing[index];
+    const uint32_t total = mEntryRingCount[index];
+    if (first + total > level->ringFirst.size() || first + total > level->ringCount.size()
+        || first >= mRingKinds.size())
+      return false;
+
+    kind = static_cast<GeometryKind>(mRingKinds[first]);
+    for (uint32_t ring = first; ring < first + total; ++ring)
+    {
+      const uint32_t count = level->ringCount[ring];
+      const size_t base = static_cast<size_t>(level->ringFirst[ring]) * 2;
+      if (base + static_cast<size_t>(count) * 2 > level->coords.size())
+        continue;
+      appendRing(level->coords.data() + base, count);
+    }
+    return !ringFirst.empty();
+  }
+
+  std::shared_ptr<CachedGeometry> cached;
+  {
+    std::lock_guard<std::mutex> lock(mMutex);
+    if (!fetchGeometry(index))
+      return false;
+
+    const auto found = mCache.find(index);
+    if (found == mCache.end())
+      return false;
+
+    cached = found->second;
+    evictCacheIfNeeded();
+  }
+
+  if (!cached || cached->ringFirst.empty() || cached->ringKind.empty())
+    return false;
+
+  kind = static_cast<GeometryKind>(cached->ringKind.front());
+  for (size_t ring = 0; ring < cached->ringFirst.size(); ++ring)
+  {
+    const uint32_t count = cached->ringCount[ring];
+    const size_t base = static_cast<size_t>(cached->ringFirst[ring]) * 2;
+    if (base + static_cast<size_t>(count) * 2 > cached->coords.size())
+      continue;
+    appendRing(cached->coords.data() + base, count);
+  }
+
+  return !ringFirst.empty();
+}
+
 qint64 GeometryStore::cachedVertices() const
 {
   std::lock_guard<std::mutex> lock(mMutex);

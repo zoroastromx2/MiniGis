@@ -202,6 +202,18 @@ public:
   void clearIdentifyMarker();
   bool hasIdentifyMarker() const { return mHasIdentifyMarker; }
 
+  /**
+   * Selecciona un elemento vectorial y prepara su resalte. El trazado se
+   * construye una vez (nivel 0) y se dibuja como overlay sobre el cuadro
+   * cacheado; no toca la revision de la capa ni invalida la cache. Si no se
+   * puede obtener la geometria, la seleccion queda vacia.
+   */
+  void setSelectedFeature(const std::shared_ptr<VectorLayer> &layer, qint64 fid);
+  void clearSelectedFeature();
+  bool hasSelectedFeature() const { return mSelectionLayer != nullptr && mSelectionFid >= 0; }
+  qint64 selectedFeatureId() const { return mSelectionFid; }
+  std::shared_ptr<VectorLayer> selectedFeatureLayer() const { return mSelectionLayer; }
+
   /** Extension combinada de las capas visibles. */
   Rectangle layersExtent() const;
 
@@ -265,6 +277,15 @@ private:
    */
   void drawIdentifyMarker(QImage &image, const MapToPixel &transform) const;
 
+  /**
+   * Dibuja el contorno del elemento seleccionado (halo oscuro + amarillo) sobre
+   * el cuadro ya renderizado, despues de las etiquetas y antes del marcador.
+   */
+  void drawSelection(QImage &image, const MapToPixel &transform) const;
+
+  /** Construye el trazado del elemento; false si no hay geometria disponible. */
+  bool buildSelectionPath(const std::shared_ptr<VectorLayer> &layer, qint64 fid);
+
   std::vector<std::shared_ptr<VectorLayer>> mLayers;
   std::vector<std::shared_ptr<RasterLayer>> mRasterLayers;
   std::shared_ptr<VectorLayer> mCurrentLayer;
@@ -286,6 +307,13 @@ private:
   bool mPressWasDrag = false;
   QPointF mIdentifyMarker;
   bool mHasIdentifyMarker = false;
+  /** Elemento seleccionado y su trazado, en coordenadas de mapa. */
+  std::shared_ptr<VectorLayer> mSelectionLayer;
+  qint64 mSelectionFid = -1;
+  QPainterPath mSelectionPath;
+  GeometryKind mSelectionKind = GeometryKind::Unknown;
+  QPointF mSelectionPoint;
+  bool mSelectionHasPoint = false;
   bool mDraftMode = false;
   int mDestinationEpsg = 4326;
   qint64 mMaximumFeatures = 0;

@@ -2567,6 +2567,83 @@ QString identifyFieldValue(const IdentifyResult &result, int hitIndex, const QSt
  * construye el almacen (como los demas modos sin ventana), fija la extension y
  * llama al mismo motor que usa el clic.
  */
+/**
+ * Ejecuta Identificar sobre un lienzo ya cargado y aplica la seleccion del primer
+ * resultado. Resuelve el alcance igual que --identify-at y --snapshot (todas las
+ * visibles o una capa concreta) y deja el resalte listo para el cuadro.
+ * Devuelve false con `error` si la capa pedida no existe o la escala no vale.
+ */
+bool identifyOnCanvas(MapCanvas &canvas, const QPointF &mapPoint, int radiusPixels,
+                      const QString &layerName, int destinationEpsg,
+                      IdentifyResult *result, QString *error)
+{
+  if (!result)
+    return false;
+
+  const double unitsPerPixel = canvas.mapUnitsPerPixel();
+  if (!(unitsPerPixel > 0.0))
+  {
+    *error = QStringLiteral("No se pudo calcular la escala del lienzo; indica --extent y --size.");
+    return false;
+  }
+
+  std::vector<std::shared_ptr<VectorLayer>> layers;
+  std::shared_ptr<VectorLayer> priority;
+  const QString wanted = layerName.trimmed();
+
+  if (!wanted.isEmpty())
+  {
+    for (const std::shared_ptr<VectorLayer> &layer : canvas.layers())
+    {
+      if (layer && layer->name().compare(wanted, Qt::CaseInsensitive) == 0)
+      {
+        if (priority)
+        {
+          *error = QStringLiteral("El nombre «%1» es ambiguo: hay varias capas con ese nombre.").arg(wanted);
+          return false;
+        }
+        priority = layer;
+      }
+    }
+
+    if (!priority)
+    {
+      QStringList available;
+      for (const std::shared_ptr<VectorLayer> &layer : canvas.layers())
+        available << layer->name();
+      *error = QStringLiteral("No hay ninguna capa llamada «%1». Capas: %2")
+                 .arg(wanted, available.join(QStringLiteral(", ")));
+      return false;
+    }
+
+    layers.push_back(priority);
+  }
+  else
+  {
+    for (const std::shared_ptr<VectorLayer> &layer : canvas.layers())
+    {
+      if (layer && layer->isVisible())
+        layers.push_back(layer);
+    }
+  }
+
+  IdentifyRequest request;
+  request.mapPoint = mapPoint;
+  request.destinationEpsg = destinationEpsg;
+  request.layers = layers;
+  request.priorityLayer = priority;
+  request.options.tolerance = radiusPixels * unitsPerPixel;
+
+  *result = identifyAtPoint(request);
+
+  // El primer resultado es el objeto seleccionado: el resalte se dibuja en el
+  // siguiente render (o en la captura).
+  if (!result->hits.isEmpty())
+    canvas.setSelectedFeature(result->hits.first().layer, result->hits.first().fid);
+
+  return true;
+}
+
 int runIdentifyAt(const QStringList &layerPaths, const QPointF &mapPoint, int radiusPixels,
                   const QString &layerName, const Rectangle &requestedExtent, const QSize &size,
                   int destinationEpsg, bool asJson)
@@ -2624,72 +2701,39 @@ int runIdentifyAt(const QStringList &layerPaths, const QPointF &mapPoint, int ra
   else
     canvas.zoomToFullExtent();
 
-  const double unitsPerPixel = canvas.mapUnitsPerPixel();
-  if (!(unitsPerPixel > 0.0))
+  IdentifyResult result;
+  QString identifyError;
+  if (!identifyOnCanvas(canvas, mapPoint, radiusPixels, layerName, destinationEpsg, &result,
+                        &identifyError))
   {
-    writeErr(QStringLiteral("No se pudo calcular la escala del lienzo; indica --extent y --size."));
+    writeErr(identifyError);
     return ExitUsage;
   }
 
-  std::vector<std::shared_ptr<VectorLayer>> layers;
-  std::shared_ptr<VectorLayer> priority;
-
-  const QString wanted = layerName.trimmed();
-  if (!wanted.isEmpty())
-  {
-    for (const std::shared_ptr<VectorLayer> &layer : canvas.layers())
-    {
-      if (layer && layer->name().compare(wanted, Qt::CaseInsensitive) == 0)
-      {
-        if (priority)
-        {
-          writeErr(QStringLiteral("El nombre «%1» es ambiguo: hay varias capas con ese nombre.").arg(wanted));
-          return ExitUsage;
-        }
-        priority = layer;
-      }
-    }
-
-    if (!priority)
-    {
-      QStringList available;
-      for (const std::shared_ptr<VectorLayer> &layer : canvas.layers())
-        available << layer->name();
-      writeErr(QStringLiteral("No hay ninguna capa llamada «%1». Capas: %2")
-                 .arg(wanted, available.join(QStringLiteral(", "))));
-      return ExitUsage;
-    }
-
-    layers.push_back(priority);
-  }
-  else
-  {
-    for (const std::shared_ptr<VectorLayer> &layer : canvas.layers())
-    {
-      if (layer && layer->isVisible())
-        layers.push_back(layer);
-    }
-  }
-
-  IdentifyRequest request;
-  request.mapPoint = mapPoint;
-  request.destinationEpsg = destinationEpsg;
-  request.layers = layers;
-  request.priorityLayer = priority;
-  request.options.tolerance = radiusPixels * unitsPerPixel;
-
-  const IdentifyResult result = identifyAtPoint(request);
+  const double unitsPerPixel = canvas.mapUnitsPerPixel();
 
   if (asJson)
   {
+    QString scopeLayer;
+    if (!layerName.trimmed().isEmpty())
+    {
+      for (const std::shared_ptr<VectorLayer> &layer : canvas.layers())
+      {
+        if (layer && layer->name().compare(layerName.trimmed(), Qt::CaseInsensitive) == 0)
+          scopeLayer = layer->name();
+      }
+    }
+
     QJsonObject query;
     query.insert(QStringLiteral("x"), mapPoint.x());
     query.insert(QStringLiteral("y"), mapPoint.y());
     query.insert(QStringLiteral("epsg"), destinationEpsg);
     query.insert(QStringLiteral("radius_px"), radiusPixels);
     query.insert(QStringLiteral("radius_map_units"), result.tolerance);
-    query.insert(QStringLiteral("scope"), wanted.isEmpty() ? QStringLiteral("all") : QStringLiteral("layer"));
-    query.insert(QStringLiteral("layer"), priority ? QJsonValue(priority->name()) : QJsonValue());
+    query.insert(QStringLiteral("scope"),
+                 layerName.trimmed().isEmpty() ? QStringLiteral("all") : QStringLiteral("layer"));
+    query.insert(QStringLiteral("layer"),
+                 scopeLayer.isEmpty() ? QJsonValue() : QJsonValue(scopeLayer));
 
     QJsonArray hits;
     for (const IdentifyHit &hit : result.hits)
@@ -2721,6 +2765,19 @@ int runIdentifyAt(const QStringList &layerPaths, const QPointF &mapPoint, int ra
     root.insert(QStringLiteral("features_read"), static_cast<double>(result.stats.featuresRead));
     root.insert(QStringLiteral("elapsed_ms"), static_cast<double>(result.stats.elapsedMs));
     root.insert(QStringLiteral("truncated"), result.truncated);
+
+    // El objeto seleccionado es el primero de los resultados (o null).
+    if (!result.hits.isEmpty())
+    {
+      QJsonObject selection;
+      selection.insert(QStringLiteral("layer"), result.hits.first().layer->name());
+      selection.insert(QStringLiteral("fid"), static_cast<double>(result.hits.first().fid));
+      root.insert(QStringLiteral("selection"), selection);
+    }
+    else
+    {
+      root.insert(QStringLiteral("selection"), QJsonValue());
+    }
 
     writeOut(QString::fromUtf8(QJsonDocument(root).toJson(QJsonDocument::Indented)).trimmed());
     return ExitOk;
@@ -3251,6 +3308,132 @@ int checkIdentify(const QStringList &layerPaths, bool asJson)
     check(QStringLiteral("el panel avisa del recorte de resultados"), truncatedNote, QString());
   }
 
+  // --- Seleccion y resalte ------------------------------------------------
+  const QColor highlightColor(255, 212, 0);
+  const auto hasHighlightNear = [&](const QImage &image, const QPoint &center) {
+    for (int dy = -1; dy <= 1; ++dy)
+    {
+      for (int dx = -1; dx <= 1; ++dx)
+      {
+        const QPoint point = center + QPoint(dx, dy);
+        if (image.rect().contains(point) && image.pixelColor(point) == highlightColor)
+          return true;
+      }
+    }
+    return false;
+  };
+
+  // 24) Identificar selecciona el primer resultado.
+  {
+    window.selectLayer(QStringLiteral("parcels"));
+    clickAtMap(QPointF(-3.71, 40.41));
+    check(QStringLiteral("identificar selecciona el primer resultado"),
+          window.hasSelectedFeature() && window.selectedFeatureId() == 0
+            && window.selectedLayerName().compare(QStringLiteral("parcels"), Qt::CaseInsensitive) == 0,
+          QStringLiteral("%1 #%2").arg(window.selectedLayerName()).arg(window.selectedFeatureId()));
+  }
+
+  // 25) Resalte del elemento seleccionado.
+  {
+    window.selectLayer(QStringLiteral("parcels"));
+    canvas->clearSelectedFeature();
+    const QImage before = canvas->renderToImage(canvas->size(), false);
+
+    const MapToPixel current(canvas->extent(), canvas->size());
+    const QPointF edge = current.transform(QPointF(-3.71, 40.42));
+    const QPoint edgePixel(qRound(edge.x()), qRound(edge.y()));
+
+    canvas->setSelectedFeature(parcels, 0);
+    const QImage after = canvas->renderToImage(canvas->size(), false);
+
+    check(QStringLiteral("el objeto seleccionado se resalta en el mapa"),
+          !hasHighlightNear(before, edgePixel) && hasHighlightNear(after, edgePixel),
+          QStringLiteral("pixel del borde (%1,%2)").arg(edgePixel.x()).arg(edgePixel.y()));
+  }
+
+  // 26) Un clic sin resultados limpia la seleccion.
+  {
+    window.selectLayer(QStringLiteral("parcels"));
+    clickAtMap(QPointF(-3.74, 40.38)); // hueco de P-005
+    const QImage image = canvas->renderToImage(canvas->size(), false);
+
+    const MapToPixel current(canvas->extent(), canvas->size());
+    const QPointF edge = current.transform(QPointF(-3.71, 40.42));
+    const QPoint edgePixel(qRound(edge.x()), qRound(edge.y()));
+
+    check(QStringLiteral("un clic sin resultados limpia la seleccion"),
+          !window.hasSelectedFeature() && !hasHighlightNear(image, edgePixel),
+          QStringLiteral("seleccion: %1").arg(window.hasSelectedFeature() ? QStringLiteral("si")
+                                                                         : QStringLiteral("no")));
+  }
+
+  // 27) La tabla se mueve al registro seleccionado.
+  {
+    window.selectLayer(QStringLiteral("parcels"));
+    window.showAttributeTable(true);
+    clickAtMap(QPointF(-3.71, 40.39)); // P-003, fid 2
+    check(QStringLiteral("la tabla se mueve al registro seleccionado"),
+          window.attributeTableLayerName().compare(QStringLiteral("parcels"), Qt::CaseInsensitive) == 0
+            && window.attributeTableCurrentRow() == 2 && window.selectedFeatureId() == 2,
+          QStringLiteral("%1, fila %2")
+            .arg(window.attributeTableLayerName())
+            .arg(window.attributeTableCurrentRow()));
+  }
+
+  // 28) La tabla cambia a la capa del objeto.
+  {
+    window.selectLayer(QString()); // sin seleccion en el arbol: Madrid gana por apilado
+    clickAtMap(QPointF(-3.70379, 40.41678)); // Madrid, cities fid 0
+    check(QStringLiteral("la tabla cambia a la capa del objeto"),
+          window.attributeTableLayerName().compare(QStringLiteral("cities"), Qt::CaseInsensitive) == 0
+            && window.attributeTableCurrentRow() == 0 && window.selectedFeatureId() == 0,
+          QStringLiteral("%1, fila %2")
+            .arg(window.attributeTableLayerName())
+            .arg(window.attributeTableCurrentRow()));
+  }
+
+  // 29) La tabla oculta no se mueve.
+  {
+    window.showAttributeTable(false);
+    const bool parcelsSelected = window.selectLayer(QStringLiteral("parcels"));
+    const int rowBefore = window.attributeTableCurrentRow();
+    clickAtMap(QPointF(-3.71, 40.41)); // P-001; si la tabla estuviera visible, iria a la fila 0
+
+    check(QStringLiteral("la tabla oculta no se mueve"),
+          parcelsSelected
+            && window.attributeTableLayerName().compare(QStringLiteral("parcels"), Qt::CaseInsensitive) == 0
+            && window.attributeTableCurrentRow() == rowBefore,
+          QStringLiteral("%1, fila %2 (antes %3)")
+            .arg(window.attributeTableLayerName())
+            .arg(window.attributeTableCurrentRow())
+            .arg(rowBefore));
+  }
+
+  // 30) La seleccion no invalida el cuadro cacheado.
+  {
+    cities->setVisible(false);
+    clickAtMap(QPointF(-3.71, 40.41)); // selecciona P-001
+    canvas->renderToImage(canvas->size(), false);
+    canvas->renderToImage(canvas->size(), false);
+    check(QStringLiteral("la seleccion no invalida el cuadro cacheado"),
+          canvas->lastFrameReused(),
+          QStringLiteral("reutilizado: %1").arg(canvas->lastFrameReused() ? QStringLiteral("si")
+                                                                         : QStringLiteral("no")));
+    cities->setVisible(true);
+  }
+
+  // 31) El panel marca el elemento seleccionado.
+  {
+    bool marked = false;
+    for (const IdentifyPanel::Row &row : window.identifyRows())
+    {
+      if (row.kind == IdentifyPanel::RowKind::Feature
+          && row.label.contains(QStringLiteral("(seleccionado)")))
+        marked = true;
+    }
+    check(QStringLiteral("el panel marca el elemento seleccionado"), marked, QString());
+  }
+
   if (asJson)
   {
     QJsonObject root;
@@ -3410,7 +3593,8 @@ int main(int argc, char *argv[])
     QStringLiteral("nombre"));
   const QCommandLineOption checkIdentifyOption(
     QStringLiteral("check-identify"),
-    QStringLiteral("Comprueba Identificar: geometria, huecos, radio, alcance, orden, panel y marcador"));
+    QStringLiteral("Comprueba Identificar: geometria, huecos, radio, alcance, orden, panel, "
+                   "marcador, seleccion/resalte, tabla y cache"));
   const QCommandLineOption withAttributesOption(QStringLiteral("with-attributes"),
                                                QStringLiteral("Con --snapshot-window: incluye la tabla de atributos en la captura"));
   const QCommandLineOption indexShpOption(QStringLiteral("index-shp"),
@@ -4144,9 +4328,21 @@ int main(int argc, char *argv[])
     else
       canvas.zoomToFullExtent();
 
-    // El marcador del clic tambien aparece en la captura del lienzo.
+    // El marcador del clic y el resalte del primer resultado aparecen en la
+    // captura del lienzo, igual que en --identify-at.
     if (hasIdentifyPoint)
+    {
       canvas.setIdentifyMarker(identifyPoint);
+
+      IdentifyResult snapshotResult;
+      QString snapshotError;
+      if (!identifyOnCanvas(canvas, identifyPoint, identifyRadiusPixels, identifyLayerName,
+                            destinationEpsg, &snapshotResult, &snapshotError))
+      {
+        writeErr(snapshotError);
+        return ExitUsage;
+      }
+    }
 
     const QString outputPath = parser.value(snapshotOption);
     const QImage image = canvas.renderToImage(imageSize);

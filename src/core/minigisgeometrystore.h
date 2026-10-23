@@ -260,6 +260,18 @@ public:
    */
   bool hitTest(uint32_t index, double x, double y, double tolerance, bool &inside, double &distance) const;
 
+  /**
+   * Copia los anillos del elemento `index` en el SRC del almacen (nivel 0).
+   *
+   * Es lo que necesita el resalte de la seleccion: devuelve la geometria real
+   * (sin simplificar) de UN elemento, en buffers contiguos, sin exponer la
+   * disposicion interna del almacen ni su modo. En modo `Envelopes` lee del
+   * archivo solo ese elemento. Devuelve false si la geometria no esta disponible.
+   */
+  bool featureRings(uint32_t index, std::vector<double> &coords,
+                    std::vector<uint32_t> &ringFirst, std::vector<uint32_t> &ringCount,
+                    GeometryKind &kind) const;
+
   qint64 cachedVertices() const;
 
 private:

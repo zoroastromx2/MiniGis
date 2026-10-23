@@ -64,11 +64,12 @@ IdentifyPanel::IdentifyPanel(QWidget *parent)
   // el valor ocupa el resto.
   mTree->header()->setStretchLastSection(true);
   mTree->header()->setSectionResizeMode(0, QHeaderView::Interactive);
-  mTree->setColumnWidth(0, 170);
+  mTree->setColumnWidth(0, 250);
   layout->addWidget(mTree, 1);
 
-  // Con el dock estrecho, los nombres de campo y el alcance se cortarian.
-  setMinimumWidth(280);
+  // Con el dock estrecho, los nombres de campo y la marca de seleccion se
+  // cortarian.
+  setMinimumWidth(340);
 
   auto *buttons = new QHBoxLayout();
   buttons->addStretch(1);
@@ -145,9 +146,11 @@ void IdentifyPanel::setResult(const View &view)
       else
         where = QStringLiteral("a %1 u.m.").arg(QString::number(hit.distance, 'g', 4));
 
-      const QString featureLabel = QStringLiteral("#%1 · %2 · %3")
-                                     .arg(hit.fid)
-                                     .arg(geometryKindName(layer->geometryKind()), where);
+      QString featureLabel = QStringLiteral("#%1 · %2 · %3")
+                               .arg(hit.fid)
+                               .arg(geometryKindName(layer->geometryKind()), where);
+      if (hit.layer == view.selectedLayer && hit.fid == view.selectedFid)
+        featureLabel += QStringLiteral(" (seleccionado)");
 
       auto *featureItem = new QTreeWidgetItem(layerItem);
       featureItem->setText(0, featureLabel);

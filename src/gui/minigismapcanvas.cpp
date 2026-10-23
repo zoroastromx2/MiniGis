@@ -231,6 +231,168 @@ void MapCanvas::drawIdentifyMarker(QImage &image, const MapToPixel &transform) c
   painter.drawRect(QRect(pixel.x() - 1, pixel.y() - 1, 3, 3));
 }
 
+void MapCanvas::setSelectedFeature(const std::shared_ptr<VectorLayer> &layer, qint64 fid)
+{
+  if (!layer || fid < 0)
+  {
+    clearSelectedFeature();
+    return;
+  }
+
+  mSelectionLayer = layer;
+  mSelectionFid = fid;
+
+  if (!buildSelectionPath(layer, fid))
+    clearSelectedFeature();
+  else
+    update();
+}
+
+void MapCanvas::clearSelectedFeature()
+{
+  if (!mSelectionLayer && mSelectionFid < 0 && mSelectionPath.isEmpty() && !mSelectionHasPoint)
+    return;
+
+  mSelectionLayer.reset();
+  mSelectionFid = -1;
+  mSelectionPath = QPainterPath();
+  mSelectionKind = GeometryKind::Unknown;
+  mSelectionPoint = QPointF();
+  mSelectionHasPoint = false;
+  update();
+}
+
+bool MapCanvas::buildSelectionPath(const std::shared_ptr<VectorLayer> &layer, qint64 fid)
+{
+  mSelectionPath = QPainterPath();
+  mSelectionKind = GeometryKind::Unknown;
+  mSelectionPoint = QPointF();
+  mSelectionHasPoint = false;
+
+  if (!layer || fid < 0)
+    return false;
+
+  const std::shared_ptr<GeometryStore> store = layer->geometryStore();
+  GeometryKind kind = GeometryKind::Unknown;
+  std::vector<double> coords;
+  std::vector<uint32_t> ringFirst;
+  std::vector<uint32_t> ringCount;
+
+  const bool storeUsable =
+    store && store->destinationEpsg() == mDestinationEpsg
+    && store->featureRings(static_cast<uint32_t>(fid), coords, ringFirst, ringCount, kind);
+
+  if (!storeUsable)
+  {
+    // Sin almacen (o con otro SRC) solo se puede resaltar la envolvente, y solo
+    // si sus coordenadas estan ya en el SRC del lienzo. Una capa sin SRC se trata
+    // como el resto del render: sus coordenadas son las del destino.
+    if (layer->spatialRef() && layer->crsEpsg() != mDestinationEpsg)
+      return false;
+
+    const Rectangle envelope = layer->featureEnvelope(fid);
+    if (!envelope.isValid())
+      return false;
+
+    mSelectionPath.addRect(QRectF(envelope.xMin(), envelope.yMin(), envelope.width(), envelope.height()));
+    mSelectionKind = GeometryKind::Polygon;
+    return true;
+  }
+
+  if (kind == GeometryKind::Point)
+  {
+    if (coords.size() < 2)
+      return false;
+
+    mSelectionPoint = QPointF(coords[0], coords[1]);
+    mSelectionHasPoint = true;
+    mSelectionKind = GeometryKind::Point;
+    return true;
+  }
+
+  for (size_t ring = 0; ring < ringFirst.size(); ++ring)
+  {
+    const uint32_t count = ringCount[ring];
+    if (count == 0)
+      continue;
+
+    const size_t base = 2 * static_cast<size_t>(ringFirst[ring]);
+    if (base + 2 * static_cast<size_t>(count) > coords.size())
+      continue;
+
+    mSelectionPath.moveTo(coords[base], coords[base + 1]);
+    for (uint32_t vertex = 1; vertex < count; ++vertex)
+    {
+      const size_t offset = base + 2 * static_cast<size_t>(vertex);
+      mSelectionPath.lineTo(coords[offset], coords[offset + 1]);
+    }
+
+    if (kind == GeometryKind::Polygon)
+      mSelectionPath.closeSubpath();
+  }
+
+  mSelectionKind = kind;
+  return !mSelectionPath.isEmpty();
+}
+
+void MapCanvas::drawSelection(QImage &image, const MapToPixel &transform) const
+{
+  if (!hasSelectedFeature() || !mSelectionLayer || !mSelectionLayer->isVisible())
+    return;
+
+  const QColor haloColor(32, 32, 32);
+  const QColor lineColor(255, 212, 0);
+
+  QPen haloPen(haloColor, 5.0);
+  haloPen.setCosmetic(true);
+  QPen linePen(lineColor, 3.0);
+  linePen.setCosmetic(true);
+
+  QPainter painter(&image);
+
+  if (mSelectionKind == GeometryKind::Point)
+  {
+    if (!mSelectionHasPoint)
+      return;
+
+    const QPointF point = transform.transform(mSelectionPoint);
+    if (!std::isfinite(point.x()) || !std::isfinite(point.y()))
+      return;
+
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setBrush(Qt::NoBrush);
+    painter.setPen(haloPen);
+    painter.drawEllipse(point, 6.0, 6.0);
+    painter.setPen(linePen);
+    painter.drawEllipse(point, 6.0, 6.0);
+    return;
+  }
+
+  if (mSelectionPath.isEmpty())
+    return;
+
+  const Rectangle extent = transform.extent();
+  const double scale = transform.pixelsPerMapUnit();
+  if (!extent.isValid() || !(scale > 0.0))
+    return;
+
+  // Transformacion mapa -> pixel: x' = escala*(x - xMin) + origenX,
+  // y' = escala*(yMax - y) + origenY. Los lapices son cosmeticos, asi que el
+  // grosor no se escala con este QTransform.
+  const QPointF origin = transform.transform(extent.xMin(), extent.yMax());
+  const QTransform mapToPixel(scale, 0.0, 0.0, -scale,
+                              origin.x() - extent.xMin() * scale,
+                              origin.y() + extent.yMax() * scale);
+
+  painter.setRenderHint(QPainter::Antialiasing, true);
+  painter.setTransform(mapToPixel);
+  painter.setBrush(Qt::NoBrush);
+  painter.setPen(haloPen);
+  painter.drawPath(mSelectionPath);
+  painter.setPen(linePen);
+  painter.drawPath(mSelectionPath);
+}
+
 
 quint64 MapCanvas::contentRevision() const
 {
@@ -391,6 +553,8 @@ bool MapCanvas::removeLayer(const std::shared_ptr<VectorLayer> &layer)
   mLayers.erase(it);
   if (mCurrentLayer == layer)
     mCurrentLayer = mLayers.empty() ? nullptr : mLayers.back();
+  if (mSelectionLayer == layer)
+    clearSelectedFeature();
 
   emit layersChanged();
   emit currentLayerChanged();
@@ -408,6 +572,7 @@ void MapCanvas::clearLayers()
   mRasterLayers.clear();
   mCurrentLayer.reset();
   mExtent.setNull();
+  clearSelectedFeature();
 
   emit layersChanged();
   emit currentLayerChanged();
@@ -490,6 +655,8 @@ void MapCanvas::setCurrentLayer(const std::shared_ptr<VectorLayer> &layer)
 
 void MapCanvas::setDestinationEpsg(int epsg)
 {
+  // El trazado de la seleccion esta en el SRC anterior: se descarta.
+  clearSelectedFeature();
   mDestinationEpsg = epsg;
   invalidateFrameCache();
   mRenderer.setDestinationEpsg(epsg);
@@ -692,6 +859,7 @@ QImage MapCanvas::renderToImage(const QSize &size, bool draft)
     // dibujarlas igualmente (la cache no las guarda).
     mLastReuseMs = timer.elapsed();
     drawLabels(image, transform, size, draft);
+    drawSelection(image, transform);
     drawIdentifyMarker(image, transform);
     mLastRenderMs = timer.elapsed();
     return image;
@@ -780,6 +948,7 @@ QImage MapCanvas::renderToImage(const QSize &size, bool draft)
 
   // Las etiquetas se dibujan despues de la geometria y sobre todo el lienzo.
   drawLabels(image, transform, size, draft);
+  drawSelection(image, transform);
   drawIdentifyMarker(image, transform);
   mLastRenderMs = timer.elapsed();
   return image;

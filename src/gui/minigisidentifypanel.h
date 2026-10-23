@@ -57,6 +57,9 @@ public:
     /** Avisos del llamador (capa oculta, raster seleccionado, sin resultados). */
     QStringList notes;
     std::shared_ptr<VectorLayer> priorityLayer;
+    /** Elemento seleccionado (el primero del resultado), para marcarlo. */
+    std::shared_ptr<VectorLayer> selectedLayer;
+    qint64 selectedFid = -1;
   };
 
   explicit IdentifyPanel(QWidget *parent = nullptr);

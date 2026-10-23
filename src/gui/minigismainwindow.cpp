@@ -15,6 +15,7 @@
 #include "minigisvectorloader.h"
 
 #include <QAction>
+#include <QAbstractItemView>
 #include <QApplication>
 #include <QCloseEvent>
 #include <QDir>
@@ -1179,6 +1180,21 @@ IdentifyResult MainWindow::identifyAtMapPoint(const QPointF &mapPoint)
 
   const IdentifyResult result = identifyAtPoint(request);
 
+  // El primer resultado es el objeto seleccionado: se resalta y, si la tabla
+  // esta visible, se salta a su registro. Sin resultados se limpia.
+  std::shared_ptr<VectorLayer> selectedLayer;
+  qint64 selectedFid = -1;
+  if (result.hits.isEmpty())
+  {
+    clearSelection();
+  }
+  else
+  {
+    selectedLayer = result.hits.first().layer;
+    selectedFid = result.hits.first().fid;
+    applySelection(selectedLayer, selectedFid);
+  }
+
   if (result.hits.isEmpty() && notes.isEmpty())
   {
     QString note = QStringLiteral("No hay ningún elemento a menos de %1 px.").arg(radiusPixels);
@@ -1195,6 +1211,8 @@ IdentifyResult MainWindow::identifyAtMapPoint(const QPointF &mapPoint)
     view.scopeText = scopeText;
     view.notes = notes;
     view.priorityLayer = priority;
+    view.selectedLayer = selectedLayer;
+    view.selectedFid = selectedFid;
     mIdentifyPanel->setResult(view);
   }
 
@@ -1318,7 +1336,14 @@ void MainWindow::syncLayerPanel()
 
 void MainWindow::replaceAttributeModel()
 {
-  const std::shared_ptr<VectorLayer> layer = currentLayer();
+  setAttributeLayer(currentLayer());
+}
+
+void MainWindow::setAttributeLayer(const std::shared_ptr<VectorLayer> &layer)
+{
+  if (!mAttributeModel)
+    return;
+
   mAttributeModel->setLayer(layer);
 
   if (!mAttributeDock)
@@ -1345,6 +1370,84 @@ void MainWindow::replaceAttributeModel()
   }
 
   mAttributeView->resizeColumnsToContents();
+}
+
+void MainWindow::applySelection(const std::shared_ptr<VectorLayer> &layer, qint64 fid)
+{
+  if (!mCanvas || !layer || fid < 0)
+  {
+    clearSelection();
+    return;
+  }
+
+  mCanvas->setSelectedFeature(layer, fid);
+
+  if (mAttributeDock && mAttributeDock->isVisible())
+    showAttributeSelection(layer, fid);
+}
+
+void MainWindow::clearSelection()
+{
+  if (mCanvas)
+    mCanvas->clearSelectedFeature();
+}
+
+void MainWindow::showAttributeSelection(const std::shared_ptr<VectorLayer> &layer, qint64 fid)
+{
+  if (!mAttributeModel || !mAttributeView || !layer || fid < 0)
+    return;
+
+  if (mAttributeModel->layer() != layer)
+    setAttributeLayer(layer);
+
+  const int row = static_cast<int>(fid);
+  if (row >= mAttributeModel->rowCount())
+  {
+    statusBar()->showMessage(QStringLiteral("El registro %1 no está en la tabla: se muestran %2 de %3.")
+                               .arg(fid)
+                               .arg(mAttributeModel->rowCount())
+                               .arg(mAttributeModel->totalRows()),
+                             kStatusTimeoutMs);
+    return;
+  }
+
+  const QModelIndex index = mAttributeModel->index(row, 0);
+  // Sin foco: el usuario sigue identificando con el mapa.
+  mAttributeView->setCurrentIndex(index);
+  mAttributeView->selectRow(row);
+  mAttributeView->scrollTo(index, QAbstractItemView::PositionAtCenter);
+}
+
+QString MainWindow::selectedLayerName() const
+{
+  if (!mCanvas || !mCanvas->selectedFeatureLayer())
+    return {};
+  return mCanvas->selectedFeatureLayer()->name();
+}
+
+qint64 MainWindow::selectedFeatureId() const
+{
+  return mCanvas ? mCanvas->selectedFeatureId() : -1;
+}
+
+bool MainWindow::hasSelectedFeature() const
+{
+  return mCanvas && mCanvas->hasSelectedFeature();
+}
+
+QString MainWindow::attributeTableLayerName() const
+{
+  if (!mAttributeModel || !mAttributeModel->layer())
+    return {};
+  return mAttributeModel->layer()->name();
+}
+
+int MainWindow::attributeTableCurrentRow() const
+{
+  if (!mAttributeView)
+    return -1;
+  const QModelIndex index = mAttributeView->currentIndex();
+  return index.isValid() ? index.row() : -1;
 }
 
 void MainWindow::updateWindowTitle()

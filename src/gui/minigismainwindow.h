@@ -107,6 +107,15 @@ public:
   void setSearchAllLayers(bool all);
   bool searchAllLayers() const { return mSearchAllLayers; }
 
+  /** Elemento seleccionado (el primero del ultimo Identificar). */
+  QString selectedLayerName() const;
+  qint64 selectedFeatureId() const;
+  bool hasSelectedFeature() const;
+
+  /** Capa y fila que muestra la tabla de atributos (contrato sin ventana). */
+  QString attributeTableLayerName() const;
+  int attributeTableCurrentRow() const;
+
 protected:
   void closeEvent(QCloseEvent *event) override;
 
@@ -165,6 +174,19 @@ private:
   std::shared_ptr<VectorLayer> currentLayer() const;
   std::shared_ptr<RasterLayer> currentRaster() const { return mCurrentRaster; }
   void showError(const QString &title, const Error &error);
+
+  /** Aplica (o limpia) la seleccion del objeto identificado. */
+  void applySelection(const std::shared_ptr<VectorLayer> &layer, qint64 fid);
+  void clearSelection();
+
+  /** Pone la tabla en una capa concreta (sin tocar la seleccion del arbol). */
+  void setAttributeLayer(const std::shared_ptr<VectorLayer> &layer);
+
+  /**
+   * Mueve la tabla al registro `fid`: cambia de capa si hace falta, selecciona la
+   * fila y la centra. Solo se llama con la tabla visible. No le da el foco.
+   */
+  void showAttributeSelection(const std::shared_ptr<VectorLayer> &layer, qint64 fid);
 
   /** Abre un raster ya detectado y lo añade al lienzo. */
   bool openRasterLayer(const QString &path, bool zoomToExtent);
