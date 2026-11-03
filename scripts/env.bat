@@ -29,8 +29,8 @@ rem MSVC en espanol escribe las notas de /showIncludes como "Nota: ..." y CMake
 rem no las reconoce: con VSLANG en ingles la salida de compilacion queda limpia.
 set "VSLANG=1033"
 
-set "QT_ROOT=D:\QtWin\6.10.3\msvc2022_64"
-set "VCPKG_ROOT=E:\vcpkg"
+set "QT_ROOT=C:\Qtwin\6.10.3\msvc2022_64"
+set "VCPKG_ROOT=D:\VCPKG"
 set "MINIGIS_QT_DIR=%QT_ROOT%\lib\cmake\Qt6"
 set "PATH=%QT_ROOT%\bin;%VCPKG_ROOT%\installed\x64-windows\bin;%PATH%"
 

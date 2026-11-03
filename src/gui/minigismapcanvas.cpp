@@ -509,7 +509,8 @@ bool MapCanvas::reusePreviousFrame(QImage &image, const QSize &size, bool draft,
   return true;
 }
 
-std::shared_ptr<VectorLayer> MapCanvas::addLayer(const std::shared_ptr<VectorLayer> &layer, bool zoomToExtent)
+std::shared_ptr<VectorLayer> MapCanvas::addLayer(const std::shared_ptr<VectorLayer> &layer, bool zoomToExtent,
+                                                 bool allowDuplicate)
 {
   if (!layer)
     return {};
@@ -517,13 +518,18 @@ std::shared_ptr<VectorLayer> MapCanvas::addLayer(const std::shared_ptr<VectorLay
   // No se admiten duplicados: evita dibujar dos veces la misma capa. La
   // comparacion incluye el nombre porque un GeoPackage entrega varias capas
   // desde el mismo archivo y todas comparten `sourcePath`.
-  for (const std::shared_ptr<VectorLayer> &existing : mLayers)
+  // Un proyecto QGIS puede declarar dos veces la misma capa con estilos
+  // distintos; en ese caso el llamador pide explicitamente el duplicado.
+  if (!allowDuplicate)
   {
-    if (existing && existing->sourcePath() == layer->sourcePath() && existing->name() == layer->name())
+    for (const std::shared_ptr<VectorLayer> &existing : mLayers)
     {
-      setCurrentLayer(existing);
-      emit statusMessage(QStringLiteral("La capa «%1» ya estaba cargada.").arg(layer->name()), kStatusTimeoutMs);
-      return existing;
+      if (existing && existing->sourcePath() == layer->sourcePath() && existing->name() == layer->name())
+      {
+        setCurrentLayer(existing);
+        emit statusMessage(QStringLiteral("La capa «%1» ya estaba cargada.").arg(layer->name()), kStatusTimeoutMs);
+        return existing;
+      }
     }
   }
 
@@ -585,18 +591,22 @@ bool MapCanvas::contains(const std::shared_ptr<VectorLayer> &layer) const
 }
 
 std::shared_ptr<RasterLayer> MapCanvas::addRasterLayer(const std::shared_ptr<RasterLayer> &layer,
-                                                       bool zoomToExtent)
+                                                       bool zoomToExtent, bool allowDuplicate)
 {
   if (!layer)
     return {};
 
-  // No se admiten duplicados: evita dibujar dos veces el mismo archivo.
-  for (const std::shared_ptr<RasterLayer> &existing : mRasterLayers)
+  // No se admiten duplicados: evita dibujar dos veces el mismo archivo. Un
+  // proyecto puede declarar el mismo raster dos veces con estilos distintos.
+  if (!allowDuplicate)
   {
-    if (existing && existing->sourcePath() == layer->sourcePath())
+    for (const std::shared_ptr<RasterLayer> &existing : mRasterLayers)
     {
-      emit statusMessage(QStringLiteral("La capa «%1» ya estaba cargada.").arg(layer->name()), kStatusTimeoutMs);
-      return existing;
+      if (existing && existing->sourcePath() == layer->sourcePath())
+      {
+        emit statusMessage(QStringLiteral("La capa «%1» ya estaba cargada.").arg(layer->name()), kStatusTimeoutMs);
+        return existing;
+      }
     }
   }
 

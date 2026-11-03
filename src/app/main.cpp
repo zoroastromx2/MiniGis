@@ -9,11 +9,13 @@
  *   minigis --check-layers -l x.gpkg          todas las capas del archivo y su grupo en el panel
  *   minigis --bench 40 --layer x.gpkg         mide cuadros de paneo/zoom (rendimiento)
  *   minigis --list-drivers                    drivers vectoriales de GDAL
+ *   minigis --project-info x.qgz              resume un proyecto de QGIS, sin ventana
  *
  * Contrato del ejecutable (lo usan scripts y las pruebas de CTest):
  *   0 exito | 1 uso incorrecto | 2 archivo no encontrado | 3 GDAL no pudo abrir
  *   4 no se pudo escribir la imagen | 5 no hay capas para renderizar
  *   6 el rendimiento medido no cumple el presupuesto de --bench-budget
+ *   7 el proyecto de QGIS no se pudo abrir o guardar
  */
 
 #include <QApplication>
@@ -22,6 +24,7 @@
 #include <QCommandLineParser>
 #include <QDir>
 #include <QElapsedTimer>
+#include <QFile>
 #include <QFileInfo>
 #include <QImage>
 #include <QMouseEvent>
@@ -33,6 +36,8 @@
 #include <QSize>
 #include <QStringList>
 #include <QTextStream>
+
+#include <QTemporaryDir>
 
 #include <algorithm>
 #include <cmath>
@@ -61,6 +66,7 @@ constexpr unsigned int kUtf8CodePage = 65001;
 #include "minigislayerpanel.h"
 #include "minigismainwindow.h"
 #include "minigismapcanvas.h"
+#include "minigisqgisproject.h"
 #include "minigisrasterlayer.h"
 #include "minigisrasterstyledialog.h"
 #include "minigisrasterstyle.h"
@@ -82,7 +88,8 @@ enum ExitCode
   ExitOpenFailed = 3,
   ExitRenderFailed = 4,
   ExitNoLayers = 5,
-  ExitBudgetExceeded = 6
+  ExitBudgetExceeded = 6,
+  ExitProjectFailed = 7
 };
 
 bool g_verbose = false;
@@ -192,6 +199,7 @@ QString helpText(const QCommandLineParser &parser)
                           "  minigis --check-layers -l capa.gpkg      todas las capas del archivo, en el panel\n"
                           "  minigis --identify-at -3.70,40.41 -l c.shp  identifica el elemento en x,y\n"
                           "  minigis --check-identify -l p.shp -l c.shp -l o.tif  contrato de Identificar\n"
+                          "  minigis --project-info --json p.qgz    resume un proyecto QGIS (sin ventana)\n"
                           "\nRendimiento (sin ventana):\n"
                           "  minigis --bench 40 -l capa.gpkg                 mide 40 cuadros de paneo/zoom\n"
                           "  minigis --bench 40 --bench-scenario zoom -l c.gpkg\n"
@@ -200,7 +208,8 @@ QString helpText(const QCommandLineParser &parser)
                           "\nCodigos de salida:\n"
                           "  0 exito            1 uso incorrecto       2 archivo no encontrado\n"
                           "  3 GDAL no pudo abrir la capa             4 no se pudo escribir la imagen\n"
-                          "  5 no hay capas que renderizar            6 presupuesto de --bench-budget superado\n");
+                          "  5 no hay capas que renderizar            6 presupuesto de --bench-budget superado\n"
+                          "  7 el proyecto QGIS no se pudo abrir o guardar\n");
 }
 
 QString versionText()
@@ -485,6 +494,229 @@ QStringList collectLayerPaths(const QCommandLineParser &parser)
     append(path);
 
   return paths;
+}
+
+/** Proyectos (.qgz/.qgs) indicados en --layer o en los argumentos posicionales. */
+QStringList collectProjectPaths(const QCommandLineParser &parser)
+{
+  QStringList paths;
+  auto append = [&paths](const QString &path) {
+    const QString trimmed = path.trimmed();
+    if (trimmed.isEmpty())
+      return;
+    if (QgisProject::isProjectPath(trimmed) && !paths.contains(trimmed))
+      paths << trimmed;
+  };
+
+  for (const QString &path : parser.values(QStringLiteral("layer")))
+    append(path);
+  for (const QString &path : parser.positionalArguments())
+    append(path);
+
+  return paths;
+}
+
+double roundedForJson(double value)
+{
+  return std::round(value * 10000.0) / 10000.0;
+}
+
+QString colorText(const QColor &color)
+{
+  return color.name(QColor::HexRgb);
+}
+
+QString stretchName(RasterStyle::Stretch stretch)
+{
+  switch (stretch)
+  {
+    case RasterStyle::Stretch::MinMax:
+      return QStringLiteral("minmax");
+    case RasterStyle::Stretch::PercentClip:
+      return QStringLiteral("percentclip");
+    case RasterStyle::Stretch::None:
+      break;
+  }
+  return QStringLiteral("none");
+}
+
+QJsonObject styleJson(const Style &style)
+{
+  QJsonObject object;
+  object.insert(QStringLiteral("fillColor"), colorText(style.fillColor));
+  object.insert(QStringLiteral("strokeColor"), colorText(style.strokeColor));
+  object.insert(QStringLiteral("strokeWidth"), roundedForJson(style.strokeWidth));
+  object.insert(QStringLiteral("pointSize"), roundedForJson(style.pointSize));
+  object.insert(QStringLiteral("opacity"), style.opacity);
+  object.insert(QStringLiteral("fillEnabled"), style.fillEnabled);
+  return object;
+}
+
+QJsonObject labelJson(const LabelStyle &style)
+{
+  QJsonObject object;
+  object.insert(QStringLiteral("enabled"), style.enabled);
+  QJsonArray fields;
+  for (const QString &field : style.fields)
+    fields.append(field);
+  object.insert(QStringLiteral("fields"), fields);
+  object.insert(QStringLiteral("fontSize"), roundedForJson(style.fontSize));
+  object.insert(QStringLiteral("color"), colorText(style.color));
+  object.insert(QStringLiteral("haloWidth"), roundedForJson(style.haloWidth));
+  object.insert(QStringLiteral("minimumScale"), roundedForJson(style.minimumScale));
+  object.insert(QStringLiteral("maximumScale"), roundedForJson(style.maximumScale));
+  return object;
+}
+
+QJsonObject rasterJson(const RasterStyle &style)
+{
+  QJsonObject object;
+  QJsonArray bands;
+  if (style.bandMode == RasterStyle::BandMode::Grayscale)
+  {
+    bands.append(style.redBand);
+  }
+  else
+  {
+    bands.append(style.redBand);
+    bands.append(style.greenBand);
+    bands.append(style.blueBand);
+  }
+  object.insert(QStringLiteral("bands"), bands);
+  object.insert(QStringLiteral("opacity"), style.opacity);
+  object.insert(QStringLiteral("stretch"), stretchName(style.stretch));
+  return object;
+}
+
+QJsonObject projectInfoJson(const QgisProject &project)
+{
+  QJsonObject root;
+
+  QJsonObject projectObject;
+  projectObject.insert(QStringLiteral("path"), QDir::toNativeSeparators(project.path()));
+  projectObject.insert(QStringLiteral("container"), project.isCompressed() ? QStringLiteral("qgz") : QStringLiteral("qgs"));
+  projectObject.insert(QStringLiteral("crsEpsg"), project.crsEpsg());
+  projectObject.insert(QStringLiteral("canvasEpsg"), project.canvasEpsg());
+  projectObject.insert(QStringLiteral("layerCount"), project.declaredLayerCount());
+  projectObject.insert(QStringLiteral("available"), static_cast<int>(project.layers().size()));
+  if (project.hasExtent())
+  {
+    QJsonObject extent;
+    extent.insert(QStringLiteral("xmin"), project.extent().xMin());
+    extent.insert(QStringLiteral("ymin"), project.extent().yMin());
+    extent.insert(QStringLiteral("xmax"), project.extent().xMax());
+    extent.insert(QStringLiteral("ymax"), project.extent().yMax());
+    projectObject.insert(QStringLiteral("extent"), extent);
+    projectObject.insert(QStringLiteral("extentEpsg"), project.extentEpsg());
+  }
+  root.insert(QStringLiteral("project"), projectObject);
+
+  QJsonArray layers;
+  for (const ProjectLayer &layer : project.layers())
+  {
+    QJsonObject object;
+    object.insert(QStringLiteral("id"), layer.id);
+    object.insert(QStringLiteral("name"), layer.name);
+    object.insert(QStringLiteral("type"), layer.type == ProjectLayer::Type::Raster ? QStringLiteral("raster")
+                                                                                    : QStringLiteral("vector"));
+    object.insert(QStringLiteral("visible"), layer.visible);
+    object.insert(QStringLiteral("datasource"), layer.datasource);
+    object.insert(QStringLiteral("sourcePath"), QDir::toNativeSeparators(layer.sourcePath));
+    object.insert(QStringLiteral("layerName"), layer.layerName);
+    object.insert(QStringLiteral("styleRepresentable"), layer.styleRepresentable);
+    object.insert(QStringLiteral("labelsRepresentable"), layer.labelsRepresentable);
+
+    if (layer.type == ProjectLayer::Type::Raster)
+    {
+      object.insert(QStringLiteral("raster"), rasterJson(layer.raster));
+    }
+    else
+    {
+      object.insert(QStringLiteral("style"), styleJson(layer.style));
+      object.insert(QStringLiteral("labels"), labelJson(layer.labels));
+    }
+    layers.append(object);
+  }
+  root.insert(QStringLiteral("layers"), layers);
+
+  QJsonArray unavailable;
+  for (const UnavailableProjectLayer &layer : project.unavailableLayers())
+  {
+    QJsonObject object;
+    object.insert(QStringLiteral("id"), layer.id);
+    object.insert(QStringLiteral("name"), layer.name);
+    object.insert(QStringLiteral("reason"), layer.reason);
+    unavailable.append(object);
+  }
+  root.insert(QStringLiteral("unavailable"), unavailable);
+
+  return root;
+}
+
+QString projectInfoText(const QgisProject &project)
+{
+  QStringList lines;
+  lines << QStringLiteral("Proyecto   : %1 (%2)").arg(QDir::toNativeSeparators(project.path()),
+                                                      project.isCompressed() ? QStringLiteral("comprimido")
+                                                                             : QStringLiteral("XML plano"));
+  if (project.crsEpsg() > 0)
+    lines << QStringLiteral("SRC        : EPSG:%1").arg(project.crsEpsg());
+  else
+    lines << QStringLiteral("SRC        : personalizado (sin codigo EPSG); se dibuja en EPSG:%1")
+                 .arg(project.canvasEpsg());
+  if (project.hasExtent())
+  {
+    lines << QStringLiteral("Extension  : %1, %2, %3, %4 (EPSG:%5)")
+               .arg(QString::number(project.extent().xMin(), 'f', 2),
+                    QString::number(project.extent().yMin(), 'f', 2),
+                    QString::number(project.extent().xMax(), 'f', 2),
+                    QString::number(project.extent().yMax(), 'f', 2))
+               .arg(project.extentEpsg());
+  }
+  lines << QStringLiteral("Capas      : %1 declaradas, %2 disponibles")
+             .arg(project.declaredLayerCount())
+             .arg(project.layers().size());
+
+  for (const ProjectLayer &layer : project.layers())
+  {
+    const QString kind = layer.type == ProjectLayer::Type::Raster ? QStringLiteral("raster") : QStringLiteral("vector");
+    lines << QStringLiteral("  [%1] %2 (%3, simbologia %4)")
+               .arg(kind, layer.name, layer.visible ? QStringLiteral("visible") : QStringLiteral("oculta"),
+                    layer.styleRepresentable ? QStringLiteral("OK") : QStringLiteral("conservada"));
+    lines << QStringLiteral("      archivo: %1").arg(QDir::toNativeSeparators(layer.sourcePath));
+    if (layer.type == ProjectLayer::Type::Raster)
+    {
+      lines << QStringLiteral("      raster: opacidad %1%, contraste %2")
+                 .arg(layer.raster.opacity)
+                 .arg(stretchName(layer.raster.stretch));
+    }
+    else
+    {
+      lines << QStringLiteral("      estilo: relleno %1, contorno %2, grosor %3 px, opacidad %4%")
+                 .arg(colorText(layer.style.fillColor), colorText(layer.style.strokeColor),
+                      QString::number(layer.style.strokeWidth, 'f', 2))
+                 .arg(layer.style.opacity);
+      if (layer.labels.enabled)
+      {
+        lines << QStringLiteral("      etiquetas: %1 (%2 pt)")
+                   .arg(layer.labels.fields.join(layer.labels.separator),
+                        QString::number(layer.labels.fontSize, 'g', 3));
+      }
+      else
+      {
+        lines << QStringLiteral("      etiquetas: sin etiquetas");
+      }
+    }
+  }
+
+  if (!project.unavailableLayers().isEmpty())
+  {
+    lines << QStringLiteral("No disponibles:");
+    for (const UnavailableProjectLayer &layer : project.unavailableLayers())
+      lines << QStringLiteral("  %1: %2").arg(layer.name, layer.reason);
+  }
+
+  return lines.join(QLatin1Char('\n'));
 }
 
 /** Comprime una extension alrededor de su centro (factor < 1 acerca). */
@@ -3444,6 +3676,279 @@ int checkIdentify(const QStringList &layerPaths, bool asJson)
   return ok ? ExitOk : ExitUsage;
 }
 
+/**
+ * Contrato de un proyecto QGIS (`--check-project`): abre el fixture, comprueba
+ * lo que muestra, cambia visibilidad, simbologia, etiquetas, raster y extension,
+ * guarda y vuelve a leer el archivo para verificar que los cambios persisten y
+ * que las capas anadidas/cerradas se reflejan sin perder lo desconocido.
+ */
+int checkProject(const QString &projectPath, bool asJson)
+{
+  if (projectPath.isEmpty())
+  {
+    writeErr(QStringLiteral("Se necesita un proyecto: minigis --check-project <proyecto.qgz>"));
+    return ExitUsage;
+  }
+  if (!QFileInfo::exists(projectPath))
+  {
+    writeErr(QStringLiteral("No existe el proyecto: %1").arg(QDir::toNativeSeparators(projectPath)));
+    return ExitFileNotFound;
+  }
+
+  bool ok = true;
+  const auto check = [&ok](const QString &name, bool passed, const QString &detail = QString()) {
+    writeOut(QStringLiteral("%1 %2%3")
+               .arg(passed ? QStringLiteral("OK  ") : QStringLiteral("FALLO"))
+               .arg(name, detail.isEmpty() ? QString() : QStringLiteral(" — ") + detail));
+    if (!passed)
+      ok = false;
+  };
+
+  Error error;
+  std::unique_ptr<QgisProject> seed;
+  if (!QgisProject::load(projectPath, &seed, &error))
+  {
+    writeErr(error.toText());
+    return ExitProjectFailed;
+  }
+
+  QTemporaryDir temporary;
+  if (!temporary.isValid())
+  {
+    writeErr(QStringLiteral("No se pudo crear una carpeta temporal para la prueba."));
+    return ExitProjectFailed;
+  }
+
+  const QString workingPath = temporary.filePath(QStringLiteral("proyecto-prueba.qgz"));
+  if (!seed->save(workingPath, &error))
+  {
+    writeErr(error.toText());
+    return ExitProjectFailed;
+  }
+
+  MainWindow window(nullptr, false);
+  window.resize(1200, 800);
+  if (!window.openProject(workingPath))
+  {
+    writeErr(QStringLiteral("MainWindow no pudo abrir el proyecto de prueba."));
+    return ExitProjectFailed;
+  }
+  if (!window.waitForLoading(300000))
+  {
+    writeErr(QStringLiteral("La carga del proyecto no termino a tiempo."));
+    return ExitProjectFailed;
+  }
+
+  check(QStringLiteral("se abre el proyecto en la ventana"), window.hasProject()
+          && window.projectPath() == workingPath, window.projectPath());
+  check(QStringLiteral("capas abribles del proyecto"), window.projectLayerCount() == 4,
+        QStringLiteral("%1 capas").arg(window.projectLayerCount()));
+  check(QStringLiteral("capas en el lienzo"), window.canvas()->layers().size() == 3
+          && window.canvas()->rasterLayers().size() == 1,
+        QStringLiteral("%1 vectoriales, %2 raster").arg(window.canvas()->layers().size())
+          .arg(window.canvas()->rasterLayers().size()));
+
+  const auto vectorByName = [&window](const QString &name) -> std::shared_ptr<VectorLayer> {
+    for (const std::shared_ptr<VectorLayer> &layer : window.canvas()->layers())
+    {
+      if (layer && layer->name() == name)
+        return layer;
+    }
+    return {};
+  };
+
+  QStringList vectorNames;
+  for (const std::shared_ptr<VectorLayer> &layer : window.canvas()->layers())
+    vectorNames << layer->name();
+  check(QStringLiteral("orden y nombres del proyecto"),
+        vectorNames == QStringList {QStringLiteral("parcels"), QStringLiteral("parcels_categorizado"),
+                                    QStringLiteral("cities")},
+        vectorNames.join(QStringLiteral(", ")));
+
+  check(QStringLiteral("SRC del lienzo"), window.canvas()->destinationEpsg() == 25830,
+        QStringLiteral("EPSG:%1").arg(window.canvas()->destinationEpsg()));
+
+  const Rectangle expectedExtent = seed->extent();
+  const Rectangle view = window.canvas()->extent();
+  check(QStringLiteral("encuadre del proyecto"),
+        std::abs(view.xMin() - expectedExtent.xMin()) < 1e-6
+          && std::abs(view.yMin() - expectedExtent.yMin()) < 1e-6
+          && std::abs(view.xMax() - expectedExtent.xMax()) < 1e-6
+          && std::abs(view.yMax() - expectedExtent.yMax()) < 1e-6,
+        view.toString());
+
+  const std::shared_ptr<VectorLayer> parcels = vectorByName(QStringLiteral("parcels"));
+  const std::shared_ptr<VectorLayer> categorized = vectorByName(QStringLiteral("parcels_categorizado"));
+  const std::shared_ptr<VectorLayer> cities = vectorByName(QStringLiteral("cities"));
+  const std::shared_ptr<RasterLayer> raster = window.canvas()->rasterLayers().empty()
+                                                ? nullptr
+                                                : window.canvas()->rasterLayers().front();
+
+  check(QStringLiteral("visibilidad del proyecto"), categorized && !categorized->isVisible(),
+        categorized ? QString() : QStringLiteral("falta parcels_categorizado"));
+  check(QStringLiteral("simbologia de parcels"),
+        parcels && parcels->style().fillColor == QColor(200, 80, 40)
+          && std::abs(parcels->style().strokeWidth - 1.8898) < 0.01,
+        parcels ? parcels->style().fillColor.name(QColor::HexRgb) : QString());
+  check(QStringLiteral("simbologia de cities"),
+        cities && std::abs(cities->style().pointSize - 9.4488) < 0.01,
+        cities ? QString::number(cities->style().pointSize, 'f', 4) : QString());
+  check(QStringLiteral("etiquetas de cities"),
+        cities && cities->labelStyle().enabled && cities->labelStyle().fields == QStringList {QStringLiteral("name")}
+          && std::abs(cities->labelStyle().minimumScale - 66.1458) < 1.0,
+        cities ? cities->labelStyle().fields.join(QLatin1Char(',')) : QString());
+  check(QStringLiteral("estilo del raster"),
+        raster && raster->style().opacity == 80 && raster->style().redBand == 1
+          && raster->style().greenBand == 2 && raster->style().blueBand == 3,
+        raster ? QStringLiteral("opacidad %1").arg(raster->style().opacity) : QString());
+  check(QStringLiteral("capa no disponible informada"), !window.unavailableProjectLayers().isEmpty(),
+        window.unavailableProjectLayers().join(QStringLiteral("; ")));
+  check(QStringLiteral("el proyecto recien abierto esta limpio"), !window.isProjectModified());
+
+  // Volver al estado guardado tiene que dejar el proyecto limpio otra vez.
+  if (parcels)
+  {
+    parcels->setVisible(false);
+    const bool dirtyAfterHide = window.isProjectModified();
+    parcels->setVisible(true);
+    check(QStringLiteral("volver al estado guardado deja el proyecto limpio"),
+          dirtyAfterHide && !window.isProjectModified());
+  }
+
+  // Cambios equivalentes a los que hace el usuario en los dialogos y el panel.
+  if (parcels && cities && raster)
+  {
+    Style style = parcels->style();
+    style.fillColor = QColor(10, 20, 30);
+    style.strokeWidth = 2.0;
+    parcels->setStyle(style);
+    parcels->setVisible(false);
+
+    LabelStyle labels = cities->labelStyle();
+    labels.fields = QStringList {QStringLiteral("name"), QStringLiteral("country")};
+    labels.fontSize = 12.0;
+    labels.haloEnabled = false;
+    cities->setLabelStyle(labels);
+
+    RasterStyle rasterStyle = raster->style();
+    rasterStyle.opacity = 50;
+    raster->setStyle(rasterStyle);
+
+    Rectangle smaller = view;
+    smaller = Rectangle(view.centerX() - view.width() / 4.0, view.centerY() - view.height() / 4.0,
+                        view.centerX() + view.width() / 4.0, view.centerY() + view.height() / 4.0);
+    window.canvas()->setExtent(smaller);
+  }
+
+  check(QStringLiteral("el proyecto queda modificado"), window.isProjectModified());
+  check(QStringLiteral("el titulo marca los cambios"), window.windowTitle().contains(QLatin1Char('*')),
+        window.windowTitle());
+
+  QMetaObject::invokeMethod(&window, "saveProject", Qt::DirectConnection);
+  check(QStringLiteral("guardar deja el proyecto limpio"), !window.isProjectModified());
+  check(QStringLiteral("se creo la copia del proyecto al guardar"),
+        QFileInfo::exists(workingPath + QStringLiteral(".bak")));
+
+  std::unique_ptr<QgisProject> saved;
+  if (!QgisProject::load(workingPath, &saved, &error))
+  {
+    check(QStringLiteral("el proyecto guardado se puede releer"), false, error.toText());
+    return ok ? ExitOk : ExitUsage;
+  }
+
+  bool parcelsSaved = false;
+  bool labelsSaved = false;
+  bool rasterSaved = false;
+  for (const ProjectLayer &layer : saved->layers())
+  {
+    if (layer.name == QStringLiteral("parcels"))
+    {
+      parcelsSaved = !layer.visible && layer.style.fillColor == QColor(10, 20, 30)
+                     && std::abs(layer.style.strokeWidth - 2.0) < 1e-9;
+    }
+    else if (layer.name == QStringLiteral("cities"))
+    {
+      labelsSaved = layer.labels.enabled && layer.labels.fields.size() == 2
+                    && std::abs(layer.labels.fontSize - 12.0) < 1e-9 && !layer.labels.haloEnabled;
+    }
+    else if (layer.name == QStringLiteral("orto"))
+    {
+      rasterSaved = layer.raster.opacity == 50;
+    }
+  }
+  check(QStringLiteral("se guardan visibilidad y estilo"), parcelsSaved);
+  check(QStringLiteral("se guardan las etiquetas"), labelsSaved);
+  check(QStringLiteral("se guarda el estilo del raster"), rasterSaved);
+  check(QStringLiteral("se guarda el encuadre"),
+        saved->hasExtent() && std::abs(saved->extent().width() - view.width() / 2.0) < 1e-6,
+        saved->hasExtent() ? saved->extent().toString() : QStringLiteral("sin extension"));
+  check(QStringLiteral("se conserva el nodo desconocido"),
+        saved->document().child(QStringLiteral("minigisPrueba")) != nullptr);
+
+  // Anadir una capa de la sesion y cerrar otra: ambas cosas deben persistir.
+  const QString extraLayer = QDir(QStringLiteral(MINIGIS_SAMPLE_DATA_DIR))
+                               .absoluteFilePath(QStringLiteral("shapefiles/parcels_utm30.shp"));
+  if (window.openLayer(extraLayer, false))
+  {
+    check(QStringLiteral("la capa anadida marca el proyecto"), window.isProjectModified());
+    QMetaObject::invokeMethod(&window, "saveProject", Qt::DirectConnection);
+
+    if (categorized)
+      window.canvas()->removeLayer(categorized);
+    check(QStringLiteral("cerrar una capa marca el proyecto"), window.isProjectModified());
+    QMetaObject::invokeMethod(&window, "saveProject", Qt::DirectConnection);
+  }
+  else
+  {
+    check(QStringLiteral("se puede anadir una capa al proyecto"), false, extraLayer);
+  }
+
+  std::unique_ptr<QgisProject> finalProject;
+  if (QgisProject::load(workingPath, &finalProject, &error))
+  {
+    bool added = false;
+    bool removed = true;
+    for (const ProjectLayer &layer : finalProject->layers())
+    {
+      if (layer.name == QStringLiteral("parcels_utm30"))
+        added = true;
+      if (layer.name == QStringLiteral("parcels_categorizado"))
+        removed = false;
+    }
+    check(QStringLiteral("la capa anadida se guarda"), added);
+    check(QStringLiteral("la capa cerrada se elimina"), removed);
+    check(QStringLiteral("el proyecto final conserva las capas no disponibles"),
+          !finalProject->unavailableLayers().isEmpty());
+  }
+  else
+  {
+    check(QStringLiteral("el proyecto final se puede releer"), false, error.toText());
+  }
+
+  if (asJson)
+  {
+    QJsonObject root;
+    root.insert(QStringLiteral("ok"), ok);
+    root.insert(QStringLiteral("project"), QDir::toNativeSeparators(workingPath));
+    writeOut(QString::fromUtf8(QJsonDocument(root).toJson(QJsonDocument::Indented)).trimmed());
+  }
+
+  // La puerta de QGIS necesita el artefacto guardado; el resto de ejecuciones
+  // no dejan archivos fuera de la carpeta temporal.
+  const QString artifact = qEnvironmentVariable("MINIGIS_PROJECT_ARTIFACT");
+  if (!artifact.isEmpty())
+  {
+    QDir().mkpath(QFileInfo(artifact).absolutePath());
+    QFile::remove(artifact);
+    if (!QFile::copy(workingPath, artifact))
+      check(QStringLiteral("se copia el proyecto para la puerta de QGIS"), false, artifact);
+  }
+
+  writeOut(ok ? QStringLiteral("Proyecto: todas las comprobaciones en OK")
+              : QStringLiteral("Proyecto: hay comprobaciones en FALLO"));
+  return ok ? ExitOk : ExitUsage;
+}
+
 } // namespace
 
 int main(int argc, char *argv[])
@@ -3474,6 +3979,9 @@ int main(int argc, char *argv[])
              || argument == QStringLiteral("--check-raster")
              || argument == QStringLiteral("--check-layers")
              || argument == QStringLiteral("--check-identify")
+             || argument == QStringLiteral("--project-info")
+             || argument == QStringLiteral("--save-project")
+             || argument == QStringLiteral("--check-project")
              || argument == QStringLiteral("--identify-at")
              || argument == QStringLiteral("--help") || argument == QStringLiteral("-h")
              || argument == QStringLiteral("--version") || argument == QStringLiteral("-v"))
@@ -3505,7 +4013,7 @@ int main(int argc, char *argv[])
   const QCommandLineOption infoOption({QStringLiteral("i"), QStringLiteral("info")},
                                       QStringLiteral("Muestra la informacion de las capas y sale"));
   const QCommandLineOption jsonOption(QStringLiteral("json"),
-                                      QStringLiteral("Salida en JSON (se usa junto a --info)"));
+                                      QStringLiteral("Salida en JSON (se usa junto a --info o --project-info)"));
   const QCommandLineOption driversOption(QStringLiteral("list-drivers"),
                                          QStringLiteral("Lista los drivers vectoriales de GDAL y sale"));
   const QCommandLineOption snapshotOption(QStringLiteral("snapshot"),
@@ -3595,6 +4103,16 @@ int main(int argc, char *argv[])
     QStringLiteral("check-identify"),
     QStringLiteral("Comprueba Identificar: geometria, huecos, radio, alcance, orden, panel, "
                    "marcador, seleccion/resalte, tabla y cache"));
+  const QCommandLineOption projectInfoOption(
+    QStringLiteral("project-info"),
+    QStringLiteral("Resume un proyecto de QGIS (.qgz/.qgs) y sale; con --json, salida para scripts"));
+  const QCommandLineOption saveProjectOption(
+    QStringLiteral("save-project"),
+    QStringLiteral("Guarda una copia del proyecto en <salida.qgz|salida.qgs> y sale"),
+    QStringLiteral("salida"));
+  const QCommandLineOption checkProjectOption(
+    QStringLiteral("check-project"),
+    QStringLiteral("Comprueba el contrato de un proyecto QGIS: lectura, cambios, guardado y reapertura"));
   const QCommandLineOption withAttributesOption(QStringLiteral("with-attributes"),
                                                QStringLiteral("Con --snapshot-window: incluye la tabla de atributos en la captura"));
   const QCommandLineOption indexShpOption(QStringLiteral("index-shp"),
@@ -3621,7 +4139,7 @@ int main(int argc, char *argv[])
                      snapshotRasterDialogOption, checkRasterOption, labelFieldOption, labelSizeOption,
                      labelMapSizeOption, noLabelsOption, rasterStretchOption, rasterBandsOption,
                      rasterOpacityOption, identifyAtOption, identifyRadiusOption, identifyLayerOption,
-                     checkIdentifyOption});
+                     checkIdentifyOption, projectInfoOption, saveProjectOption, checkProjectOption});
   parser.addPositionalArgument(QStringLiteral("archivo"),
                               QStringLiteral("Capas a cargar (opcional, se puede repetir)"),
                               QStringLiteral("[archivo...]"));
@@ -3772,6 +4290,108 @@ int main(int argc, char *argv[])
   }
 
   const QStringList layerPaths = collectLayerPaths(parser);
+  const QStringList projectPaths = collectProjectPaths(parser);
+
+  // Un proyecto no es una capa: --info no lo abre y avisa de la opcion correcta.
+  if (parser.isSet(infoOption) && !projectPaths.isEmpty())
+  {
+    writeErr(QStringLiteral("--info describe capas; para un proyecto usa: minigis --project-info --json <proyecto>"));
+    return ExitUsage;
+  }
+
+  // ---------------------------------------------------------------------
+  // Resumen de un proyecto de QGIS (sin ventana)
+  // ---------------------------------------------------------------------
+  if (parser.isSet(projectInfoOption))
+  {
+    if (projectPaths.size() != 1)
+    {
+      writeErr(QStringLiteral("Se necesita un proyecto: minigis --project-info --json <proyecto.qgz>"));
+      return ExitUsage;
+    }
+
+    const QString projectPath = projectPaths.first();
+    if (!QFileInfo::exists(projectPath))
+    {
+      writeErr(QStringLiteral("No existe el proyecto: %1").arg(QDir::toNativeSeparators(projectPath)));
+      return ExitFileNotFound;
+    }
+
+    std::unique_ptr<QgisProject> project;
+    Error error;
+    if (!QgisProject::load(projectPath, &project, &error))
+    {
+      writeErr(error.toText());
+      return ExitProjectFailed;
+    }
+
+    if (parser.isSet(jsonOption))
+    {
+      const QJsonDocument document(projectInfoJson(*project));
+      writeOut(QString::fromUtf8(document.toJson(QJsonDocument::Indented)).trimmed());
+    }
+    else
+    {
+      writeOut(projectInfoText(*project));
+    }
+    return ExitOk;
+  }
+
+  // ---------------------------------------------------------------------
+  // Guardar una copia del proyecto (sin ventana)
+  // ---------------------------------------------------------------------
+  if (parser.isSet(saveProjectOption))
+  {
+    if (projectPaths.size() != 1)
+    {
+      writeErr(QStringLiteral("Se necesita un proyecto: minigis --save-project <salida.qgz> <proyecto.qgz>"));
+      return ExitUsage;
+    }
+
+    const QString sourcePath = projectPaths.first();
+    if (!QFileInfo::exists(sourcePath))
+    {
+      writeErr(QStringLiteral("No existe el proyecto: %1").arg(QDir::toNativeSeparators(sourcePath)));
+      return ExitFileNotFound;
+    }
+
+    const QString targetPath = parser.value(saveProjectOption).trimmed();
+    if (targetPath.isEmpty() || !QgisProject::isProjectPath(targetPath))
+    {
+      writeErr(QStringLiteral("El destino debe ser .qgz o .qgs: «%1»").arg(targetPath));
+      return ExitUsage;
+    }
+
+    std::unique_ptr<QgisProject> project;
+    Error error;
+    if (!QgisProject::load(sourcePath, &project, &error))
+    {
+      writeErr(error.toText());
+      return ExitProjectFailed;
+    }
+
+    if (!project->save(targetPath, &error))
+    {
+      writeErr(error.toText());
+      return ExitProjectFailed;
+    }
+
+    writeOut(QStringLiteral("Proyecto guardado: %1").arg(QDir::toNativeSeparators(targetPath)));
+    return ExitOk;
+  }
+
+  // ---------------------------------------------------------------------
+  // Contrato del proyecto (sin ventana)
+  // ---------------------------------------------------------------------
+  if (parser.isSet(checkProjectOption))
+  {
+    if (projectPaths.size() != 1)
+    {
+      writeErr(QStringLiteral("Se necesita un proyecto: minigis --check-project <proyecto.qgz>"));
+      return ExitUsage;
+    }
+    return checkProject(projectPaths.first(), parser.isSet(jsonOption));
+  }
 
   // ---------------------------------------------------------------------
   // Diagnostico del indice de envolventes (sin ventana)
@@ -4173,7 +4793,18 @@ int main(int argc, char *argv[])
 
       // La interfaz carga en segundo plano (con barra de progreso); aqui se
       // espera a que termine procesando eventos, igual que en uso interactivo.
-      window.loadPaths(layerPaths);
+      if (!projectPaths.isEmpty())
+      {
+        if (!window.openProject(projectPaths.first()))
+          return ExitProjectFailed;
+        // --crs explicito manda sobre el SRC del proyecto (para capturas).
+        if (parser.isSet(crsOption))
+          window.canvas()->setDestinationEpsg(destinationEpsg);
+      }
+      else
+      {
+        window.loadPaths(layerPaths);
+      }
       if (!window.waitForLoading(300000))
       {
         writeErr(QStringLiteral("La carga de capas no termino a tiempo."));
@@ -4189,9 +4820,12 @@ int main(int argc, char *argv[])
       }
 
       // Etiquetas pedidas por linea de comandos (la interfaz las puede cambiar
-      // despues con el dialogo).
-      for (const std::shared_ptr<VectorLayer> &layer : window.canvas()->layers())
-        applyLabelOptions(layer, labelOptions);
+      // despues con el dialogo); en un proyecto se respetan las del proyecto.
+      if (labelOptions.parsed)
+      {
+        for (const std::shared_ptr<VectorLayer> &layer : window.canvas()->layers())
+          applyLabelOptions(layer, labelOptions);
+      }
 
       // La tabla de atributos permite comprobar de un vistazo que los valores se
       // leen bien (que es justo lo que se rompio con las capas indexadas).
@@ -4214,7 +4848,7 @@ int main(int argc, char *argv[])
 
       if (requestedExtent.isValid())
         window.canvas()->setExtent(requestedExtent);
-      else
+      else if (projectPaths.isEmpty())
         window.canvas()->zoomToFullExtent();
 
       // Identificar antes de la captura: deja el panel lleno y el marcador.
@@ -4374,8 +5008,18 @@ int main(int argc, char *argv[])
   MainWindow window;
   window.show();
 
-  if (!layerPaths.isEmpty())
-    window.loadPaths(layerPaths);
+  QStringList looseLayers;
+  for (const QString &path : layerPaths)
+  {
+    if (!QgisProject::isProjectPath(path))
+      looseLayers << path;
+  }
+
+  if (!projectPaths.isEmpty())
+    window.openProject(projectPaths.first());
+
+  if (!looseLayers.isEmpty())
+    window.loadPaths(looseLayers);
 
   return app.exec();
 }

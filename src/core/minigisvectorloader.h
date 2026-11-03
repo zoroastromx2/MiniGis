@@ -2,6 +2,7 @@
 
 #include <QObject>
 #include <QStringList>
+#include <QVector>
 
 #include <atomic>
 #include <memory>
@@ -12,6 +13,20 @@ namespace minigis
 {
 
 class VectorLayer;
+
+/**
+ * Peticion de una capa concreta de un archivo. La usa la apertura de proyectos
+ * QGIS: un GeoPackage puede contener decenas de capas y el proyecto carga solo
+ * las que declara, en su orden y con su nombre.
+ */
+struct LayerRequest
+{
+  QString path;
+  /** Nombre de la capa OGR; vacio = primera capa del archivo. */
+  QString layerName;
+  /** Indice ya resuelto (-1 = resolver por nombre o usar la primera). */
+  int layerIndex = -1;
+};
 
 /**
  * Carga de capas vectoriales en segundo plano.
@@ -78,6 +93,9 @@ public:
   /** Encola la carga de varias capas; vuelve inmediatamente. */
   void start(const QStringList &paths);
 
+  /** Encola la carga de capas concretas, en el orden de la lista. */
+  void startRequests(const QVector<LayerRequest> &requests);
+
   /** Pide cancelar la carga en curso (se atiende en el siguiente punto de control). */
   void cancel();
 
@@ -97,12 +115,19 @@ signals:
   /** Una capa no se pudo abrir; se informa y la carga continua con las demas. */
   void layerFailed(const QString &path, const QString &message, const QString &hint);
 
+  /** Una peticion de `startRequests` esta lista; `requestId` es su indice. */
+  void requestReady(const std::shared_ptr<minigis::VectorLayer> &layer, int requestId);
+
+  /** Una peticion de `startRequests` fallo; la carga continua con las demas. */
+  void requestFailed(int requestId, const QString &message, const QString &hint);
+
   /** Fin de la tanda: cuantas se cargaron, cuantas fallaron y si se cancelo. */
   void finished(int loaded, int failed, bool cancelled);
 
 private:
   /** Cuerpo del trabajo; se ejecuta en un hilo del pool. */
   void run(const QStringList &paths);
+  void runRequests(const QVector<LayerRequest> &requests);
 
   /** Emite el progreso global y devuelve false si hay que cancelar. */
   bool reportProgress(int percent, const QString &message);

@@ -100,7 +100,10 @@ public:
   static std::shared_ptr<RasterLayer> open(const QString &path, Error *error = nullptr);
 
   QString sourcePath() const { return mSourcePath; }
-  QString name() const { return mName; }
+  QString name() const { return mDisplayName.isEmpty() ? mName : mDisplayName; }
+
+  /** Nombre visible del proyecto cuando difiere del nombre del archivo. */
+  void setDisplayName(const QString &name) { mDisplayName = name; }
   QString driverName() const { return mDriverName; }
 
   int width() const { return mWidth; }
@@ -195,6 +198,7 @@ private:
   mutable std::map<int, std::shared_ptr<View>> mWarpedViews;
   QString mSourcePath;
   QString mName;
+  QString mDisplayName;
   QString mDriverName;
   int mWidth = 0;
   int mHeight = 0;

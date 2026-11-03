@@ -24,6 +24,38 @@ project(MiniGIS
         DESCRIPTION "Visor SIG minimo (Qt 6 + GDAL) para capas vectoriales y raster"
         LANGUAGES CXX)
 
+# --- Coherencia entre el compilador MSVC y su entorno ---------------------
+# Qt Creator aplica el entorno de un toolchain (INCLUDE/LIB) y puede conservar en
+# la cache un compilador de otra version. El STL de VS2026 rechaza el compilador
+# de VS2022 con un error C2338 poco claro; aqui se detecta y se explica.
+if(MSVC AND DEFINED ENV{INCLUDE})
+  set(_minigis_compiler_path "${CMAKE_CXX_COMPILER}")
+  string(REPLACE "\\" "/" _minigis_compiler_path "${_minigis_compiler_path}")
+  string(REGEX MATCH "VC/Tools/MSVC/([0-9]+\\.[0-9]+\\.[0-9]+)/bin/" _minigis_compiler_match "${_minigis_compiler_path}")
+  set(_minigis_compiler_version "${CMAKE_MATCH_1}")
+
+  set(_minigis_include_env "$ENV{INCLUDE}")
+  string(REPLACE "\\" "/" _minigis_include_env "${_minigis_include_env}")
+  string(REGEX MATCH "VC/Tools/MSVC/([0-9]+\\.[0-9]+\\.[0-9]+)/include" _minigis_include_match "${_minigis_include_env}")
+  set(_minigis_include_version "${CMAKE_MATCH_1}")
+
+  if(_minigis_compiler_version AND _minigis_include_version
+     AND NOT _minigis_include_version STREQUAL _minigis_compiler_version)
+    message(FATAL_ERROR
+      "El entorno de Visual Studio no coincide con el compilador de CMake.\n"
+      "  Compilador: ${CMAKE_CXX_COMPILER} (${_minigis_compiler_version})\n"
+      "  INCLUDE   : .../MSVC/${_minigis_include_version}/include\n"
+      "Esto ocurre cuando Qt Creator mezcla el entorno de Visual Studio 2026 con\n"
+      "un compilador de Visual Studio 2022 (error C2338 / STL1001).\n"
+      "Solucion:\n"
+      "  1) En Qt Creator, Projects > Build & Run, elige un kit cuyo compilador\n"
+      "     sea el mismo que su entorno (VS2022 con VS2022 o VS2026 con VS2026).\n"
+      "  2) Borra la carpeta de compilacion del kit y vuelve a configurar.\n"
+      "  3) Si abriste Qt Creator desde un Developer Command Prompt, cierralo y\n"
+      "     abrelo desde su acceso directo normal.")
+  endif()
+endif()
+
 # --- Opciones -------------------------------------------------------------
 option(MINIGIS_BUILD_TESTS "Construir pruebas de humo (CTest)" ON)
 
@@ -148,14 +180,14 @@ if(Qt6Core_VERSION AND NOT Qt6Core_VERSION VERSION_EQUAL Qt6_VERSION)
     "  Qt6      : ${Qt6_VERSION} (${Qt6_DIR})\n"
     "  Qt6Core  : ${Qt6Core_VERSION} (${Qt6Core_DIR})\n"
     "Define el kit completo, por ejemplo:\n"
-    "  -DQt6_DIR=D:/QtWin/6.10.3/msvc2022_64/lib/cmake/Qt6")
+    "  -DQt6_DIR=C:/Qtwin/6.10.3/msvc2022_64/lib/cmake/Qt6")
 endif()
 
 # Aviso si, aun asi, Qt ha salido del arbol de vcpkg.
 if(Qt6_DIR MATCHES "vcpkg" AND NOT MINIGIS_ALLOW_VCPKG_QT)
   message(WARNING
     "Qt6 se ha resuelto desde vcpkg (${Qt6_DIR}).\n"
-    "  MiniGIS esta pensado para el Qt oficial (D:/QtWin/6.10.3/msvc2022_64).\n"
+    "  MiniGIS esta pensado para el Qt oficial (C:/Qtwin/6.10.3/msvc2022_64).\n"
     "  Fija el kit con -DQt6_DIR=<Qt>/lib/cmake/Qt6 o define MINIGIS_ALLOW_VCPKG_QT=ON.")
 endif()
 

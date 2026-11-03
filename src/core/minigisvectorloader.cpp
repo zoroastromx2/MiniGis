@@ -6,6 +6,8 @@
 #include <QLoggingCategory>
 #include <QString>
 
+#include <algorithm>
+
 #include <QtConcurrent/QtConcurrentRun>
 
 namespace minigis
@@ -46,6 +48,31 @@ void VectorLayerLoader::start(const QStringList &paths)
   // El trabajo se ejecuta en el pool global; la lambda captura una copia de la
   // lista de rutas (no la referencia a mPaths, que podria cambiar).
   QtConcurrent::run([this, paths]() { run(paths); });
+}
+
+void VectorLayerLoader::startRequests(const QVector<LayerRequest> &requests)
+{
+  if (requests.isEmpty())
+    return;
+
+  if (mRunning.load())
+  {
+    emit progressChanged(0, QStringLiteral("Ya hay una carga en curso."));
+    return;
+  }
+
+  mCancelled.store(false);
+  mRunning.store(true);
+
+  QStringList paths;
+  for (const LayerRequest &request : requests)
+  {
+    if (!paths.contains(request.path))
+      paths << request.path;
+  }
+  emit started(paths);
+
+  QtConcurrent::run([this, requests]() { runRequests(requests); });
 }
 
 void VectorLayerLoader::cancel()
@@ -197,6 +224,130 @@ void VectorLayerLoader::run(const QStringList &paths)
 
     if (cancelled)
       break;
+  }
+
+  mRunning.store(false);
+
+  if (cancelled)
+    emit progressChanged(0, QStringLiteral("Carga cancelada."));
+  else
+    emit progressChanged(100, QStringLiteral("Carga terminada."));
+
+  emit finished(loaded, failed, cancelled);
+}
+
+void VectorLayerLoader::runRequests(const QVector<LayerRequest> &requests)
+{
+  const int total = requests.size();
+  int loaded = 0;
+  int failed = 0;
+  bool cancelled = false;
+
+  for (int requestIndex = 0; requestIndex < total; ++requestIndex)
+  {
+    if (mCancelled.load())
+    {
+      cancelled = true;
+      break;
+    }
+
+    const LayerRequest &request = requests.at(requestIndex);
+    const QString fileName = QFileInfo(request.path).fileName();
+    const int base = (100 * requestIndex) / total;
+    const int end = (100 * (requestIndex + 1)) / total;
+
+    int layerIndex = request.layerIndex;
+    const QString layerName = request.layerName;
+    const QString displayName = layerName.isEmpty() ? fileName : layerName;
+
+    if (layerIndex < 0)
+    {
+      if (!layerName.isEmpty())
+      {
+        Error listError;
+        const QStringList names = VectorLayer::layerNames(request.path, &listError);
+        if (names.isEmpty())
+        {
+          ++failed;
+          emit requestFailed(requestIndex, listError.message, listError.hint);
+          continue;
+        }
+
+        layerIndex = names.indexOf(layerName);
+        if (layerIndex < 0)
+        {
+          ++failed;
+          emit requestFailed(requestIndex,
+                             QStringLiteral("No se encontro la capa «%1» en «%2».").arg(layerName, fileName),
+                             QStringLiteral("Capas disponibles: %1").arg(names.join(QStringLiteral(", "))));
+          continue;
+        }
+      }
+      else
+      {
+        layerIndex = 0;
+      }
+    }
+
+    reportProgress(base, QStringLiteral("Abriendo «%1» — «%2»...").arg(fileName, displayName));
+
+    Error error;
+    const std::shared_ptr<VectorLayer> layer = VectorLayer::open(request.path, layerIndex, &error);
+    if (!layer)
+    {
+      ++failed;
+      emit requestFailed(requestIndex, QStringLiteral("Capa «%1»: %2").arg(displayName, error.message), error.hint);
+      continue;
+    }
+
+    if (mBuildGeometryStore)
+    {
+      const int innerBase = base + std::max(1, (end - base) / 10);
+      const int innerSpan = std::max(0, end - innerBase);
+      const QString progressName = QStringLiteral("%1 — %2").arg(fileName, layer->name());
+
+      QString storeError;
+      std::shared_ptr<GeometryStore> store = GeometryStore::buildFromLayer(
+        *layer, mDestinationEpsg, mStoreOptions,
+        [this, innerBase, innerSpan, &progressName](int percent, const QString &message) {
+          const int global = innerBase + (innerSpan * percent) / 100;
+          return reportProgress(global, QStringLiteral("%1 — %2").arg(progressName, message));
+        },
+        &storeError);
+
+      if (!store && mStoreOptions.allowEnvelopeFallback && !mCancelled.load())
+      {
+        reportProgress(innerBase, QStringLiteral("%1 — indexando envolventes...").arg(progressName));
+        QString envelopeError;
+        store = GeometryStore::buildEnvelopeIndex(
+          *layer, mDestinationEpsg, mStoreOptions,
+          [this, innerBase, innerSpan, &progressName](int percent, const QString &message) {
+            const int global = innerBase + (innerSpan * percent) / 100;
+            return reportProgress(global, QStringLiteral("%1 — %2").arg(progressName, message));
+          },
+          &envelopeError);
+        if (!store)
+          storeError = QStringLiteral("%1\n%2").arg(storeError, envelopeError);
+      }
+
+      if (store)
+      {
+        layer->setGeometryStore(store);
+      }
+      else if (mCancelled.load())
+      {
+        cancelled = true;
+        break;
+      }
+      else
+      {
+        // No es fatal: la capa se dibuja leyendo de GDAL en cada cuadro.
+        qCWarning(loadingLog) << "sin indice de dibujo" << request.path << storeError;
+      }
+    }
+
+    ++loaded;
+    emit requestReady(layer, requestIndex);
   }
 
   mRunning.store(false);

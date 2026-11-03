@@ -69,7 +69,14 @@ public:
   static QStringList layerNames(const QString &path, Error *error = nullptr);
 
   QString sourcePath() const { return mSourcePath; }
-  QString name() const { return mName; }
+  QString name() const { return mDisplayName.isEmpty() ? mName : mDisplayName; }
+
+  /**
+   * Nombre visible del proyecto cuando difiere del nombre de la capa OGR (por
+   * ejemplo, el `<layername>` de un proyecto QGIS). No cambia el nombre de la
+   * capa de datos ni la forma de abrirla.
+   */
+  void setDisplayName(const QString &name) { mDisplayName = name; }
   QString driverName() const { return mDriverName; }
   QString geometryTypeName() const { return mGeometryTypeName; }
   GeometryKind geometryKind() const { return mKind; }
@@ -208,6 +215,7 @@ private:
   int mLayerIndex = 0;
   int mLayerCount = 1;
   QString mName;
+  QString mDisplayName;
   QString mDriverName;
   QString mGeometryTypeName;
   GeometryKind mKind = GeometryKind::Unknown;

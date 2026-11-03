@@ -18,8 +18,8 @@ option(MINIGIS_USE_VCPKG_MANIFEST
 # --- Localizacion de vcpkg ------------------------------------------------
 if(DEFINED ENV{VCPKG_ROOT} AND EXISTS "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
   set(MINIGIS_VCPKG_ROOT "$ENV{VCPKG_ROOT}" CACHE PATH "Raiz de vcpkg")
-elseif(EXISTS "E:/vcpkg/scripts/buildsystems/vcpkg.cmake")
-  set(MINIGIS_VCPKG_ROOT "E:/vcpkg" CACHE PATH "Raiz de vcpkg")
+elseif(EXISTS "D:/VCPKG/scripts/buildsystems/vcpkg.cmake")
+  set(MINIGIS_VCPKG_ROOT "D:/VCPKG" CACHE PATH "Raiz de vcpkg")
 elseif(EXISTS "C:/vcpkg/scripts/buildsystems/vcpkg.cmake")
   set(MINIGIS_VCPKG_ROOT "C:/vcpkg" CACHE PATH "Raiz de vcpkg")
 else()

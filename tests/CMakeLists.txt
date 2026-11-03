@@ -214,6 +214,67 @@ add_test(NAME minigis.identificar-ventana
 set_tests_properties(minigis.identificar minigis.identificar-cli minigis.identificar-ventana
   PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+# --- Proyectos QGIS -------------------------------------------------------
+# Lectura sin ventana del fixture: capas, orden, visibilidad, SRC, extension,
+# simbologia, etiquetas y capa rota. El fixture se genera con
+# tests/qgis/make_project_fixture.py y se versiona.
+set(MINIGIS_SAMPLE_PROJECT "${MINIGIS_ROOT_DIR}/data/sample/projects/qgis_ejemplo.qgz")
+
+add_test(NAME minigis.proyecto-info
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DSAMPLE=${MINIGIS_SAMPLE_PROJECT}"
+          -DMODE=project-info
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
+set_tests_properties(minigis.proyecto-info PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+add_test(NAME minigis.proyecto-ventana
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DSAMPLE=${MINIGIS_SAMPLE_PROJECT}"
+          "-DOUT=${CMAKE_BINARY_DIR}/test-output/proyecto-ventana.png"
+          -DMODE=project-window
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
+add_test(NAME minigis.proyecto-copia
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DSAMPLE=${MINIGIS_SAMPLE_PROJECT}"
+          "-DOUT=${CMAKE_BINARY_DIR}/test-output/proyecto-copia.qgz"
+          -DMODE=save-project
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
+add_test(NAME minigis.proyecto-copia-qgs
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DSAMPLE=${MINIGIS_SAMPLE_PROJECT}"
+          "-DOUT=${CMAKE_BINARY_DIR}/test-output/proyecto-copia.qgs"
+          -DMODE=save-project
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
+set_tests_properties(minigis.proyecto-ventana minigis.proyecto-copia minigis.proyecto-copia-qgs
+  PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+add_test(NAME minigis.proyecto
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DSAMPLE=${MINIGIS_SAMPLE_PROJECT}"
+          -DMODE=check-project
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
+set_tests_properties(minigis.proyecto PROPERTIES
+  ENVIRONMENT "QT_QPA_PLATFORM=offscreen;MINIGIS_PROJECT_ARTIFACT=${CMAKE_BINARY_DIR}/test-output/proyecto-modificado.qgz")
+
+# Las piezas de persistencia (arbol XML y ZIP) se prueban tambien directamente,
+# sin pasar por la CLI: es la unica forma de comprobar la ida y vuelta del ZIP.
+add_executable(minigisproyectoiotest minigisproyectoiotest.cpp)
+target_link_libraries(minigisproyectoiotest PRIVATE MiniGIS::core Qt6::Core)
+
+add_test(NAME minigis.proyecto-io
+  COMMAND minigisproyectoiotest "${MINIGIS_SAMPLE_PROJECT}"
+          "${CMAKE_BINARY_DIR}/test-output/proyecto-io.qgz")
+
 # Puerta de rendimiento con un raster grande (opcional, como la del vectorial).
 set(MINIGIS_RASTER_BENCH_DATASET "" CACHE FILEPATH "Raster grande para la puerta de rendimiento raster")
 if(MINIGIS_RASTER_BENCH_DATASET)

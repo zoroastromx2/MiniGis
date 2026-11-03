@@ -20,4 +20,5 @@ vcpkg_installed/
 *.png
 !docs/*.png
 *.log
+*.aux.xml
 /.qtcreator

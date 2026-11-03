@@ -10,6 +10,14 @@ set(MINIGIS_CORE_SRCS
   minigislayerkind.cpp
   minigisrectangle.h
   minigisrectangle.cpp
+  minigisxmltree.h
+  minigisxmltree.cpp
+  minigisziparchive.h
+  minigisziparchive.cpp
+  minigisqgissymbology.h
+  minigisqgissymbology.cpp
+  minigisqgisproject.h
+  minigisqgisproject.cpp
   minigisstyle.h
   minigisstyle.cpp
   minigisrasterstyle.h
@@ -43,6 +51,10 @@ add_library(MiniGIS::core ALIAS minigis_core)
 
 target_include_directories(minigis_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 
+# minizip lo instala vcpkg como dependencia de GDAL; se usa para leer y escribir
+# el ZIP de los proyectos .qgz (la API C clasica zip.h/unzip.h).
+find_package(MINIZIP CONFIG REQUIRED)
+
 target_link_libraries(minigis_core PRIVATE MiniGIS::optimizations)
 
 target_link_libraries(minigis_core
@@ -50,6 +62,7 @@ target_link_libraries(minigis_core
     Qt6::Core
     Qt6::Gui
     Qt6::Concurrent
+    MINIZIP::minizip
     ${MINIGIS_GDAL_TARGET}
 )
 

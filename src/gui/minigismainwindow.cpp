@@ -8,6 +8,7 @@
 #include "minigislayerpanel.h"
 #include "minigismapcanvas.h"
 #include "minigislabeldialog.h"
+#include "minigisqgisproject.h"
 #include "minigisrasterlayer.h"
 #include "minigisrasterstyledialog.h"
 #include "minigisstyledialog.h"
@@ -60,6 +61,10 @@ const char *kOpenFilter =
   "Raster (*.tif *.tiff *.img *.vrt *.jp2 *.png *.jpg *.jpeg *.bmp);;"
   "Shapefile (*.shp);;GeoTIFF (*.tif *.tiff);;Todos los archivos (*)";
 
+/** Proyectos de QGIS: el .qgz comprimido es el habitual. */
+const char *kProjectFilter =
+  "Proyectos de QGIS (*.qgz *.qgs);;Proyecto comprimido (*.qgz);;Proyecto XML (*.qgs);;Todos los archivos (*)";
+
 QString formatNumber(double value, int precision = 6)
 {
   return QString::number(value, 'f', precision);
@@ -87,9 +92,13 @@ MainWindow::MainWindow(QWidget *parent, bool restoreSettings)
   connect(mCanvas, &MapCanvas::cursorMoved, this, &MainWindow::onCursorMoved);
   connect(mCanvas, &MapCanvas::cursorLeft, this, &MainWindow::onCursorLeft);
   connect(mCanvas, &MapCanvas::scaleChanged, this, &MainWindow::onScaleChanged);
-  connect(mCanvas, &MapCanvas::filesDropped, this, [this](const QStringList &paths) { loadPaths(paths); });
+  connect(mCanvas, &MapCanvas::filesDropped, this, [this](const QStringList &paths) { openDroppedPaths(paths); });
   connect(mCanvas, &MapCanvas::statusMessage, this, &MainWindow::onStatusMessage);
   connect(mCanvas, &MapCanvas::identifyRequested, this, &MainWindow::onIdentifyRequested);
+  connect(mCanvas, &MapCanvas::extentChanged, this, [this](const Rectangle &) {
+    if (mProject && !mProjectLoadActive)
+      updateWindowTitle();
+  });
 
   // Carga en segundo plano: abrir y leer una capa pesada ya no bloquea la
   // ventana, y el progreso se puede mostrar mientras tanto.
@@ -97,6 +106,8 @@ MainWindow::MainWindow(QWidget *parent, bool restoreSettings)
   connect(mLoader, &VectorLayerLoader::progressChanged, this, &MainWindow::onLoadProgress);
   connect(mLoader, &VectorLayerLoader::layerReady, this, &MainWindow::onLayerLoaded);
   connect(mLoader, &VectorLayerLoader::layerFailed, this, &MainWindow::onLayerLoadFailed);
+  connect(mLoader, &VectorLayerLoader::requestReady, this, &MainWindow::onProjectLayerReady);
+  connect(mLoader, &VectorLayerLoader::requestFailed, this, &MainWindow::onProjectLayerFailed);
   connect(mLoader, &VectorLayerLoader::finished, this, &MainWindow::onLoadFinished);
 
   readSettings();
@@ -116,6 +127,22 @@ void MainWindow::createActions()
   mOpenAction->setShortcut(QKeySequence::Open);
   mOpenAction->setStatusTip(QStringLiteral("Abrir una capa vectorial (shapefile, GeoJSON, GeoPackage...)"));
   connect(mOpenAction, &QAction::triggered, this, &MainWindow::openLayerDialog);
+
+  mOpenProjectAction = new QAction(QStringLiteral("Abrir &proyecto..."), this);
+  mOpenProjectAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+O")));
+  mOpenProjectAction->setStatusTip(QStringLiteral("Abrir un proyecto de QGIS (.qgz o .qgs)"));
+  connect(mOpenProjectAction, &QAction::triggered, this, &MainWindow::openProjectDialog);
+
+  mSaveProjectAction = new QAction(QStringLiteral("&Guardar proyecto"), this);
+  mSaveProjectAction->setShortcut(QKeySequence::Save);
+  mSaveProjectAction->setStatusTip(QStringLiteral("Guardar los cambios en el proyecto abierto"));
+  connect(mSaveProjectAction, &QAction::triggered, this, &MainWindow::saveProject);
+  mSaveProjectAction->setEnabled(false);
+
+  mSaveProjectAsAction = new QAction(QStringLiteral("Guardar proyecto &como..."), this);
+  mSaveProjectAsAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+S")));
+  connect(mSaveProjectAsAction, &QAction::triggered, this, &MainWindow::saveProjectAs);
+  mSaveProjectAsAction->setEnabled(false);
 
   mSampleAction = new QAction(QStringLiteral("Cargar &ejemplo"), this);
   mSampleAction->setStatusTip(QStringLiteral("Carga los shapefiles de ejemplo incluidos en data/sample"));
@@ -192,8 +219,12 @@ void MainWindow::createMenusAndToolBar()
 {
   QMenu *fileMenu = menuBar()->addMenu(QStringLiteral("&Archivo"));
   fileMenu->addAction(mOpenAction);
+  fileMenu->addAction(mOpenProjectAction);
   mRecentMenu = fileMenu->addMenu(QStringLiteral("Abrir recientes"));
   fileMenu->addAction(mSampleAction);
+  fileMenu->addSeparator();
+  fileMenu->addAction(mSaveProjectAction);
+  fileMenu->addAction(mSaveProjectAsAction);
   fileMenu->addSeparator();
   fileMenu->addAction(mCloseAction);
   fileMenu->addAction(mCloseAllAction);
@@ -221,6 +252,7 @@ void MainWindow::createMenusAndToolBar()
   toolBar->setObjectName(QStringLiteral("mainToolBar"));
   toolBar->setMovable(false);
   toolBar->addAction(mOpenAction);
+  toolBar->addAction(mOpenProjectAction);
   toolBar->addAction(mSampleAction);
   toolBar->addSeparator();
   toolBar->addAction(mZoomOutAction);
@@ -482,6 +514,12 @@ void MainWindow::onLayerLoadFailed(const QString &path, const QString &message, 
 
 void MainWindow::onLoadFinished(int loaded, int failed, bool cancelled)
 {
+  if (mProjectLoadActive)
+  {
+    finishProjectLoad();
+    return;
+  }
+
   setLoadIndicatorVisible(false);
 
   // Ahora que se sabe todo lo que aportaba la tanda se encuadra su union: si se
@@ -712,6 +750,458 @@ int MainWindow::loadPaths(const QStringList &paths)
   return queued;
 }
 
+bool MainWindow::openProject(const QString &path)
+{
+  if (path.isEmpty())
+    return false;
+
+  if (mLoader && mLoader->isRunning())
+  {
+    statusBar()->showMessage(QStringLiteral("Ya hay una carga en curso; espera o pulsa Cancelar."), kStatusTimeoutMs);
+    return false;
+  }
+
+  if (mProject && !maybeSaveProject())
+    return false;
+
+  Error error;
+  std::unique_ptr<QgisProject> project;
+  if (!QgisProject::load(path, &project, &error))
+  {
+    showError(QStringLiteral("No se pudo abrir el proyecto"), error);
+    return false;
+  }
+
+  mProject = std::move(project);
+  mProjectPath = path;
+  mUnavailableProjectLayers.clear();
+  mPendingProjectIds.clear();
+  mProjectVectorLayers.clear();
+  mProjectRasterLayers.clear();
+
+  // El proyecto sustituye al mapa actual; el estado «modificado» y el aviso de
+  // cambios sin guardar llegan con el ciclo de vida del proyecto.
+  mCurrentRaster.reset();
+  mCanvas->setCurrentLayer(nullptr);
+  mCanvas->clearLayers();
+  mCanvas->clearRasterLayers();
+  mCanvas->setDestinationEpsg(mProject->canvasEpsg());
+
+  for (const UnavailableProjectLayer &unavailable : mProject->unavailableLayers())
+    mUnavailableProjectLayers << QStringLiteral("%1: %2").arg(unavailable.name, unavailable.reason);
+
+  QVector<LayerRequest> requests;
+  for (const ProjectLayer &layer : mProject->layers())
+  {
+    if (layer.type == ProjectLayer::Type::Vector)
+    {
+      LayerRequest request;
+      request.path = layer.sourcePath;
+      request.layerName = layer.layerName;
+      requests.append(request);
+      mPendingProjectIds << layer.id;
+    }
+    else if (layer.type == ProjectLayer::Type::Raster)
+    {
+      Error rasterError;
+      const std::shared_ptr<RasterLayer> raster = RasterLayer::open(layer.sourcePath, &rasterError);
+      if (!raster)
+      {
+        mUnavailableProjectLayers << QStringLiteral("%1: %2").arg(layer.name, rasterError.message);
+        continue;
+      }
+
+      raster->setStyle(layer.raster);
+      raster->setVisible(layer.visible);
+      raster->setDisplayName(layer.name);
+      mCanvas->addRasterLayer(raster, false, true);
+      mProjectRasterLayers.insert(layer.id, raster);
+    }
+  }
+
+  mLastDirectory = QFileInfo(path).absolutePath();
+  addRecentFile(path);
+  updateWindowTitle();
+
+  if (!requests.isEmpty())
+  {
+    mProjectLoadActive = true;
+    mLoader->setDestinationEpsg(mProject->canvasEpsg());
+    setLoadIndicatorVisible(true);
+    mLoadProgress->setValue(0);
+    mLoadLabel->setText(QStringLiteral("Abriendo el proyecto «%1»...").arg(QFileInfo(path).fileName()));
+    mLoader->startRequests(requests);
+  }
+  else
+  {
+    finishProjectLoad();
+  }
+
+  return true;
+}
+
+void MainWindow::openProjectDialog()
+{
+  const QString file = QFileDialog::getOpenFileName(this, QStringLiteral("Abrir proyecto de QGIS"), mLastDirectory,
+                                                    QString::fromUtf8(kProjectFilter));
+  if (!file.isEmpty())
+    openProject(file);
+}
+
+void MainWindow::saveProject()
+{
+  if (!mProject)
+    return;
+
+  if (mProjectPath.isEmpty())
+  {
+    saveProjectAs();
+    return;
+  }
+
+  const ProjectSnapshot snapshot = buildProjectSnapshot();
+  Error error;
+  if (!mProject->save(mProjectPath, snapshot, &error))
+  {
+    showError(QStringLiteral("No se pudo guardar el proyecto"), error);
+    return;
+  }
+
+  mSavedProjectSignature = projectSnapshotSignature(snapshot);
+  reloadProjectMetadata();
+  addRecentFile(mProjectPath);
+  updateWindowTitle();
+  statusBar()->showMessage(QStringLiteral("Proyecto guardado en «%1».").arg(QDir::toNativeSeparators(mProjectPath)),
+                           kStatusTimeoutMs);
+}
+
+void MainWindow::saveProjectAs()
+{
+  if (!mProject)
+    return;
+
+  const QString suggested = mProjectPath.isEmpty() ? QStringLiteral("proyecto.qgz") : mProjectPath;
+  QString target = QFileDialog::getSaveFileName(this, QStringLiteral("Guardar proyecto como"), suggested,
+                                                QString::fromUtf8(kProjectFilter));
+  if (target.isEmpty())
+    return;
+
+  if (!QgisProject::isProjectPath(target))
+    target += QStringLiteral(".qgz");
+
+  const ProjectSnapshot snapshot = buildProjectSnapshot();
+  Error error;
+  if (!mProject->save(target, snapshot, &error))
+  {
+    showError(QStringLiteral("No se pudo guardar el proyecto"), error);
+    return;
+  }
+
+  mProjectPath = target;
+  mSavedProjectSignature = projectSnapshotSignature(snapshot);
+  reloadProjectMetadata();
+  mLastDirectory = QFileInfo(target).absolutePath();
+  addRecentFile(target);
+  updateWindowTitle();
+  statusBar()->showMessage(QStringLiteral("Proyecto guardado en «%1».").arg(QDir::toNativeSeparators(target)),
+                           kStatusTimeoutMs);
+}
+
+void MainWindow::openDroppedPaths(const QStringList &paths)
+{
+  QStringList projects;
+  QStringList layerPaths;
+  for (const QString &path : paths)
+  {
+    if (QgisProject::isProjectPath(path))
+      projects << path;
+    else
+      layerPaths << path;
+  }
+
+  if (projects.size() > 1)
+    statusBar()->showMessage(QStringLiteral("Solo se abre un proyecto a la vez; se usara el primero."),
+                             kStatusTimeoutMs);
+  if (!projects.isEmpty())
+    openProject(projects.first());
+  if (!layerPaths.isEmpty())
+    loadPaths(layerPaths);
+}
+
+void MainWindow::finishProjectLoad()
+{
+  setLoadIndicatorVisible(false);
+
+  if (mProject)
+  {
+    if (mProject->hasExtent() && mProject->extentEpsg() == mProject->canvasEpsg())
+      mCanvas->setExtent(mProject->extent());
+    else
+      mCanvas->zoomToFullExtent();
+    mCanvas->refreshMap();
+  }
+
+  mSavedProjectSignature = projectSnapshotSignature(buildProjectSnapshot());
+  mProjectLoadActive = false;
+
+  syncLayerPanel();
+  replaceAttributeModel();
+  updateWindowTitle();
+  updateCrsLabel();
+
+  const int available = static_cast<int>(mCanvas->layers().size() + mCanvas->rasterLayers().size());
+  statusBar()->showMessage(QStringLiteral("Proyecto «%1» abierto: %2 capa(s)%3.")
+                             .arg(QFileInfo(mProjectPath).fileName())
+                             .arg(available)
+                             .arg(mUnavailableProjectLayers.isEmpty()
+                                    ? QString()
+                                    : QStringLiteral(" (%1 no disponible(s))").arg(mUnavailableProjectLayers.size())),
+                           kStatusTimeoutMs);
+
+  showUnavailableProjectLayers();
+}
+
+const ProjectLayer *MainWindow::projectLayerById(const QString &id) const
+{
+  if (!mProject)
+    return nullptr;
+  for (const ProjectLayer &layer : mProject->layers())
+  {
+    if (layer.id == id)
+      return &layer;
+  }
+  return nullptr;
+}
+
+int MainWindow::projectLayerCount() const
+{
+  return mProject ? static_cast<int>(mProject->layers().size()) : 0;
+}
+
+bool MainWindow::hasProject() const
+{
+  return mProject != nullptr;
+}
+
+ProjectSnapshot MainWindow::buildProjectSnapshot() const
+{
+  ProjectSnapshot snapshot;
+  snapshot.crsEpsg = mCanvas->destinationEpsg();
+  snapshot.extent = mCanvas->extent();
+  snapshot.hasExtent = snapshot.extent.isValid();
+
+  const auto vectorId = [this](const std::shared_ptr<VectorLayer> &layer) -> QString {
+    for (auto iterator = mProjectVectorLayers.cbegin(); iterator != mProjectVectorLayers.cend(); ++iterator)
+    {
+      if (iterator.value() == layer)
+        return iterator.key();
+    }
+    return QString();
+  };
+  const auto rasterId = [this](const std::shared_ptr<RasterLayer> &layer) -> QString {
+    for (auto iterator = mProjectRasterLayers.cbegin(); iterator != mProjectRasterLayers.cend(); ++iterator)
+    {
+      if (iterator.value() == layer)
+        return iterator.key();
+    }
+    return QString();
+  };
+
+  // Rasters primero: MiniGIS los dibuja siempre debajo del vectorial.
+  for (const std::shared_ptr<RasterLayer> &raster : mCanvas->rasterLayers())
+  {
+    if (!raster)
+      continue;
+
+    ProjectLayer layer;
+    const QString id = rasterId(raster);
+    const ProjectLayer *entry = id.isEmpty() ? nullptr : projectLayerById(id);
+    if (entry)
+      layer = *entry;
+    else
+    {
+      layer.type = ProjectLayer::Type::Raster;
+      layer.name = raster->name();
+      layer.provider = QStringLiteral("gdal");
+      layer.sourcePath = raster->sourcePath();
+      layer.crsEpsg = raster->crsEpsg();
+      layer.crsWkt = raster->crsWkt();
+    }
+
+    layer.type = ProjectLayer::Type::Raster;
+    layer.visible = raster->isVisible();
+    layer.raster = raster->style();
+    snapshot.layers.append(layer);
+  }
+
+  for (const std::shared_ptr<VectorLayer> &vector : mCanvas->layers())
+  {
+    if (!vector)
+      continue;
+
+    ProjectLayer layer;
+    const QString id = vectorId(vector);
+    const ProjectLayer *entry = id.isEmpty() ? nullptr : projectLayerById(id);
+    if (entry)
+      layer = *entry;
+    else
+    {
+      layer.type = ProjectLayer::Type::Vector;
+      layer.name = vector->name();
+      layer.provider = QStringLiteral("ogr");
+      layer.sourcePath = vector->sourcePath();
+      layer.layerName = vector->layerCount() > 1 ? vector->name() : QString();
+      layer.crsEpsg = vector->crsEpsg();
+      layer.crsWkt = vector->crsWkt();
+    }
+
+    layer.type = ProjectLayer::Type::Vector;
+    layer.visible = vector->isVisible();
+    layer.style = vector->style();
+    layer.labels = vector->labelStyle();
+    layer.geometryKind = vector->geometryKind();
+    layer.geometryName = vector->geometryTypeName();
+    snapshot.layers.append(layer);
+  }
+
+  return snapshot;
+}
+
+bool MainWindow::isProjectModified() const
+{
+  if (!mProject || mProjectPath.isEmpty() || mProjectLoadActive || mSavedProjectSignature.isEmpty())
+    return false;
+  return projectSnapshotSignature(buildProjectSnapshot()) != mSavedProjectSignature;
+}
+
+void MainWindow::reloadProjectMetadata()
+{
+  if (!mProject || mProjectPath.isEmpty())
+    return;
+
+  Error error;
+  std::unique_ptr<QgisProject> reloaded;
+  if (!QgisProject::load(mProjectPath, &reloaded, &error))
+    return;
+
+  mProject = std::move(reloaded);
+
+  const auto keyFor = [](const QString &path, const QString &name) {
+    return path + QLatin1Char('\n') + name;
+  };
+
+  QHash<QString, QStringList> idsByKey;
+  for (const ProjectLayer &layer : mProject->layers())
+    idsByKey[keyFor(layer.sourcePath, layer.name)].append(layer.id);
+
+  mProjectVectorLayers.clear();
+  mProjectRasterLayers.clear();
+
+  for (const std::shared_ptr<VectorLayer> &vector : mCanvas->layers())
+  {
+    if (!vector)
+      continue;
+    auto iterator = idsByKey.find(keyFor(vector->sourcePath(), vector->name()));
+    if (iterator == idsByKey.end() || iterator->isEmpty())
+      continue;
+    mProjectVectorLayers.insert(iterator->takeFirst(), vector);
+  }
+
+  for (const std::shared_ptr<RasterLayer> &raster : mCanvas->rasterLayers())
+  {
+    if (!raster)
+      continue;
+    auto iterator = idsByKey.find(keyFor(raster->sourcePath(), raster->name()));
+    if (iterator == idsByKey.end() || iterator->isEmpty())
+      continue;
+    mProjectRasterLayers.insert(iterator->takeFirst(), raster);
+  }
+
+  mSavedProjectSignature = projectSnapshotSignature(buildProjectSnapshot());
+}
+
+bool MainWindow::maybeSaveProject()
+{
+  if (!isProjectModified())
+    return true;
+
+  // En los modos sin ventana no se abren dialogos modales.
+  if (!mRestoreSettings)
+    return true;
+
+  QMessageBox box(this);
+  box.setIcon(QMessageBox::Warning);
+  box.setWindowTitle(QStringLiteral("Cambios sin guardar"));
+  box.setText(QStringLiteral("El proyecto «%1» tiene cambios sin guardar.").arg(QFileInfo(mProjectPath).fileName()));
+  box.setInformativeText(QStringLiteral("¿Quieres guardarlos antes de continuar?"));
+  box.setStandardButtons(QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel);
+  box.setDefaultButton(QMessageBox::Save);
+
+  const int result = box.exec();
+  if (result == QMessageBox::Save)
+  {
+    saveProject();
+    return !isProjectModified();
+  }
+  if (result == QMessageBox::Discard)
+    return true;
+
+  return false;
+}
+
+void MainWindow::showUnavailableProjectLayers()
+{
+  if (mUnavailableProjectLayers.isEmpty())
+    return;
+
+  if (!mRestoreSettings)
+  {
+    statusBar()->showMessage(QStringLiteral("El proyecto tiene %1 capa(s) no disponible(s); se conservan en el archivo.")
+                               .arg(mUnavailableProjectLayers.size()),
+                             kStatusTimeoutMs);
+    return;
+  }
+
+  QMessageBox box(this);
+  box.setIcon(QMessageBox::Warning);
+  box.setWindowTitle(QStringLiteral("Capas no disponibles"));
+  box.setText(QStringLiteral("El proyecto declara %1 capa(s) que no se han podido abrir. "
+                             "Se conservan en el archivo al guardar.")
+                .arg(mUnavailableProjectLayers.size()));
+  box.setDetailedText(mUnavailableProjectLayers.join(QLatin1Char('\n')));
+  box.setStandardButtons(QMessageBox::Ok);
+  box.exec();
+}
+
+void MainWindow::onProjectLayerReady(const std::shared_ptr<VectorLayer> &layer, int requestId)
+{
+  if (!mProjectLoadActive || requestId < 0 || requestId >= mPendingProjectIds.size() || !layer)
+    return;
+
+  const ProjectLayer *entry = projectLayerById(mPendingProjectIds.at(requestId));
+  layer->setStyle(entry ? entry->style : layer->style());
+  if (entry)
+  {
+    layer->setDisplayName(entry->name);
+    layer->setLabelStyle(entry->labels);
+    layer->setVisible(entry->visible);
+    mProjectVectorLayers.insert(entry->id, layer);
+  }
+
+  mCanvas->addLayer(layer, false, true);
+}
+
+void MainWindow::onProjectLayerFailed(int requestId, const QString &message, const QString &hint)
+{
+  Q_UNUSED(hint);
+  if (!mProjectLoadActive || requestId < 0 || requestId >= mPendingProjectIds.size())
+    return;
+
+  const ProjectLayer *entry = projectLayerById(mPendingProjectIds.at(requestId));
+  const QString name = entry ? entry->name : QFileInfo(mPendingProjectIds.at(requestId)).fileName();
+  mUnavailableProjectLayers << QStringLiteral("%1: %2").arg(name, message);
+}
+
 void MainWindow::openLayerDialog()
 {
   const QStringList files = QFileDialog::getOpenFileNames(
@@ -785,8 +1275,24 @@ void MainWindow::closeCurrentLayer()
 
 void MainWindow::closeAllLayers()
 {
+  if (mProject && !maybeSaveProject())
+    return;
+
   mCurrentRaster.reset();
   mCanvas->clearLayers();
+  mCanvas->clearRasterLayers();
+
+  mProject.reset();
+  mProjectPath.clear();
+  mPendingProjectIds.clear();
+  mProjectVectorLayers.clear();
+  mProjectRasterLayers.clear();
+  mUnavailableProjectLayers.clear();
+  mSavedProjectSignature.clear();
+  mProjectLoadActive = false;
+
+  updateWindowTitle();
+  updateCrsLabel();
 }
 
 void MainWindow::zoomToCurrentLayer()
@@ -828,6 +1334,7 @@ void MainWindow::editCurrentLayerStyle()
     // evita depender de ello.
     mCanvas->refreshMap();
 
+    updateWindowTitle();
     statusBar()->showMessage(QStringLiteral("Simbologia actualizada en «%1».").arg(layer->name()), kStatusTimeoutMs);
   }
 }
@@ -846,6 +1353,7 @@ void MainWindow::editCurrentRasterStyle()
     // invalidar aqui hace que el cambio se vea sin mover la vista.
     mCanvas->refreshMap();
 
+    updateWindowTitle();
     statusBar()->showMessage(QStringLiteral("Estilo del raster «%1» actualizado.").arg(mCurrentRaster->name()),
                              kStatusTimeoutMs);
   }
@@ -883,6 +1391,7 @@ void MainWindow::editCurrentLayerLabels()
   // Redibujado inmediato: descarta el cuadro cacheado y repinta. Las etiquetas se
   // dibujan despues de la geometria, asi que el cambio se ve al instante.
   mCanvas->refreshMap();
+  updateWindowTitle();
 
   if (style.enabled && !style.fields.isEmpty())
   {
@@ -995,6 +1504,7 @@ void MainWindow::onLayerVisibilityChanged(const LayerEntry &entry, bool visible)
 
   // El mapa se actualiza en el acto: descarta el cuadro cacheado y repinta.
   mCanvas->refreshMap();
+  updateWindowTitle();
 
   statusBar()->showMessage(QStringLiteral("Capa «%1» %2.")
                              .arg(name, visible ? QStringLiteral("visible") : QStringLiteral("oculta")),
@@ -1457,6 +1967,10 @@ void MainWindow::updateWindowTitle()
   const int layerCount = static_cast<int>(mCanvas->layers().size() + mCanvas->rasterLayers().size());
 
   QString title = QStringLiteral("MiniGIS %1").arg(QString::fromUtf8(MINIGIS_VERSION));
+  const bool modified = mProject != nullptr && !mProjectPath.isEmpty() && isProjectModified();
+  if (!mProjectPath.isEmpty())
+    title += QStringLiteral(" — %1%2").arg(QFileInfo(mProjectPath).fileName(),
+                                           modified ? QStringLiteral("*") : QString());
   if (raster)
   {
     title += QStringLiteral(" — %1 (%2x%3, %4 bandas) — %5 capa(s)")
@@ -1481,6 +1995,8 @@ void MainWindow::updateWindowTitle()
   mCloseAction->setEnabled(hasCurrent);
   mStyleAction->setEnabled(hasCurrent);
   mZoomLayerAction->setEnabled(hasCurrent);
+  mSaveProjectAction->setEnabled(mProject != nullptr && !mProjectPath.isEmpty() && modified);
+  mSaveProjectAsAction->setEnabled(mProject != nullptr);
 
   // Etiquetas y tabla de atributos solo tienen sentido en capas vectoriales.
   const bool hasVector = layer != nullptr && raster == nullptr;
@@ -1644,6 +2160,12 @@ void MainWindow::writeSettings()
 
 void MainWindow::closeEvent(QCloseEvent *event)
 {
+  if (!maybeSaveProject())
+  {
+    event->ignore();
+    return;
+  }
+
   writeSettings();
   QMainWindow::closeEvent(event);
 }

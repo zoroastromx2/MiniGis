@@ -427,6 +427,148 @@ elseif(MODE STREQUAL "identify-window")
     message(STATUS "minigis --snapshot-window + --identify-at OK: ${_size} bytes")
   endif()
 
+elseif(MODE STREQUAL "project-info")
+  # Contrato de lectura de un proyecto QGIS: capas, orden, visibilidad, SRC,
+  # extension, estilos, etiquetas y capas no disponibles.
+  execute_process(
+    COMMAND "${MINIGIS_EXE}" --project-info --json "${SAMPLE}"
+    RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+  if(NOT _rc EQUAL EXPECT_EXIT)
+    message(FATAL_ERROR "minigis --project-info fallo (codigo ${_rc}, esperado ${EXPECT_EXIT})\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")
+  endif()
+  if(EXPECT_EXIT EQUAL 0)
+    foreach(_key IN ITEMS
+            "\"crsEpsg\": 25830"
+            "\"canvasEpsg\": 25830"
+            "\"layerCount\": 5"
+            "\"available\": 4"
+            "\"name\": \"cities\""
+            "\"name\": \"parcels_categorizado\""
+            "\"name\": \"orto\""
+            "\"type\": \"raster\""
+            "\"visible\": false"
+            "\"styleRepresentable\": false"
+            "\"labelsRepresentable\": true"
+            "\"minimumScale\": 66.14"
+            "\"maximumScale\": 1.3229"
+            "\"haloWidth\": 5.6693"
+            "\"opacity\": 80"
+            "\"no_existe\""
+            "\"no existe el archivo")
+      if(NOT _out MATCHES "${_key}")
+        message(FATAL_ERROR "La salida de --project-info no contiene ${_key}:\n${_out}")
+      endif()
+    endforeach()
+    message(STATUS "minigis --project-info OK")
+  endif()
+
+elseif(MODE STREQUAL "project-window")
+  # Captura de la interfaz con un proyecto abierto: panel, titulo y mapa deben
+  # reflejar el proyecto, no una lista de capas suelta.
+  get_filename_component(_outdir "${OUT}" DIRECTORY)
+  file(MAKE_DIRECTORY "${_outdir}")
+  if(EXISTS "${OUT}")
+    file(REMOVE "${OUT}")
+  endif()
+  execute_process(
+    COMMAND "${MINIGIS_EXE}" --snapshot-window "${OUT}" "${SAMPLE}"
+    RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+  if(NOT _rc EQUAL EXPECT_EXIT)
+    message(FATAL_ERROR "minigis --snapshot-window del proyecto fallo (codigo ${_rc})\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")
+  endif()
+  if(EXPECT_EXIT EQUAL 0)
+    if(NOT EXISTS "${OUT}")
+      message(FATAL_ERROR "No se genero la captura del proyecto: ${OUT}")
+    endif()
+    file(SIZE "${OUT}" _size)
+    if(_size LESS 10000)
+      message(FATAL_ERROR "La captura del proyecto parece vacia (${_size} bytes)")
+    endif()
+    message(STATUS "minigis --snapshot-window del proyecto OK: ${_size} bytes")
+  endif()
+
+elseif(MODE STREQUAL "save-project")
+  # Guardar una copia (en la misma carpeta o en otra) y reabrirla: las rutas
+  # relativas se reescriben y el proyecto sigue teniendo sus 4 capas abribles.
+  get_filename_component(_outdir "${OUT}" DIRECTORY)
+  file(MAKE_DIRECTORY "${_outdir}")
+  file(REMOVE "${OUT}" "${OUT}.bak")
+
+  execute_process(
+    COMMAND "${MINIGIS_EXE}" --save-project "${OUT}" "${SAMPLE}"
+    RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+  if(NOT _rc EQUAL 0)
+    message(FATAL_ERROR "minigis --save-project fallo (codigo ${_rc})\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")
+  endif()
+  if(NOT EXISTS "${OUT}")
+    message(FATAL_ERROR "No se creo el proyecto guardado: ${OUT}")
+  endif()
+
+  execute_process(
+    COMMAND "${MINIGIS_EXE}" --project-info --json "${OUT}"
+    RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+  if(NOT _rc EQUAL 0)
+    message(FATAL_ERROR "El proyecto guardado no se puede leer (codigo ${_rc})\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")
+  endif()
+  foreach(_key IN ITEMS "\"available\": 4" "\"layerCount\": 5" "\"crsEpsg\": 25830")
+    if(NOT _out MATCHES "${_key}")
+      message(FATAL_ERROR "El proyecto guardado no conserva ${_key}:\n${_out}")
+    endif()
+  endforeach()
+  if(OUT MATCHES "\\.qgs$")
+    if(NOT _out MATCHES "\"container\": \"qgs\"")
+      message(FATAL_ERROR "El proyecto guardado en .qgs no se reconoce como XML plano:\n${_out}")
+    endif()
+  else()
+    if(NOT _out MATCHES "\"container\": \"qgz\"")
+      message(FATAL_ERROR "El proyecto guardado en .qgz no se reconoce como comprimido:\n${_out}")
+    endif()
+  endif()
+
+  # Un segundo guardado sobre el mismo archivo debe dejar la version anterior.
+  execute_process(
+    COMMAND "${MINIGIS_EXE}" --save-project "${OUT}" "${SAMPLE}"
+    RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+  if(NOT _rc EQUAL 0 OR NOT EXISTS "${OUT}.bak")
+    message(FATAL_ERROR "El segundo guardado no creo la copia .bak (codigo ${_rc})\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")
+  endif()
+  message(STATUS "minigis --save-project OK: ${OUT}")
+
+elseif(MODE STREQUAL "check-project")
+  execute_process(
+    COMMAND "${MINIGIS_EXE}" --check-project "${SAMPLE}"
+    RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+  if(NOT _rc EQUAL EXPECT_EXIT)
+    message(FATAL_ERROR "minigis --check-project fallo (codigo ${_rc}, esperado ${EXPECT_EXIT})\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")
+  endif()
+  if(EXPECT_EXIT EQUAL 0)
+    if(_out MATCHES "FALLO")
+      message(FATAL_ERROR "El contrato del proyecto tiene fallos:\n${_out}")
+    endif()
+    foreach(_key IN ITEMS "se abre el proyecto en la ventana"
+                          "capas abribles del proyecto"
+                          "orden y nombres del proyecto"
+                          "SRC del lienzo"
+                          "encuadre del proyecto"
+                          "visibilidad del proyecto"
+                          "simbologia de parcels"
+                          "etiquetas de cities"
+                          "estilo del raster"
+                          "el proyecto queda modificado"
+                          "el titulo marca los cambios"
+                          "se guardan visibilidad y estilo"
+                          "se guardan las etiquetas"
+                          "se conserva el nodo desconocido"
+                          "la capa anadida se guarda"
+                          "la capa cerrada se elimina"
+                          "el proyecto final conserva las capas no disponibles")
+      if(NOT _out MATCHES "${_key}")
+        message(FATAL_ERROR "La comprobacion «${_key}» no se ejecuto:\n${_out}")
+      endif()
+    endforeach()
+    message(STATUS "minigis --check-project OK")
+  endif()
+
 else()
   message(FATAL_ERROR "MODE no soportado: ${MODE}")
 endif()

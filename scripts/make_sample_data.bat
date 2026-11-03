@@ -8,7 +8,7 @@ rem ---------------------------------------------------------------------------
 
 setlocal
 
-set "OGR2OGR=E:\OSGeo4W\bin\ogr2ogr.exe"
+set "OGR2OGR=D:\OSGeo4w\bin\ogr2ogr.exe"
 if not exist "%OGR2OGR%" (
   for /f "delims=" %%i in ('where ogr2ogr 2^>nul') do set "OGR2OGR=%%i"
 )

@@ -4,6 +4,8 @@
 #include "minigislayerpanel.h"
 
 #include <QMainWindow>
+#include <QByteArray>
+#include <QHash>
 #include <QPoint>
 #include <QPointF>
 #include <QStringList>
@@ -28,10 +30,13 @@ class AttributeTableModel;
 class IdentifyPanel;
 class LayerPanel;
 class MapCanvas;
+class QgisProject;
 class RasterLayer;
 class Rectangle;
 class VectorLayer;
 class VectorLayerLoader;
+struct ProjectLayer;
+struct ProjectSnapshot;
 
 /**
  * Ventana principal (equivalente simplificado a QgisApp).
@@ -56,6 +61,26 @@ public:
 
   /** Abre un archivo y anade todas sus capas al lienzo; muestra un dialogo si falla. */
   bool openLayer(const QString &path, bool zoomToExtent = false);
+
+  /**
+   * Abre un proyecto de QGIS: reconstruye capas, orden, visibilidad, SRC,
+   * extension, simbologia, etiquetas y estilo raster. Sustituye el mapa actual.
+   */
+  bool openProject(const QString &path);
+
+  /** Ruta del proyecto abierto; vacia si no hay ninguno. */
+  QString projectPath() const { return mProjectPath; }
+
+  /** Capas declaradas en el proyecto que no se pudieron abrir (nombre: motivo). */
+  QStringList unavailableProjectLayers() const { return mUnavailableProjectLayers; }
+
+  /** Capas abribles del proyecto (sin contar las no disponibles). */
+  int projectLayerCount() const;
+
+  bool hasProject() const;
+
+  /** True si el mapa difiere del estado abierto/guardado del proyecto. */
+  bool isProjectModified() const;
 
   /**
    * Abre varios archivos (linea de comandos o arrastrar y soltar); de cada uno se
@@ -121,6 +146,9 @@ protected:
 
 private slots:
   void openLayerDialog();
+  void openProjectDialog();
+  void saveProject();
+  void saveProjectAs();
   void openRecentLayer();
   void loadSampleData();
   void closeCurrentLayer();
@@ -154,6 +182,8 @@ private slots:
   void onLayerLoaded(const std::shared_ptr<VectorLayer> &layer, bool first);
   void onLayerLoadFailed(const QString &path, const QString &message, const QString &hint);
   void onLoadFinished(int loaded, int failed, bool cancelled);
+  void onProjectLayerReady(const std::shared_ptr<VectorLayer> &layer, int requestId);
+  void onProjectLayerFailed(int requestId, const QString &message, const QString &hint);
 
 private:
   void createActions();
@@ -170,6 +200,33 @@ private:
   void updateCrsLabel();
   void updateRecentFilesMenu();
   void addRecentFile(const QString &path);
+
+  /** Abre una lista de rutas: los proyectos primero y despues las capas. */
+  void openDroppedPaths(const QStringList &paths);
+
+  /** Termina la apertura del proyecto (extension, SRC, avisos y titulo). */
+  void finishProjectLoad();
+
+  /** Entrada de proyecto por id (para aplicar estilos al llegar la capa). */
+  const ProjectLayer *projectLayerById(const QString &id) const;
+
+  /** Aviso con las capas del proyecto que no se pudieron abrir. */
+  void showUnavailableProjectLayers();
+
+  /** Foto del estado actual del mapa para guardar y para la firma. */
+  ProjectSnapshot buildProjectSnapshot() const;
+
+  /**
+   * Tras guardar, relee el proyecto para conocer los ids de las capas nuevas y
+   * que un segundo guardado actualice en vez de duplicar.
+   */
+  void reloadProjectMetadata();
+
+  /**
+   * Si hay cambios sin guardar, pregunta Guardar / Descartar / Cancelar.
+   * Devuelve false solo si el usuario cancela o el guardado falla.
+   */
+  bool maybeSaveProject();
 
   std::shared_ptr<VectorLayer> currentLayer() const;
   std::shared_ptr<RasterLayer> currentRaster() const { return mCurrentRaster; }
@@ -212,6 +269,19 @@ private:
   IdentifyPanel *mIdentifyPanel = nullptr;
   VectorLayerLoader *mLoader = nullptr;
   std::shared_ptr<RasterLayer> mCurrentRaster;
+
+  /** Proyecto QGIS abierto (nulo si se esta viendo solo capas sueltas). */
+  std::unique_ptr<QgisProject> mProject;
+  QString mProjectPath;
+  /** Ids de las capas vectoriales en el orden en que se piden al cargador. */
+  QStringList mPendingProjectIds;
+  QHash<QString, std::shared_ptr<VectorLayer>> mProjectVectorLayers;
+  QHash<QString, std::shared_ptr<RasterLayer>> mProjectRasterLayers;
+  /** Capas del proyecto que no se pudieron abrir, con el motivo. */
+  QStringList mUnavailableProjectLayers;
+  bool mProjectLoadActive = false;
+  /** Firma del estado guardado; si cambia, el proyecto esta modificado. */
+  QByteArray mSavedProjectSignature;
   bool mSearchAllLayers = false;
   QPointF mLastIdentifyPoint;
   bool mHasLastIdentifyPoint = false;
@@ -226,6 +296,9 @@ private:
 
   QMenu *mRecentMenu = nullptr;
   QAction *mOpenAction = nullptr;
+  QAction *mOpenProjectAction = nullptr;
+  QAction *mSaveProjectAction = nullptr;
+  QAction *mSaveProjectAsAction = nullptr;
   QAction *mSampleAction = nullptr;
   QAction *mCloseAction = nullptr;
   QAction *mCloseAllAction = nullptr;

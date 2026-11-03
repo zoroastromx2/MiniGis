@@ -54,7 +54,8 @@ public:
   explicit MapCanvas(QWidget *parent = nullptr);
   ~MapCanvas() override;
 
-  std::shared_ptr<VectorLayer> addLayer(const std::shared_ptr<VectorLayer> &layer, bool zoomToExtent = false);
+  std::shared_ptr<VectorLayer> addLayer(const std::shared_ptr<VectorLayer> &layer, bool zoomToExtent = false,
+                                        bool allowDuplicate = false);
   bool removeLayer(const std::shared_ptr<VectorLayer> &layer);
   void clearLayers();
   const std::vector<std::shared_ptr<VectorLayer>> &layers() const { return mLayers; }
@@ -66,7 +67,7 @@ public:
    * fondo del mapa).
    */
   std::shared_ptr<RasterLayer> addRasterLayer(const std::shared_ptr<RasterLayer> &layer,
-                                              bool zoomToExtent = false);
+                                              bool zoomToExtent = false, bool allowDuplicate = false);
   bool removeRasterLayer(const std::shared_ptr<RasterLayer> &layer);
   void clearRasterLayers();
   const std::vector<std::shared_ptr<RasterLayer>> &rasterLayers() const { return mRasterLayers; }

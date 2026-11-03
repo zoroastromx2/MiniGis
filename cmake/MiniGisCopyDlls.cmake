@@ -6,7 +6,7 @@
 # segun la configuracion que se este construyendo.
 #
 # IMPORTANTE: las DLLs de Qt se excluyen a proposito. El proyecto usa
-# el Qt oficial (D:/QtWin/...), pero el arbol de vcpkg puede tener
+# el Qt oficial (C:/Qtwin/...), pero el arbol de vcpkg puede tener
 # otro Qt instalado para otros proyectos. Copiar ambas versiones en
 # la misma carpeta mezcla dos instalaciones de Qt y la aplicacion
 # termina sin encontrar sus plugins de plataforma. Los archivos
