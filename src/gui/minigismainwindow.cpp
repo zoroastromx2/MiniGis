@@ -1117,6 +1117,12 @@ void MainWindow::reloadProjectMetadata()
     mProjectRasterLayers.insert(iterator->takeFirst(), raster);
   }
 
+  // El proyecto guardado puede devolver un encuadre muy parecido pero no
+  // identico (conversion de ida y vuelta): se adopta para que la vista y la
+  // firma queden alineadas y no se reescriba el encuadre en cada guardado.
+  if (mProject->hasExtent() && mProject->extentEpsg() == mProject->canvasEpsg())
+    mCanvas->setExtent(mProject->extent());
+
   mSavedProjectSignature = projectSnapshotSignature(buildProjectSnapshot());
 }
 
