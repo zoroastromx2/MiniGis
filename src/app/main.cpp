@@ -10,12 +10,15 @@
  *   minigis --bench 40 --layer x.gpkg         mide cuadros de paneo/zoom (rendimiento)
  *   minigis --list-drivers                    drivers vectoriales de GDAL
  *   minigis --project-info x.qgz              resume un proyecto de QGIS, sin ventana
+ *   minigis --connections C.xml --info -l pg:dataware_FDAC/mgn_2025/tabla
+ *                                             informa de una tabla PostGIS, sin ventana
  *
  * Contrato del ejecutable (lo usan scripts y las pruebas de CTest):
  *   0 exito | 1 uso incorrecto | 2 archivo no encontrado | 3 GDAL no pudo abrir
  *   4 no se pudo escribir la imagen | 5 no hay capas para renderizar
  *   6 el rendimiento medido no cumple el presupuesto de --bench-budget
  *   7 el proyecto de QGIS no se pudo abrir o guardar
+ *   8 no se pudo conectar o autenticar con PostGIS
  */
 
 #include <QApplication>
@@ -59,6 +62,7 @@ constexpr unsigned int kUtf8CodePage = 65001;
 #endif
 
 #include "minigisgdalinit.h"
+#include "minigisconnections.h"
 #include "minigisgeometrystore.h"
 #include "minigisidentify.h"
 #include "minigisidentifypanel.h"
@@ -67,6 +71,10 @@ constexpr unsigned int kUtf8CodePage = 65001;
 #include "minigislayerpanel.h"
 #include "minigismainwindow.h"
 #include "minigismapcanvas.h"
+#include "minigispgcatalog.h"
+#include "minigispgcheck.h"
+#include "minigispgsource.h"
+#include "minigispostgisdialog.h"
 #include "minigisqgisproject.h"
 #include "minigisrasterlayer.h"
 #include "minigisrasterstyledialog.h"
@@ -90,7 +98,8 @@ enum ExitCode
   ExitRenderFailed = 4,
   ExitNoLayers = 5,
   ExitBudgetExceeded = 6,
-  ExitProjectFailed = 7
+  ExitProjectFailed = 7,
+  ExitConnectionFailed = 8
 };
 
 bool g_verbose = false;
@@ -201,16 +210,20 @@ QString helpText(const QCommandLineParser &parser)
                           "  minigis --identify-at -3.70,40.41 -l c.shp  identifica el elemento en x,y\n"
                           "  minigis --check-identify -l p.shp -l c.shp -l o.tif  contrato de Identificar\n"
                           "  minigis --project-info --json p.qgz    resume un proyecto QGIS (sin ventana)\n"
+                          "  minigis --connections C.xml -l pg:dataware_FDAC/mgn_2025/tabla  capa PostGIS\n"
+                          "  minigis --check-pg -l pg:dataware_FDAC/mgn_2025  inventario del esquema\n"
                           "\nRendimiento (sin ventana):\n"
                           "  minigis --bench 40 -l capa.gpkg                 mide 40 cuadros de paneo/zoom\n"
                           "  minigis --bench 40 --bench-scenario zoom -l c.gpkg\n"
                           "  minigis --bench 40 -l c.gpkg --renderer legacy  compara con el motor clasico\n"
                           "  minigis --bench 40 -l c.gpkg --bench-budget 33 --json | jq .quality\n"
+                          "  minigis --bench 24 -l pg:dataware_FDAC/mgn_2025/tabla --pg-no-index\n"
                           "\nCodigos de salida:\n"
                           "  0 exito            1 uso incorrecto       2 archivo no encontrado\n"
                           "  3 GDAL no pudo abrir la capa             4 no se pudo escribir la imagen\n"
                           "  5 no hay capas que renderizar            6 presupuesto de --bench-budget superado\n"
-                          "  7 el proyecto QGIS no se pudo abrir o guardar\n");
+                          "  7 el proyecto QGIS no se pudo abrir o guardar\n"
+                          "  8 no se pudo conectar o autenticar con PostGIS\n");
 }
 
 QString versionText()
@@ -242,7 +255,19 @@ QString layerInfoText(const VectorLayer &layer)
 
   QStringList lines;
   lines << QStringLiteral("Capa        : %1").arg(layer.name());
-  lines << QStringLiteral("Archivo     : %1").arg(QDir::toNativeSeparators(layer.sourcePath()));
+  if (layer.isPostgis())
+  {
+    const PgSource &source = layer.postgisSource();
+    const PgConnection &connection = layer.postgisConnection();
+    lines << QStringLiteral("Conexión    : %1 (%2:%3/%4, %5)")
+               .arg(source.connection, connection.server, QString::number(connection.port),
+                    connection.database, connection.user);
+    lines << QStringLiteral("Tabla       : %1.%2").arg(source.schema, source.table);
+  }
+  else
+  {
+    lines << QStringLiteral("Archivo     : %1").arg(QDir::toNativeSeparators(layer.sourcePath()));
+  }
 
   // Solo se informa de la posicion cuando el archivo tiene varias capas: en un
   // shapefile la linea sobraria.
@@ -277,6 +302,20 @@ QJsonObject layerInfoJson(const VectorLayer &layer)
   object.insert(QStringLiteral("type"), QStringLiteral("vector"));
   object.insert(QStringLiteral("name"), layer.name());
   object.insert(QStringLiteral("source"), layer.sourcePath());
+  if (layer.isPostgis())
+  {
+    const PgSource &source = layer.postgisSource();
+    const PgConnection &connection = layer.postgisConnection();
+    QJsonObject connectionObject;
+    connectionObject.insert(QStringLiteral("name"), source.connection);
+    connectionObject.insert(QStringLiteral("server"), connection.server);
+    connectionObject.insert(QStringLiteral("port"), connection.port);
+    connectionObject.insert(QStringLiteral("database"), connection.database);
+    connectionObject.insert(QStringLiteral("user"), connection.user);
+    object.insert(QStringLiteral("connection"), connectionObject);
+    object.insert(QStringLiteral("schema"), source.schema);
+    object.insert(QStringLiteral("table"), source.table);
+  }
   object.insert(QStringLiteral("container"), layer.containerName());
   object.insert(QStringLiteral("layerIndex"), layer.layerIndex());
   object.insert(QStringLiteral("layerCount"), layer.layerCount());
@@ -481,9 +520,41 @@ bool parsePoint(const QString &text, QPointF *point)
   return true;
 }
 
-/** Une las capas de --layer y de los argumentos posicionales, sin repetir. */
-QStringList collectLayerPaths(const QCommandLineParser &parser)
+/**
+ * True si la fuente se puede abrir: una URI pg: no se comprueba en disco (la
+ * valida el driver al conectar) y una ruta si.
+ */
+bool sourceExists(const QString &path)
 {
+  return PgSource::looksLike(path) || QFileInfo::exists(path);
+}
+
+/**
+ * Codigo de salida para un fallo de PostGIS. El catalogo cuenta como archivo no
+ * encontrado (2); conexion, autenticacion y nombre desconocido, como 8; el resto
+ * (esquema o tabla inexistente, driver) como 3.
+ */
+int exitCodeForPgFailure(PgFailure failure)
+{
+  switch (failure)
+  {
+    case PgFailure::Catalog:
+      return ExitFileNotFound;
+    case PgFailure::UnknownConnection:
+    case PgFailure::Connection:
+    case PgFailure::Authentication:
+      return ExitConnectionFailed;
+    case PgFailure::None:
+    case PgFailure::MissingObject:
+    case PgFailure::DriverMissing:
+    case PgFailure::Other:
+      break;
+  }
+  return ExitOpenFailed;
+}
+
+/** Une las capas de --layer y de los argumentos posicionales, sin repetir. */
+QStringList collectLayerPaths(const QCommandLineParser &parser){
   QStringList paths;
 
   auto append = [&paths](const QString &path) {
@@ -838,6 +909,8 @@ struct BenchRequest
   qint64 budgetMs = 0;
   bool spatialFilter = false;
   bool asJson = false;
+  /** Con --pg-no-index: no construir almacen para fuentes pg: (tablas enormes). */
+  bool pgNoIndex = false;
 };
 
 /**
@@ -864,6 +937,7 @@ int runBenchmark(const BenchRequest &request)
 
   QStringList layerNames;
   bool envelopeMode = false;
+  bool storeBuilt = false;
   qint64 storeBuildMs = 0;
   qint64 storeVertices = 0;
   qint64 storeBytes = 0;
@@ -873,7 +947,7 @@ int runBenchmark(const BenchRequest &request)
   int rasterLayers = 0;
   for (const QString &path : request.layerPaths)
   {
-    if (!QFileInfo::exists(path))
+    if (!sourceExists(path))
     {
       writeErr(QStringLiteral("No existe el archivo: %1").arg(QDir::toNativeSeparators(path)));
       return ExitFileNotFound;
@@ -882,9 +956,17 @@ int runBenchmark(const BenchRequest &request)
     // Un archivo con varias capas se mide entero: el coste del mapa es el de
     // todas sus capas, no solo el de la primera.
     Error listError;
-    const QStringList names = VectorLayer::layerNames(path, &listError);
+    PgFailure listFailure = PgFailure::None;
+    const QStringList names = VectorLayer::layerNames(path, &listError, &listFailure);
     if (names.isEmpty())
     {
+      if (PgSource::looksLike(path))
+      {
+        if (!listError.isEmpty())
+          writeErr(listError.toText());
+        return listFailure == PgFailure::None ? ExitOpenFailed : exitCodeForPgFailure(listFailure);
+      }
+
       Error rasterError;
       const std::shared_ptr<RasterLayer> raster = RasterLayer::open(path, &rasterError);
       if (!raster)
@@ -908,15 +990,22 @@ int runBenchmark(const BenchRequest &request)
     for (int layerIndex = 0; layerIndex < names.size(); ++layerIndex)
     {
       Error layerError;
-      const std::shared_ptr<VectorLayer> layer = VectorLayer::open(path, layerIndex, &layerError);
+      PgFailure layerFailure = PgFailure::None;
+      const std::shared_ptr<VectorLayer> layer =
+        VectorLayer::open(path, layerIndex, &layerError, &layerFailure);
       if (!layer)
       {
         writeErr(layerError.toText());
-        return ExitOpenFailed;
+        return layerFailure == PgFailure::None ? ExitOpenFailed
+                                               : exitCodeForPgFailure(layerFailure);
       }
 
-      if (useStore)
+      // Una tabla PostGIS enorme puede no caber en el almacen: con
+      // --pg-no-index se mide el camino de dibujo bajo demanda.
+      const bool layerStore = useStore && !(request.pgNoIndex && layer->isPostgis());
+      if (layerStore)
       {
+        storeBuilt = true;
         QString storeError;
         QString modeName;
         qint64 layerBuildMs = 0;
@@ -1059,7 +1148,10 @@ int runBenchmark(const BenchRequest &request)
     store.insert(QStringLiteral("drawn_features_last_frame"), static_cast<double>(lastStats.drawnFeatures));
     store.insert(QStringLiteral("drawn_vertices_last_frame"), static_cast<double>(lastStats.drawnVertices));
     store.insert(QStringLiteral("level_last_frame"), lastStats.level);
-    store.insert(QStringLiteral("mode"), envelopeMode ? QStringLiteral("envelopes") : QStringLiteral("memory"));
+    store.insert(QStringLiteral("mode"), storeBuilt
+                                           ? (envelopeMode ? QStringLiteral("envelopes")
+                                                           : QStringLiteral("memory"))
+                                           : QStringLiteral("none"));
     store.insert(QStringLiteral("read_total"), static_cast<double>(readFeatures));
     store.insert(QStringLiteral("skipped_total"), static_cast<double>(skippedFeatures));
     store.insert(QStringLiteral("read_last_frame"), static_cast<double>(lastStats.readFeatures));
@@ -2899,16 +2991,23 @@ int runIdentifyAt(const QStringList &layerPaths, const QPointF &mapPoint, int ra
 
   for (const QString &path : layerPaths)
   {
-    if (!QFileInfo::exists(path))
+    if (!sourceExists(path))
     {
       writeErr(QStringLiteral("No existe el archivo: %1").arg(QDir::toNativeSeparators(path)));
       return ExitFileNotFound;
     }
 
     Error listError;
-    const QStringList names = VectorLayer::layerNames(path, &listError);
+    PgFailure listFailure = PgFailure::None;
+    const QStringList names = VectorLayer::layerNames(path, &listError, &listFailure);
     if (names.isEmpty())
     {
+      if (PgSource::looksLike(path))
+      {
+        if (!listError.isEmpty())
+          writeErr(listError.toText());
+        return listFailure == PgFailure::None ? ExitOpenFailed : exitCodeForPgFailure(listFailure);
+      }
       logVerbose(QStringLiteral("%1 no es vectorial; se omite").arg(QDir::toNativeSeparators(path)));
       continue;
     }
@@ -2916,11 +3015,14 @@ int runIdentifyAt(const QStringList &layerPaths, const QPointF &mapPoint, int ra
     for (int index = 0; index < names.size(); ++index)
     {
       Error error;
-      const std::shared_ptr<VectorLayer> layer = VectorLayer::open(path, index, &error);
+      PgFailure layerFailure = PgFailure::None;
+      const std::shared_ptr<VectorLayer> layer =
+        VectorLayer::open(path, index, &error, &layerFailure);
       if (!layer)
       {
         writeErr(error.toText());
-        return ExitOpenFailed;
+        return layerFailure == PgFailure::None ? ExitOpenFailed
+                                               : exitCodeForPgFailure(layerFailure);
       }
 
       attachGeometryStore(layer, destinationEpsg, true);
@@ -3989,6 +4091,7 @@ int main(int argc, char *argv[])
              || argument == QStringLiteral("--save-project")
              || argument == QStringLiteral("--check-project")
              || argument == QStringLiteral("--check-kml")
+             || argument == QStringLiteral("--check-pg")
              || argument == QStringLiteral("--identify-at")
              || argument == QStringLiteral("--help") || argument == QStringLiteral("-h")
              || argument == QStringLiteral("--version") || argument == QStringLiteral("-v"))
@@ -4032,6 +4135,10 @@ int main(int argc, char *argv[])
   const QCommandLineOption layerOption({QStringLiteral("l"), QStringLiteral("layer")},
                                        QStringLiteral("Capa a cargar; se puede repetir"),
                                        QStringLiteral("archivo"));
+  const QCommandLineOption connectionsOption(
+    QStringLiteral("connections"),
+    QStringLiteral("Catalogo de conexiones PostGIS (Connections.xml de Mapa Digital)"),
+    QStringLiteral("Connections.xml"));
   const QCommandLineOption extentOption(QStringLiteral("extent"),
                                         QStringLiteral("Extension inicial: xmin,ymin,xmax,ymax"),
                                         QStringLiteral("xmin,ymin,xmax,ymax"));
@@ -4063,6 +4170,9 @@ int main(int argc, char *argv[])
                                               QStringLiteral("n"), QStringLiteral("600000"));
   const QCommandLineOption spatialFilterOption(QStringLiteral("spatial-filter"),
                                                QStringLiteral("Filtra en origen con el indice del archivo (util en capas que no caben en memoria)"));
+  const QCommandLineOption pgNoIndexOption(
+    QStringLiteral("pg-no-index"),
+    QStringLiteral("Con capas PostGIS: dibuja bajo demanda sin construir el almacen (tablas enormes)"));
   const QCommandLineOption labelFieldOption(QStringLiteral("label-field"),
                                             QStringLiteral("Etiqueta los elementos con estos campos (separados por comas)"),
                                             QStringLiteral("campo[,campo]"));
@@ -4097,6 +4207,13 @@ int main(int argc, char *argv[])
   const QCommandLineOption checkKmlOption(
     QStringLiteral("check-kml"),
     QStringLiteral("Comprueba que un KML/KMZ se lee completo: capas, elementos, tipos y estilos"));
+  const QCommandLineOption checkPgOption(
+    QStringLiteral("check-pg"),
+    QStringLiteral("Comprueba un esquema PostGIS: tablas, geometria, elementos y apertura"));
+  const QCommandLineOption snapshotPgDialogOption(
+    QStringLiteral("snapshot-pg-dialog"),
+    QStringLiteral("Captura el dialogo de conexion PostGIS a <archivo.png> y sale"),
+    QStringLiteral("archivo.png"));
   const QCommandLineOption identifyAtOption(
     QStringLiteral("identify-at"),
     QStringLiteral("Identifica el elemento bajo <x,y> (coordenadas del SRC de destino) y sale"),
@@ -4145,12 +4262,13 @@ int main(int argc, char *argv[])
                      layerOption, extentOption, sizeOption, crsOption, maxFeaturesOption, verboseOption,
                      benchOption, benchScenarioOption, benchBudgetOption, rendererOption, vertexBudgetOption,
                      spatialFilterOption, readBudgetOption, indexShpOption, withAttributesOption,
+                     pgNoIndexOption,
                      checkRefreshOption, checkLabelsOption, checkLayersOption, snapshotDialogOption,
                      snapshotRasterDialogOption, checkRasterOption, labelFieldOption, labelSizeOption,
                      labelMapSizeOption, noLabelsOption, rasterStretchOption, rasterBandsOption,
                      rasterOpacityOption, identifyAtOption, identifyRadiusOption, identifyLayerOption,
                      checkIdentifyOption, projectInfoOption, saveProjectOption, checkProjectOption,
-                     checkKmlOption});
+                     checkKmlOption, checkPgOption, connectionsOption, snapshotPgDialogOption});
   parser.addPositionalArgument(QStringLiteral("archivo"),
                               QStringLiteral("Capas a cargar (opcional, se puede repetir)"),
                               QStringLiteral("[archivo...]"));
@@ -4176,6 +4294,12 @@ int main(int argc, char *argv[])
   }
 
   g_verbose = parser.isSet(verboseOption);
+
+  // El catalogo de conexiones se fija antes de abrir nada: VectorLayer lo
+  // consulta al abrir cada capa pg:, y el GUI lo usara para el dialogo.
+  PgConnectionCatalog::setExplicitPath(parser.value(connectionsOption).trimmed());
+
+  const bool pgNoIndex = parser.isSet(pgNoIndexOption);
 
   // Opciones de Identificar. Se validan antes de inicializar GDAL: un error de
   // uso no debe abrirGDAL ni registrar drivers.
@@ -4596,6 +4720,7 @@ int main(int argc, char *argv[])
     request.labels = labelOptions;
     request.spatialFilter = parser.isSet(spatialFilterOption);
     request.asJson = parser.isSet(jsonOption);
+    request.pgNoIndex = pgNoIndex;
 
     if (request.frames <= 0)
     {
@@ -4685,6 +4810,71 @@ int main(int argc, char *argv[])
   }
 
   // ---------------------------------------------------------------------
+  // Diagnostico de un esquema PostGIS (sin ventana)
+  // ---------------------------------------------------------------------
+  if (parser.isSet(checkPgOption))
+  {
+    if (layerPaths.size() != 1)
+    {
+      writeErr(QStringLiteral("Se necesita un esquema PostGIS:"));
+      writeErr(QStringLiteral("  minigis --check-pg -l \"pg:dataware_FDAC/mgn_2025\" --json"));
+      return ExitUsage;
+    }
+
+    const QString path = layerPaths.first();
+    PgSource source;
+    Error parseError;
+    if (!PgSource::looksLike(path) || !PgSource::parse(path, &source, &parseError)
+        || source.hasTable())
+    {
+      writeErr(QStringLiteral("«%1» no es un esquema PostGIS.").arg(path));
+      writeErr(QStringLiteral("Formato: pg:conexion/esquema, por ejemplo pg:dataware_FDAC/mgn_2025"));
+      return ExitUsage;
+    }
+
+    const PgCheckReport report = checkPgSchema(source);
+    if (parser.isSet(jsonOption))
+    {
+      const QJsonDocument document(report.toJson());
+      writeOut(QString::fromUtf8(document.toJson(QJsonDocument::Indented)).trimmed());
+    }
+    else
+    {
+      writeOut(report.toText());
+    }
+
+    if (report.ok)
+      return ExitOk;
+    if (report.failure != PgFailure::None)
+      return exitCodeForPgFailure(report.failure);
+    return report.tables.isEmpty() ? ExitNoLayers : ExitOpenFailed;
+  }
+
+  // ---------------------------------------------------------------------
+  // Captura del dialogo PostGIS (sin ventana y sin servidor)
+  // ---------------------------------------------------------------------
+  if (parser.isSet(snapshotPgDialogOption))
+  {
+    // Sin auto-conexion: la captura no debe tocar la red ni depender del perfil.
+    PostgisDialog dialog(nullptr, false);
+    dialog.setCatalogPath(PgConnectionCatalog::resolvePath(PgConnectionCatalog::explicitPath()));
+    dialog.resize(820, 600);
+    dialog.show();
+    QCoreApplication::processEvents();
+
+    const QString dialogPath = parser.value(snapshotPgDialogOption);
+    if (!dialog.grab().save(dialogPath))
+    {
+      writeErr(QStringLiteral("No se pudo escribir la imagen: %1")
+                 .arg(QDir::toNativeSeparators(dialogPath)));
+      return ExitRenderFailed;
+    }
+
+    writeOut(QStringLiteral("Imagen escrita: %1").arg(QDir::toNativeSeparators(dialogPath)));
+    return ExitOk;
+  }
+
+  // ---------------------------------------------------------------------
   // Modo informacion (sin ventana)
   // ---------------------------------------------------------------------
   if (parser.isSet(infoOption))
@@ -4699,26 +4889,30 @@ int main(int argc, char *argv[])
     QJsonArray jsonLayers;
     for (const QString &path : layerPaths)
     {
-      if (!QFileInfo::exists(path))
+      if (!sourceExists(path))
       {
         writeErr(QStringLiteral("No existe el archivo: %1").arg(QDir::toNativeSeparators(path)));
         return ExitFileNotFound;
       }
 
       // Un archivo puede contener varias capas vectoriales (un GeoPackage): se
-      // informa de todas, no solo de la primera.
+      // informa de todas, no solo de la primera. Una fuente pg: siempre trae una.
       Error listError;
-      const QStringList names = VectorLayer::layerNames(path, &listError);
+      PgFailure listFailure = PgFailure::None;
+      const QStringList names = VectorLayer::layerNames(path, &listError, &listFailure);
       if (!names.isEmpty())
       {
         for (int index = 0; index < names.size(); ++index)
         {
           Error error;
-          const std::shared_ptr<VectorLayer> layer = VectorLayer::open(path, index, &error);
+          PgFailure layerFailure = PgFailure::None;
+          const std::shared_ptr<VectorLayer> layer =
+            VectorLayer::open(path, index, &error, &layerFailure);
           if (!layer)
           {
             writeErr(error.toText());
-            return ExitOpenFailed;
+            return layerFailure == PgFailure::None ? ExitOpenFailed
+                                                   : exitCodeForPgFailure(layerFailure);
           }
 
           if (parser.isSet(jsonOption))
@@ -4727,6 +4921,15 @@ int main(int argc, char *argv[])
             writeOut(layerInfoText(*layer));
         }
         continue;
+      }
+
+      // Una fuente pg: no tiene sentido intentarla como raster: se informa del
+      // fallo de conexion con su causa y su accion.
+      if (PgSource::looksLike(path))
+      {
+        if (!listError.isEmpty())
+          writeErr(listError.toText());
+        return listFailure == PgFailure::None ? ExitOpenFailed : exitCodeForPgFailure(listFailure);
       }
 
       // No era vectorial: se intenta como raster. El orden importa: un
@@ -4947,7 +5150,7 @@ int main(int argc, char *argv[])
     int opened = 0;
     for (const QString &path : layerPaths)
     {
-      if (!QFileInfo::exists(path))
+      if (!sourceExists(path))
       {
         writeErr(QStringLiteral("No existe el archivo: %1").arg(QDir::toNativeSeparators(path)));
         return ExitFileNotFound;
@@ -4956,26 +5159,38 @@ int main(int argc, char *argv[])
       // Un archivo puede contener varias capas (un GeoPackage): se dibujan
       // todas, igual que hace la interfaz al abrirlo.
       Error listError;
-      const QStringList names = VectorLayer::layerNames(path, &listError);
+      PgFailure listFailure = PgFailure::None;
+      const QStringList names = VectorLayer::layerNames(path, &listError, &listFailure);
       if (!names.isEmpty())
       {
         for (int index = 0; index < names.size(); ++index)
         {
           Error error;
-          const std::shared_ptr<VectorLayer> layer = VectorLayer::open(path, index, &error);
+          PgFailure layerFailure = PgFailure::None;
+          const std::shared_ptr<VectorLayer> layer =
+            VectorLayer::open(path, index, &error, &layerFailure);
           if (!layer)
           {
             writeErr(error.toText());
-            return ExitOpenFailed;
+            return layerFailure == PgFailure::None ? ExitOpenFailed
+                                                   : exitCodeForPgFailure(layerFailure);
           }
 
           applyLabelOptions(layer, labelOptions);
-          attachGeometryStore(layer, destinationEpsg, useStore);
+          const bool layerStore = useStore && !(pgNoIndex && layer->isPostgis());
+          attachGeometryStore(layer, destinationEpsg, layerStore);
           canvas.addLayer(layer, opened == 0);
           ++opened;
           logVerbose(QStringLiteral("capa cargada: %1 (%2 elementos)").arg(layer->name()).arg(layer->featureCount()));
         }
         continue;
+      }
+
+      if (PgSource::looksLike(path))
+      {
+        if (!listError.isEmpty())
+          writeErr(listError.toText());
+        return listFailure == PgFailure::None ? ExitOpenFailed : exitCodeForPgFailure(listFailure);
       }
 
       Error rasterError;
