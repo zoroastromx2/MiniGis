@@ -43,6 +43,18 @@ set(MINIGIS_CORE_SRCS
   minigisshapefileindex.cpp
   minigisvectorloader.h
   minigisvectorloader.cpp
+  minigispgsource.h
+  minigispgsource.cpp
+  minigisconnections.h
+  minigisconnections.cpp
+  minigispgcredentials.h
+  minigispgcredentials.cpp
+  minigispgcatalog.h
+  minigispgcatalog.cpp
+  minigispgcheck.h
+  minigispgcheck.cpp
+  minigispgsession.h
+  minigispgsession.cpp
   minigismaprenderer.h
   minigismaprenderer.cpp
   minigisfastrenderer.h
@@ -59,6 +71,12 @@ target_include_directories(minigis_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 find_package(MINIZIP CONFIG REQUIRED)
 
 target_link_libraries(minigis_core PRIVATE MiniGIS::optimizations)
+
+if(WIN32)
+  # DPAPI (CryptProtectData) para recordar la contrasena de PostGIS sin
+  # guardarla en claro en el perfil del usuario.
+  target_link_libraries(minigis_core PRIVATE crypt32)
+endif()
 
 target_link_libraries(minigis_core
   PUBLIC
