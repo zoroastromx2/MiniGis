@@ -656,6 +656,85 @@ elseif(MODE STREQUAL "window-attributes")
     message(STATUS "minigis ventana con tabla de atributos OK: ${_size} bytes")
   endif()
 
+elseif(MODE STREQUAL "pg-dialog")
+  # Captura del dialogo PostGIS: no abre red, solo carga el catalogo.
+  get_filename_component(_outdir "${OUT}" DIRECTORY)
+  file(MAKE_DIRECTORY "${_outdir}")
+  if(EXISTS "${OUT}")
+    file(REMOVE "${OUT}")
+  endif()
+  execute_process(
+    COMMAND "${MINIGIS_EXE}" --connections "${CONNECTIONS}" --snapshot-pg-dialog "${OUT}"
+    RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+  if(NOT _rc EQUAL EXPECT_EXIT)
+    message(FATAL_ERROR "minigis --snapshot-pg-dialog fallo (codigo ${_rc})\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")
+  endif()
+  if(EXPECT_EXIT EQUAL 0)
+    if(NOT EXISTS "${OUT}")
+      message(FATAL_ERROR "No se genero la captura del dialogo: ${OUT}")
+    endif()
+    file(SIZE "${OUT}" _size)
+    if(_size LESS 5000)
+      message(FATAL_ERROR "La captura del dialogo parece vacia (${_size} bytes)")
+    endif()
+    message(STATUS "minigis --snapshot-pg-dialog OK: ${_size} bytes")
+  endif()
+
+elseif(MODE STREQUAL "pg-info")
+  # --info de una fuente pg: tiene que informar de conexion, esquema y tabla, y
+  # no filtrar la contrasena. Los casos de error (catalogo ausente, conexion
+  # desconocida) se comprueban solo por el codigo de salida y no tocan la red.
+  execute_process(
+    COMMAND "${MINIGIS_EXE}" --connections "${CONNECTIONS}" --info --json --layer "${SAMPLE}"
+    RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+  if(NOT _rc EQUAL EXPECT_EXIT)
+    message(FATAL_ERROR "minigis --info de PostGIS fallo (codigo ${_rc}, esperado ${EXPECT_EXIT})\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")
+  endif()
+
+  if(EXPECT_EXIT EQUAL 0)
+    foreach(_key IN ITEMS "\"connection\"" "\"schema\"" "\"table\"" "\"driver\": \"PostgreSQL\"")
+      if(NOT _out MATCHES "${_key}")
+        message(FATAL_ERROR "La salida de --info no contiene ${_key}:\n${_out}")
+      endif()
+    endforeach()
+    if(_out MATCHES "password")
+      message(FATAL_ERROR "La salida de --info filtra la contrasena:\n${_out}")
+    endif()
+    message(STATUS "minigis --info de PostGIS OK")
+  endif()
+
+elseif(MODE STREQUAL "pg-check")
+  # Contrato de --check-pg: inventario del esquema en JSON, sin contrasena.
+  execute_process(
+    COMMAND "${MINIGIS_EXE}" --connections "${CONNECTIONS}" --check-pg --json --layer "${SAMPLE}"
+    RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+  if(NOT _rc EQUAL EXPECT_EXIT)
+    message(FATAL_ERROR "minigis --check-pg fallo (codigo ${_rc}, esperado ${EXPECT_EXIT})\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")
+  endif()
+
+  if(EXPECT_EXIT EQUAL 0)
+    foreach(_key IN ITEMS "\"ok\": true" "\"connection\"" "\"schema\"" "\"layers\""
+                          "\"openOk\"" "\"elapsedMs\"")
+      if(NOT _out MATCHES "${_key}")
+        message(FATAL_ERROR "La salida de --check-pg no contiene ${_key}:\n${_out}")
+      endif()
+    endforeach()
+    if(_out MATCHES "password")
+      message(FATAL_ERROR "La salida de --check-pg filtra la contrasena:\n${_out}")
+    endif()
+    message(STATUS "minigis --check-pg OK")
+  endif()
+
+elseif(MODE STREQUAL "pg-uso")
+  # --check-pg sin -l es un error de uso (1), no un fallo de conexion.
+  execute_process(
+    COMMAND "${MINIGIS_EXE}" --check-pg
+    RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+  if(NOT _rc EQUAL EXPECT_EXIT)
+    message(FATAL_ERROR "minigis --check-pg sin capa debio salir con ${EXPECT_EXIT} y salio con ${_rc}\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")
+  endif()
+  message(STATUS "minigis --check-pg sin capa OK (codigo ${_rc})")
+
 else()
   message(FATAL_ERROR "MODE no soportado: ${MODE}")
 endif()

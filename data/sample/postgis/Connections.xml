@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="ISO-8859-1"?>
+<servers version="MiniGIS fixture">
+  <ConStr NAME="prueba_pg" TYPE="PGIS" DRIVER="FireDac" SERVER="127.0.0.1" PORT="5433" DATABASE="bdprueba" USER="usuario_prueba" PASSWORD="ZmFrZS1jaWZlcmJs" READONLY="" />
+  <ConStr NAME="otra_pg" TYPE="PGIS" DRIVER="ADO" SERVER="127.0.0.1" PORT="5432" DATABASE="otra" USER="otro_usuario" PASSWORD="ZmFrZS1jaWZlcmJsMg==" READONLY="" />
+  <ConStr NAME="capa_gpkg" TYPE="GPKG" DRIVER="SQLite" SERVER="D:\datos\capa.gpkg" PORT="5432" DATABASE="" USER="" PASSWORD="" READONLY="" />
+</servers>

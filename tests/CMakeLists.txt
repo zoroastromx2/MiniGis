@@ -377,3 +377,78 @@ add_test(NAME minigis.kml-ventana
 set_tests_properties(minigis.kml-ventana PROPERTIES
   TIMEOUT 120
   ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# --- PostGIS --------------------------------------------------------------
+# Piezas que no necesitan servidor: URI pg:, catalogo Connections.xml, cadena
+# de conexion y saneado de la contrasena. La integracion real es opt-in en
+# tests/pg/ y se ejecuta solo si existen las variables MINIGIS_PG_TEST_*.
+set(MINIGIS_SAMPLE_CONNECTIONS "${MINIGIS_ROOT_DIR}/data/sample/postgis/Connections.xml")
+
+add_executable(minigispgtest minigispgtest.cpp)
+target_link_libraries(minigispgtest PRIVATE MiniGIS::core Qt6::Core)
+
+add_test(NAME minigis.pg-catalogo
+  COMMAND minigispgtest "${MINIGIS_SAMPLE_CONNECTIONS}")
+
+# Casos deterministas sin servidor: catalogo ausente (2), conexion desconocida
+# (8) y uso incorrecto de --check-pg (1). Ninguno abre una conexion de red.
+add_test(NAME minigis.pg-sin-catalogo
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DCONNECTIONS=${CMAKE_BINARY_DIR}/test-output/no-existe.xml"
+          "-DSAMPLE=pg:no_existe/mgn_2025/areas_geoestadisticas_estatales"
+          -DEXPECT_EXIT=2
+          -DMODE=pg-info
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
+add_test(NAME minigis.pg-conexion-inexistente
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DCONNECTIONS=${MINIGIS_SAMPLE_CONNECTIONS}"
+          "-DSAMPLE=pg:no_existe/mgn_2025/areas_geoestadisticas_estatales"
+          -DEXPECT_EXIT=8
+          -DMODE=pg-info
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
+add_test(NAME minigis.pg-cli-uso
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          -DEXPECT_EXIT=1
+          -DMODE=pg-uso
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
+add_test(NAME minigis.pg-dialogo
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DCONNECTIONS=${MINIGIS_SAMPLE_CONNECTIONS}"
+          "-DOUT=${CMAKE_BINARY_DIR}/test-output/pg-dialog.png"
+          -DMODE=pg-dialog
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+set_tests_properties(minigis.pg-dialogo PROPERTIES
+  ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# Integracion real opt-in: se registran siempre y se omiten si no estan las
+# variables MINIGIS_PG_TEST_* (SKIP_REGULAR_EXPRESSION). Ver run_pg_test.cmake.
+add_test(NAME minigis.pg
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          -DMODE=check
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_pg_test.cmake")
+set_tests_properties(minigis.pg PROPERTIES SKIP_REGULAR_EXPRESSION "OMITIDA")
+
+add_test(NAME minigis.pg-window
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DOUT=${CMAKE_BINARY_DIR}/test-output/pg-window.png"
+          -DMODE=window
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_pg_test.cmake")
+set_tests_properties(minigis.pg-window PROPERTIES
+  SKIP_REGULAR_EXPRESSION "OMITIDA"
+  ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+add_test(NAME minigis.pg-bench
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          -DMODE=bench
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_pg_test.cmake")
+set_tests_properties(minigis.pg-bench PROPERTIES SKIP_REGULAR_EXPRESSION "OMITIDA")
