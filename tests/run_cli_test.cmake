@@ -628,6 +628,33 @@ elseif(MODE STREQUAL "kml-estilos")
     message(STATUS "minigis --check-kml (estilos) OK")
   endif()
 
+elseif(MODE STREQUAL "window-attributes")
+  # Cargar una capa con la tabla de atributos a la vista no debe bloquear la
+  # ventana. El fallo original: adjustar el ancho de columnas pedia data() de
+  # todas las celdas y cada celda era una lectura de atributos en el origen.
+  get_filename_component(_outdir "${OUT}" DIRECTORY)
+  file(MAKE_DIRECTORY "${_outdir}")
+  if(EXISTS "${OUT}")
+    file(REMOVE "${OUT}")
+  endif()
+  execute_process(
+    COMMAND "${MINIGIS_EXE}" --snapshot-window "${OUT}" --layer "${SAMPLE}" --with-attributes
+    RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err
+    TIMEOUT 120)
+  if(NOT _rc EQUAL EXPECT_EXIT)
+    message(FATAL_ERROR "minigis --snapshot-window --with-attributes fallo (codigo ${_rc}, esperado ${EXPECT_EXIT})\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")
+  endif()
+  if(EXPECT_EXIT EQUAL 0)
+    if(NOT EXISTS "${OUT}")
+      message(FATAL_ERROR "No se genero la captura: ${OUT}\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")
+    endif()
+    file(SIZE "${OUT}" _size)
+    if(_size LESS 5000)
+      message(FATAL_ERROR "La captura parece vacia (${_size} bytes)")
+    endif()
+    message(STATUS "minigis ventana con tabla de atributos OK: ${_size} bytes")
+  endif()
+
 else()
   message(FATAL_ERROR "MODE no soportado: ${MODE}")
 endif()

@@ -362,3 +362,18 @@ add_test(NAME minigis.kml-estilos-tope
           -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
 
 set_tests_properties(minigis.kml-estilos-tope PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# Cargar un KML con la tabla de atributos abierta no debe bloquear la ventana:
+# ajustar el ancho de columnas pedia atributos celda a celda y en KML eso es una
+# relectura del origen por celda.
+add_test(NAME minigis.kml-ventana
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DSAMPLE=${MINIGIS_SAMPLE_KML_DIR}/mixto.kml"
+          "-DOUT=${CMAKE_BINARY_DIR}/test-output/kml-window.png"
+          -DMODE=window-attributes
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
+set_tests_properties(minigis.kml-ventana PROPERTIES
+  TIMEOUT 120
+  ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

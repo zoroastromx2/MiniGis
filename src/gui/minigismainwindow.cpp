@@ -1897,7 +1897,38 @@ void MainWindow::setAttributeLayer(const std::shared_ptr<VectorLayer> &layer)
                                      .arg(mAttributeModel->totalRows()));
   }
 
-  mAttributeView->resizeColumnsToContents();
+  // Ajustar el ancho de las columnas con resizeColumnsToContents() pide data()
+  // de (casi) todas las celdas, y cada celda es una lectura de atributos en el
+  // origen. En un KML eso es caro --LIBKML vuelve a leer el archivo por
+  // elemento-- y con 258 filas por 166 campos la ventana se quedaba bloqueada al
+  // cargar la capa. Aqui se mide una muestra de filas leyendo cada una UNA vez
+  // (la iteracion es por filas para que la cache del modelo acierte) y, si la
+  // tabla no esta a la vista, no se mide nada: no hay nada que ajustar.
+  if (mAttributeDock && mAttributeDock->isVisible())
+  {
+    constexpr int kSampleRows = 20;
+    constexpr int kMaximumWidth = 320;
+
+    const int rows = std::min<int>(kSampleRows, mAttributeModel->rowCount());
+    const int columns = mAttributeModel->columnCount();
+    const QFontMetrics metrics(mAttributeView->font());
+
+    std::vector<int> widths(static_cast<size_t>(columns),
+                            mAttributeView->horizontalHeader()->defaultSectionSize());
+    for (int row = 0; row < rows; ++row)
+    {
+      for (int column = 0; column < columns; ++column)
+      {
+        const QString text =
+          mAttributeModel->data(mAttributeModel->index(row, column), Qt::DisplayRole).toString();
+        int &width = widths[static_cast<size_t>(column)];
+        width = std::max(width, metrics.horizontalAdvance(text) + 18);
+      }
+    }
+
+    for (int column = 0; column < columns; ++column)
+      mAttributeView->setColumnWidth(column, std::min(widths[static_cast<size_t>(column)], kMaximumWidth));
+  }
 }
 
 void MainWindow::applySelection(const std::shared_ptr<VectorLayer> &layer, qint64 fid)

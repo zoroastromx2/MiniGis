@@ -549,6 +549,7 @@ Todo lo siguiente se ejecutó sobre este equipo con Qt 6.10.3 y el preset `windo
 | `minigis --check-identify` (parcelas, ciudades y ortofoto) | **31 comprobaciones OK**: punto, huecos, radio de 3/6 px, camino OGR, modo envolventes, recorte, prioridad, alcance, panel, marcador, selección/resalte, tabla y caché |
 | `minigis --check-kml` sobre `mixto.kml` y `estilos_varios.kml` | **2 de 2 elementos conservados** (la `MultiGeometry` mixta incluida), tipos por elemento y estilo por elemento: `styleMode: perFeature`, 2 estilos, rojo `#ff0000` de 3 px |
 | `minigis --info` sobre un KML de 21,6 MB (258 países) | driver `LIBKML`, `EPSG:4326`, `Poligono`, 258 de 258 elementos, ~600 ms de apertura |
+| Ventana con un KML de 258 elementos y 166 campos | La capa se carga y el mapa se dibuja sin bloquearse; la tabla de atributos se puede abrir (antes la ventana se quedaba colgada ajustando el ancho de las columnas) |
 | `minigis --identify-at --json` (Madrid, capa limitada, UTM y hueco) | Contrato JSON y códigos de salida correctos; incluye `selection` (o `null` en el hueco) |
 | `minigis --snapshot-window --with-attributes --identify-at` | Captura con el resalte del objeto y la tabla movida a su fila |
 | `ctest --preset windows-msvc-release` | **18/18 pruebas superadas** (24/24 con las pruebas de proyecto, ver abajo) |

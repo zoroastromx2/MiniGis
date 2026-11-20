@@ -77,6 +77,7 @@ Google Earth Pro 7.3.6, `Schema` con ~160 `SimpleField`, 258 países).
 | Formato del color que entrega LIBKML | `#RRGGBBAA`, con el **alfa al final** (comprobado: KML rojo `ff0000ff` → `#FF0000FF`, azul `ffff0000` → `#0000FFFF`). Leerlo al revés intercambia rojo y azul en silencio |
 | Estilo por defecto de KML | LIBKML devuelve un estilo a **todos** los elementos aunque el archivo no declare `<Style>` (el de por defecto de KML: línea roja de 1 px). El KML del usuario informa `PEN(c:#FF0000FF)` |
 | Coste de resolver estilos | con `LIBKML_RESOLVE_STYLE=YES`, el KML de 21,6 MB pasa de 583 ms a ~600 ms en caliente (la primera tanda, 1238 ms, es de caché fría) |
+| Carga en la ventana | hoy se **bloquea** con KML de muchas columnas: ajustar el ancho de las columnas de la tabla de atributos pide `data()` de todas las celdas y cada celda es una lectura del origen (LIBKML relee el archivo por elemento). Corregido: la medición se hace sobre una muestra de filas y solo con la tabla a la vista |
 
 **Desviaciones de entorno** (relevantes para ejecutar los comandos de §6):
 
@@ -510,6 +511,7 @@ Con `tests/run_cli_test.cmake`, en plataforma `offscreen`, sin mirar píxeles:
 | `kml-estilos-varios` | KML con dos estilos y mayoría de uno: `distinctStyles: 2` y se aplica el dominante |
 | `kml-estilos-sin` | KML sin `<Style>`: `appliedStyles: 0` y simbología por defecto |
 | `kml-estilos-tope` | KML con 70 estilos: `styleMode: "dominant"` y `appliedStyles: 1` |
+| `kml-ventana` | Cargar un KML con la tabla de atributos a la vista no bloquea la ventana (límite de 120 s) |
 
 ### 9.3 Contrato de `--check-kml`
 
