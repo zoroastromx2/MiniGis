@@ -925,7 +925,8 @@ QImage MapCanvas::renderToImage(const QSize &size, bool draft)
 
     if (storeUsable)
     {
-      fastGroup.push_back(FastMapRenderer::Layer {store.get(), &layer->style(), true});
+      fastGroup.push_back(FastMapRenderer::Layer {store.get(), &layer->style(), true,
+                                                  !layer->styleOverridden()});
       continue;
     }
 

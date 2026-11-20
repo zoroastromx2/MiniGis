@@ -55,11 +55,11 @@ constexpr int kIdentifyRadiusPixels = 6;
 
 /** Formatos que ofrece el dialogo de apertura: vectoriales y raster. */
 const char *kOpenFilter =
-  "Capas (*.shp *.geojson *.json *.gpkg *.kml *.gml *.gpx *.csv *.tab *.mif *.fgb *.sqlite *.db "
+  "Capas (*.shp *.geojson *.json *.gpkg *.kml *.kmz *.gml *.gpx *.csv *.tab *.mif *.fgb *.sqlite *.db "
   "*.tif *.tiff *.img *.vrt *.jp2 *.png *.jpg *.jpeg *.bmp);;"
-  "Vectoriales (*.shp *.geojson *.json *.gpkg *.kml *.gml *.gpx *.csv *.tab *.mif *.fgb *.sqlite *.db);;"
+  "Vectoriales (*.shp *.geojson *.json *.gpkg *.kml *.kmz *.gml *.gpx *.csv *.tab *.mif *.fgb *.sqlite *.db);;"
   "Raster (*.tif *.tiff *.img *.vrt *.jp2 *.png *.jpg *.jpeg *.bmp);;"
-  "Shapefile (*.shp);;GeoTIFF (*.tif *.tiff);;Todos los archivos (*)";
+  "Shapefile (*.shp);;GeoTIFF (*.tif *.tiff);;KML (*.kml *.kmz);;Todos los archivos (*)";
 
 /** Proyectos de QGIS: el .qgz comprimido es el habitual. */
 const char *kProjectFilter =
@@ -1820,7 +1820,19 @@ void MainWindow::syncLayerPanel()
     // usuario reconoce como carpetas y evita una carpeta con una sola capa.
     if (layer->layerCount() > 1)
       entry.groupName = layer->containerName();
-    entry.kindText = Style::kindName(layer->geometryKind());
+    // KML y otros formatos sin tipo declarado: el nombre propio de la capa
+    // ("Poligono", "Mixta") dice mas que el "Desconocido" del enumerado.
+    entry.kindText = layer->geometryKind() == GeometryKind::Unknown
+                       ? layer->geometryTypeName()
+                       : Style::kindName(layer->geometryKind());
+
+    // Con simbologia importada y varios estilos, el panel lo dice: el color del
+    // mapa viene del archivo, no de la simbologia por defecto de la capa.
+    if (const std::shared_ptr<GeometryStore> store = layer->geometryStore();
+        store && store->hasPerFeatureStyles())
+    {
+      entry.kindText += QStringLiteral(" · %1 estilos").arg(store->styles().size());
+    }
     entry.countText = QString::number(layer->featureCount());
     entry.crsText = layer->crsDescription();
     entry.visible = layer->isVisible();
