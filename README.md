@@ -1,7 +1,7 @@
 # MiniGIS
 
 Visor SIG mínimo en **C++ con Qt 6 y GDAL**: carga capas vectoriales (shapefile, GeoJSON,
-GeoPackage, KML…) y **ráster** (GeoTIFF y cualquier formato que abra GDAL), las dibuja, permite
+GeoPackage, KML/KMZ…) y **ráster** (GeoTIFF y cualquier formato que abra GDAL), las dibuja, permite
 hacer zoom y paneo, consultar la tabla de atributos, cambiar la simbología básica y ajustar el
 contraste de los rásters.
 
@@ -217,6 +217,7 @@ minigis [opciones] [archivos...]
 | `--identify-radius <px>` | Radio de búsqueda de Identificar, en píxeles (por defecto `6`) |
 | `--identify-layer <nombre>` | Limita Identificar a la capa con ese nombre (el resto no se consulta) |
 | `--check-identify` | Comprueba Identificar: geometría exacta, huecos, radio, capas sin índice, orden, alcance del árbol, panel, marcador, selección/resalte, tabla y caché |
+| `--check-kml` | Comprueba que un KML/KMZ se lee completo (elementos por tipo, sin geometría, partes no soportadas), que el almacén conserva todos los elementos que traen geometría y qué simbología se aplica (`styleMode`) |
 | `--snapshot-raster-dialog <archivo.png>` | Captura el diálogo de estilo ráster y sale |
 | `-V, --verbose` | Trazas en `stderr` (los datos siguen limpios en `stdout`) |
 | `-h, --help` / `-v, --version` | Ayuda con ejemplos / versiones de Qt, GDAL y PROJ y rutas de datos |
@@ -406,6 +407,10 @@ bin\minigis.exe --check-refresh -l data\sample\shapefiles\parcels.shp
 :: comprobar el etiquetado: campos, escalas, solapes, repeticiones y caché de textos
 bin\minigis.exe --check-labels -l data\sample\shapefiles\parcels.shp
 
+:: comprobar que un KML/KMZ se lee completo y con qué simbologia se dibuja
+bin\minigis.exe --check-kml --json -l data\sample\kml\mixto.kml
+bin\minigis.exe --check-kml -l "C:\datos\fronteras.kml"
+
 :: etiquetas desde la linea de ordenes (util para capturas y para el banco de pruebas)
 bin\minigis.exe --snapshot mapa.png -l capa.shp --label-field "nombre,uso" --label-size 11
 bin\minigis.exe --snapshot mapa.png -l capa.shp --label-field nombre --label-map-size 25
@@ -540,6 +545,8 @@ Todo lo siguiente se ejecutó sobre este equipo con Qt 6.10.3 y el preset `windo
 | `minigis --info` y `--check-layers` sobre `ejemplo.gpkg` | 4 capas (`cities`, `parcels`, `parcels_utm30`, `area_sur`), 1 grupo con el nombre del archivo, encuadre inicial con todas y píxeles propios de cada una |
 | `minigis --check-layers` sobre un GeoPackage real con 3 capas sin SRC (`srs_id 99999`) | Las 3 capas heredan el SRC de la que sí lo declara, el encuadre queda en México y las 4 se dibujan |
 | `minigis --check-identify` (parcelas, ciudades y ortofoto) | **31 comprobaciones OK**: punto, huecos, radio de 3/6 px, camino OGR, modo envolventes, recorte, prioridad, alcance, panel, marcador, selección/resalte, tabla y caché |
+| `minigis --check-kml` sobre `mixto.kml` y `estilos_varios.kml` | **2 de 2 elementos conservados** (la `MultiGeometry` mixta incluida), tipos por elemento y estilo por elemento: `styleMode: perFeature`, 2 estilos, rojo `#ff0000` de 3 px |
+| `minigis --info` sobre un KML de 21,6 MB (258 países) | driver `LIBKML`, `EPSG:4326`, `Poligono`, 258 de 258 elementos, ~600 ms de apertura |
 | `minigis --identify-at --json` (Madrid, capa limitada, UTM y hueco) | Contrato JSON y códigos de salida correctos; incluye `selection` (o `null` en el hueco) |
 | `minigis --snapshot-window --with-attributes --identify-at` | Captura con el resalte del objeto y la tabla movida a su fila |
 | `ctest --preset windows-msvc-release` | **18/18 pruebas superadas** (24/24 con las pruebas de proyecto, ver abajo) |
