@@ -569,6 +569,93 @@ elseif(MODE STREQUAL "check-project")
     message(STATUS "minigis --check-project OK")
   endif()
 
+elseif(MODE STREQUAL "geoparquet")
+  # Contrato de --check-geoparquet: el archivo debe leerse completo y el almacen
+  # debe conservar todos los elementos con geometria. Las expectativas son
+  # opcionales para que el mismo modo sirva a varios fixtures.
+  execute_process(
+    COMMAND "${MINIGIS_EXE}" --check-geoparquet --json --layer "${SAMPLE}"
+    RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+  if(NOT _rc EQUAL EXPECT_EXIT)
+    message(FATAL_ERROR "minigis --check-geoparquet fallo (codigo ${_rc}, esperado ${EXPECT_EXIT})\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")
+  endif()
+
+  if(EXPECT_EXIT EQUAL 0)
+    foreach(_key IN ITEMS "\"ok\": true" "\"driver\": \"Parquet\"")
+      if(NOT _out MATCHES "${_key}")
+        message(FATAL_ERROR "La salida de --check-geoparquet no contiene ${_key}:\n${_out}")
+      endif()
+    endforeach()
+
+    if(DEFINED EXPECT_FEATURES AND NOT _out MATCHES "\"features\": ${EXPECT_FEATURES}")
+      message(FATAL_ERROR "Se esperaban ${EXPECT_FEATURES} elementos:\n${_out}")
+    endif()
+    if(DEFINED EXPECT_STORE AND NOT _out MATCHES "\"storeFeatures\": ${EXPECT_STORE}")
+      message(FATAL_ERROR "Se esperaban ${EXPECT_STORE} elementos en el almacen:\n${_out}")
+    endif()
+    if(DEFINED EXPECT_WITHOUT AND NOT _out MATCHES "\"withoutGeometry\": ${EXPECT_WITHOUT}")
+      message(FATAL_ERROR "Se esperaban ${EXPECT_WITHOUT} elementos sin geometria:\n${_out}")
+    endif()
+    if(DEFINED EXPECT_EPSG AND NOT _out MATCHES "\"crsEpsg\": ${EXPECT_EPSG}")
+      message(FATAL_ERROR "Se esperaba EPSG:${EXPECT_EPSG}:\n${_out}")
+    endif()
+    if(DEFINED EXPECT_POINTS AND NOT _out MATCHES "\"points\": ${EXPECT_POINTS}")
+      message(FATAL_ERROR "Se esperaban ${EXPECT_POINTS} puntos:\n${_out}")
+    endif()
+    if(DEFINED EXPECT_LINES AND NOT _out MATCHES "\"lines\": ${EXPECT_LINES}")
+      message(FATAL_ERROR "Se esperaban ${EXPECT_LINES} lineas:\n${_out}")
+    endif()
+    if(DEFINED EXPECT_POLYGONS AND NOT _out MATCHES "\"polygons\": ${EXPECT_POLYGONS}")
+      message(FATAL_ERROR "Se esperaban ${EXPECT_POLYGONS} poligonos:\n${_out}")
+    endif()
+    if(DEFINED EXPECT_FID AND NOT _out MATCHES "\"fidColumn\": \"${EXPECT_FID}\"")
+      message(FATAL_ERROR "Se esperaba la columna FID ${EXPECT_FID}:\n${_out}")
+    endif()
+    if(DEFINED EXPECT_CRS_UNKNOWN AND NOT _out MATCHES "\"crsName\": \"\"")
+      message(FATAL_ERROR "Se esperaba un SRC desconocido:\n${_out}")
+    endif()
+    message(STATUS "minigis --check-geoparquet OK")
+  endif()
+
+elseif(MODE STREQUAL "geoparquet-info")
+  execute_process(
+    COMMAND "${MINIGIS_EXE}" --info --json --layer "${SAMPLE}"
+    RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+  if(NOT _rc EQUAL EXPECT_EXIT)
+    message(FATAL_ERROR "minigis --info de GeoParquet fallo (codigo ${_rc}, esperado ${EXPECT_EXIT})\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")
+  endif()
+
+  if(EXPECT_EXIT EQUAL 0)
+    foreach(_key IN ITEMS "\"driver\": \"Parquet\"")
+      if(NOT _out MATCHES "${_key}")
+        message(FATAL_ERROR "La salida de --info no contiene ${_key}:\n${_out}")
+      endif()
+    endforeach()
+    if(DEFINED EXPECT_FEATURES AND NOT _out MATCHES "\"features\": ${EXPECT_FEATURES}")
+      message(FATAL_ERROR "Se esperaban ${EXPECT_FEATURES} elementos:\n${_out}")
+    endif()
+    if(DEFINED EXPECT_EPSG AND NOT _out MATCHES "\"epsg\": ${EXPECT_EPSG}")
+      message(FATAL_ERROR "Se esperaba EPSG:${EXPECT_EPSG}:\n${_out}")
+    endif()
+    message(STATUS "minigis --info (GeoParquet) OK")
+  endif()
+
+elseif(MODE STREQUAL "geoparquet-error")
+  # Rechazos: una tabla Parquet sin geometria (5) o una carpeta particionada (3).
+  execute_process(
+    COMMAND "${MINIGIS_EXE}" --info --json --layer "${SAMPLE}"
+    RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+  if(NOT _rc EQUAL EXPECT_EXIT)
+    message(FATAL_ERROR "minigis --info fallo (codigo ${_rc}, esperado ${EXPECT_EXIT})\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")
+  endif()
+  if(DEFINED EXPECT_TEXT)
+    set(_all "${_out}\n${_err}")
+    if(NOT _all MATCHES "${EXPECT_TEXT}")
+      message(FATAL_ERROR "El mensaje no contiene «${EXPECT_TEXT}»:\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")
+    endif()
+  endif()
+  message(STATUS "minigis rechazo de GeoParquet OK")
+
 elseif(MODE STREQUAL "kml")
   # El archivo debe leerse completo: ni un elemento con geometria puede quedarse
   # por el camino. La comprobacion compara lo que entrega OGR con lo que conserva

@@ -378,6 +378,139 @@ set_tests_properties(minigis.kml-ventana PROPERTIES
   TIMEOUT 120
   ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+# --- GeoParquet -----------------------------------------------------------
+# El motor solo puede abrir GeoParquet si GDAL se compilo con la feature
+# `parquet` de vcpkg. Las pruebas cubren apertura, atributos, SRC, tipos
+# mixtos, rechazos y el contrato de --check-geoparquet.
+set(MINIGIS_SAMPLE_GEOPARQUET_DIR "${MINIGIS_ROOT_DIR}/data/sample/geoparquet")
+
+add_test(NAME minigis.geoparquet-info
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DSAMPLE=${MINIGIS_SAMPLE_GEOPARQUET_DIR}/parcels.parquet"
+          "-DEXPECT_FEATURES=5"
+          "-DEXPECT_EPSG=4326"
+          -DMODE=geoparquet-info
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
+add_test(NAME minigis.geoparquet-utm
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DSAMPLE=${MINIGIS_SAMPLE_GEOPARQUET_DIR}/parcels_utm30.parquet"
+          "-DEXPECT_FEATURES=5"
+          "-DEXPECT_EPSG=25830"
+          -DMODE=geoparquet-info
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
+add_test(NAME minigis.geoparquet-snapshot
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DSAMPLE=${MINIGIS_SAMPLE_GEOPARQUET_DIR}/parcels.parquet"
+          "-DOUT=${CMAKE_BINARY_DIR}/test-output/geoparquet.png"
+          -DMODE=snapshot
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
+add_test(NAME minigis.geoparquet-check
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DSAMPLE=${MINIGIS_SAMPLE_GEOPARQUET_DIR}/parcels.parquet"
+          "-DEXPECT_FEATURES=5"
+          "-DEXPECT_STORE=5"
+          "-DEXPECT_EPSG=4326"
+          -DMODE=geoparquet
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
+# La MultiGeometry mixta del KML, ahora escrita como GeoParquet: debe conservar
+# el punto, la linea y los dos poligonos (uno dentro de la coleccion y otro
+# suelto). Es el mismo caso que rompia el dibujado antes de la feature de KML.
+add_test(NAME minigis.geoparquet-mixto
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DSAMPLE=${MINIGIS_SAMPLE_GEOPARQUET_DIR}/mixto.parquet"
+          "-DEXPECT_FEATURES=2"
+          "-DEXPECT_STORE=2"
+          "-DEXPECT_POINTS=1"
+          "-DEXPECT_LINES=1"
+          "-DEXPECT_POLYGONS=2"
+          -DMODE=geoparquet
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
+add_test(NAME minigis.geoparquet-sin-geometria
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DSAMPLE=${MINIGIS_SAMPLE_GEOPARQUET_DIR}/sin_geometria.parquet"
+          "-DEXPECT_FEATURES=2"
+          "-DEXPECT_WITHOUT=1"
+          -DMODE=geoparquet
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
+add_test(NAME minigis.geoparquet-sin-crs
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DSAMPLE=${MINIGIS_SAMPLE_GEOPARQUET_DIR}/sin_crs.parquet"
+          "-DEXPECT_FEATURES=5"
+          "-DEXPECT_EPSG=0"
+          -DEXPECT_CRS_UNKNOWN=1
+          -DMODE=geoparquet
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
+add_test(NAME minigis.geoparquet-vacio
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DSAMPLE=${MINIGIS_SAMPLE_GEOPARQUET_DIR}/vacio.parquet"
+          "-DEXPECT_FEATURES=0"
+          -DMODE=geoparquet
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
+add_test(NAME minigis.geoparquet-fid
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DSAMPLE=${MINIGIS_SAMPLE_GEOPARQUET_DIR}/parcels_fid.parquet"
+          "-DEXPECT_FEATURES=5"
+          "-DEXPECT_FID=parcel_id"
+          -DMODE=geoparquet
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
+# Una tabla Parquet sin geometria no es un GeoParquet: codigo 5 y mensaje.
+add_test(NAME minigis.geoparquet-tabla
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DSAMPLE=${MINIGIS_SAMPLE_GEOPARQUET_DIR}/tabla.parquet"
+          "-DEXPECT_EXIT=5"
+          "-DEXPECT_TEXT=no contiene ninguna columna de geometria"
+          -DMODE=geoparquet-error
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
+# Una carpeta con .parquet es una coleccion particionada: no se abre.
+add_test(NAME minigis.geoparquet-carpeta
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DSAMPLE=${MINIGIS_SAMPLE_GEOPARQUET_DIR}"
+          "-DEXPECT_EXIT=3"
+          "-DEXPECT_TEXT=carpeta con archivos .parquet"
+          -DMODE=geoparquet-error
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
+# Si el driver no esta compilado, el error debe decir que falta y como
+# arreglarlo, no el «GDAL no pudo abrir» generico. GDAL_SKIP simula esa build.
+add_test(NAME minigis.geoparquet-sin-driver
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DSAMPLE=${MINIGIS_SAMPLE_GEOPARQUET_DIR}/parcels.parquet"
+          "-DEXPECT_EXIT=3"
+          "-DEXPECT_TEXT=no incluye el driver Parquet"
+          -DMODE=geoparquet-error
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+set_tests_properties(minigis.geoparquet-sin-driver PROPERTIES
+  ENVIRONMENT "QT_QPA_PLATFORM=offscreen;GDAL_SKIP=Parquet")
+
+set_tests_properties(
+  minigis.geoparquet-info minigis.geoparquet-utm minigis.geoparquet-snapshot
+  minigis.geoparquet-check minigis.geoparquet-mixto minigis.geoparquet-sin-geometria
+  minigis.geoparquet-sin-crs minigis.geoparquet-vacio minigis.geoparquet-fid
+  minigis.geoparquet-tabla minigis.geoparquet-carpeta
+  PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 # --- PostGIS --------------------------------------------------------------
 # Piezas que no necesitan servidor: URI pg:, catalogo Connections.xml, cadena
 # de conexion y saneado de la contrasena. La integracion real es opt-in en

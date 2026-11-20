@@ -1,0 +1,4 @@
+{"type":"FeatureCollection","features":[
+ {"type":"Feature","properties":{"id":1,"nombre":"sin geom"},"geometry":null},
+ {"type":"Feature","properties":{"id":2,"nombre":"con geom"},"geometry":{"type":"Point","coordinates":[-3.7,40.4]}}
+]}
