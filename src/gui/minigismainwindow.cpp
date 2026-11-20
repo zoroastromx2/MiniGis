@@ -59,10 +59,12 @@ constexpr int kIdentifyRadiusPixels = 6;
 /** Formatos que ofrece el dialogo de apertura: vectoriales y raster. */
 const char *kOpenFilter =
   "Capas (*.shp *.geojson *.json *.gpkg *.kml *.kmz *.gml *.gpx *.csv *.tab *.mif *.fgb *.sqlite *.db "
-  "*.tif *.tiff *.img *.vrt *.jp2 *.png *.jpg *.jpeg *.bmp);;"
-  "Vectoriales (*.shp *.geojson *.json *.gpkg *.kml *.kmz *.gml *.gpx *.csv *.tab *.mif *.fgb *.sqlite *.db);;"
+  "*.parquet *.geoparquet *.tif *.tiff *.img *.vrt *.jp2 *.png *.jpg *.jpeg *.bmp);;"
+  "Vectoriales (*.shp *.geojson *.json *.gpkg *.kml *.kmz *.gml *.gpx *.csv *.tab *.mif *.fgb *.sqlite *.db "
+  "*.parquet *.geoparquet);;"
   "Raster (*.tif *.tiff *.img *.vrt *.jp2 *.png *.jpg *.jpeg *.bmp);;"
-  "Shapefile (*.shp);;GeoTIFF (*.tif *.tiff);;KML (*.kml *.kmz);;Todos los archivos (*)";
+  "Shapefile (*.shp);;GeoTIFF (*.tif *.tiff);;KML (*.kml *.kmz);;"
+  "GeoParquet (*.parquet *.geoparquet);;Todos los archivos (*)";
 
 /** Proyectos de QGIS: el .qgz comprimido es el habitual. */
 const char *kProjectFilter =
