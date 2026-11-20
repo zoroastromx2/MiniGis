@@ -112,10 +112,41 @@ GDALDatasetH openVectorDataset(const QString &path, Error *error, PgFailure *fai
     return openPgDataset(source, error, failure);
   }
 
-  if (!QFileInfo::exists(path))
+  const QFileInfo fileInfo(path);
+  if (fileInfo.isDir())
+  {
+    // Una carpeta de .parquet es una coleccion particionada: el driver Parquet
+    // de esta build no la lee (necesita arrow[dataset]). Se rechaza aqui, antes
+    // de que GDAL la confunda con otra cosa, con una accion concreta.
+    const QStringList parquetFiles =
+      QDir(path).entryList(QStringList {QStringLiteral("*.parquet"), QStringLiteral("*.geoparquet")},
+                           QDir::Files);
+    if (!parquetFiles.isEmpty())
+    {
+      return fail(QStringLiteral("«%1» es una carpeta con archivos .parquet.").arg(QDir::toNativeSeparators(path)),
+                  QStringLiteral("Abre uno de los archivos .parquet, no la carpeta: las colecciones "
+                                 "particionadas de Parquet no estan soportadas."));
+    }
+  }
+
+  if (!fileInfo.exists())
   {
     return fail(QStringLiteral("No existe el archivo «%1».").arg(QDir::toNativeSeparators(path)),
                 QStringLiteral("Comprueba la ruta. Un shapefile necesita sus ficheros .shp, .shx y .dbf en la misma carpeta."));
+  }
+
+  // El sintoma es confuso: el archivo es valido pero GDAL no lo reconoce porque
+  // el driver no se compilo. Se detecta antes de abrir para dar la accion exacta
+  // en lugar del «no pudo abrir» generico.
+  const QString suffix = fileInfo.suffix().toLower();
+  const bool parquetPath = suffix == QStringLiteral("parquet") || suffix == QStringLiteral("geoparquet");
+  if (parquetPath && GDALGetDriverByName("Parquet") == nullptr)
+  {
+    return fail(QStringLiteral("Este GDAL no incluye el driver Parquet, asi que no puede abrir «%1».")
+                  .arg(QDir::toNativeSeparators(path)),
+                QStringLiteral("Recompila GDAL con la feature parquet de vcpkg:\n"
+                               "  vcpkg install \"gdal[parquet]\" --triplet x64-windows\n"
+                               "y vuelve a configurar y compilar MiniGIS."));
   }
 
   clearLastGdalError();
@@ -125,7 +156,7 @@ GDALDatasetH openVectorDataset(const QString &path, Error *error, PgFailure *fai
 
   if (!datasetHandle)
   {
-    QString hint = QStringLiteral("Formatos vectoriales habituales: .shp, .geojson, .gpkg, .kml, .gml. "
+    QString hint = QStringLiteral("Formatos vectoriales habituales: .shp, .geojson, .gpkg, .kml, .gml, .parquet. "
                                   "Puedes inspeccionar el archivo con: gdalinfo \"%1\"")
                      .arg(QDir::toNativeSeparators(path));
     const QString gdalMessage = lastGdalError();
@@ -151,9 +182,9 @@ VectorLayer::~VectorLayer()
 }
 
 std::shared_ptr<VectorLayer> VectorLayer::open(const QString &path, Error *error,
-                                               PgFailure *pgFailure)
+                                               PgFailure *pgFailure, VectorOpenIssue *issue)
 {
-  return open(path, 0, error, pgFailure);
+  return open(path, 0, error, pgFailure, issue);
 }
 
 QStringList VectorLayer::layerNames(const QString &path, Error *error, PgFailure *pgFailure)
@@ -203,13 +234,16 @@ QStringList VectorLayer::layerNames(const QString &path, Error *error, PgFailure
 }
 
 std::shared_ptr<VectorLayer> VectorLayer::open(const QString &path, int layerIndex, Error *error,
-                                               PgFailure *pgFailure)
+                                               PgFailure *pgFailure, VectorOpenIssue *issue)
 {
   const auto fail = [error](const QString &message, const QString &hint) -> std::shared_ptr<VectorLayer> {
     if (error)
       *error = Error {message, hint};
     return {};
   };
+
+  if (issue)
+    *issue = VectorOpenIssue::None;
 
   Error openError;
   PgFailure failure = PgFailure::None;
@@ -250,10 +284,35 @@ std::shared_ptr<VectorLayer> VectorLayer::open(const QString &path, int layerInd
                 QStringLiteral("Comprueba el contenido con: ogrinfo -so \"%1\"").arg(sourceLabel(path)));
   }
 
+  QString driverName;
+  if (GDALDriverH driver = GDALGetDatasetDriver(datasetHandle))
+  {
+    const char *rawDriverName = GDALGetDescription(driver);
+    driverName = QString::fromUtf8(rawDriverName ? rawDriverName : "");
+  }
+
+  // Un .parquet valido puede ser una tabla sin geometria. No es un GeoParquet y
+  // abrirlo como capa vacia haria creer que el dibujo fallo; se rechaza aqui,
+  // solo para el driver Parquet, sin cambiar el resto de formatos.
+  const bool isParquet = driverName.compare(QStringLiteral("Parquet"), Qt::CaseInsensitive) == 0;
+  OGRFeatureDefnH definition = OGR_L_GetLayerDefn(layerHandle);
+  const bool hasGeometryFields = definition && OGR_FD_GetGeomFieldCount(definition) > 0;
+  if (isParquet && OGR_L_GetGeomType(layerHandle) == wkbNone && !hasGeometryFields)
+  {
+    GDALClose(datasetHandle);
+    if (issue)
+      *issue = VectorOpenIssue::NoGeometry;
+    return fail(QStringLiteral("«%1» es un archivo Parquet, pero no contiene ninguna columna de geometria.")
+                  .arg(sourceLabel(path)),
+                QStringLiteral("MiniGIS abre GeoParquet, no tablas Parquet. Exporta la capa con geometria "
+                               "desde QGIS, DuckDB u ogr2ogr y vuelve a intentarlo."));
+  }
+
   std::shared_ptr<VectorLayer> layer(new VectorLayer);
   layer->mDatasetHandle = datasetHandle;
   layer->mLayerHandle = layerHandle;
   layer->mSourcePath = path;
+  layer->mDriverName = driverName;
 
   if (pgSource.isValid())
   {
@@ -275,12 +334,6 @@ std::shared_ptr<VectorLayer> VectorLayer::open(const QString &path, int layerInd
 
   const char *layerName = OGR_L_GetName(layerHandle);
   layer->mName = QString::fromUtf8(layerName ? layerName : "");
-
-  if (GDALDriverH driver = GDALGetDatasetDriver(datasetHandle))
-  {
-    const char *driverName = GDALGetDescription(driver);
-    layer->mDriverName = QString::fromUtf8(driverName ? driverName : "");
-  }
 
   layer->readMetadata();
   // La herencia del SRC necesita el SRC ya resuelto y la extension de la capa

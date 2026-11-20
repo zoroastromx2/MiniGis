@@ -25,6 +25,20 @@ namespace minigis
 class GeometryStore;
 
 /**
+ * Motivo tipado por el que una capa no se puede abrir, cuando el texto del
+ * error no basta para elegir el codigo de salida de la CLI.
+ *
+ * Existe para no confundir «GDAL no abre» (codigo 3) con «el archivo abre pero
+ * no es una capa dibujable» (codigo 5, por ejemplo una tabla Parquet sin
+ * geometria). El GUI lo ignora: muestra el mensaje igual.
+ */
+enum class VectorOpenIssue
+{
+  None,
+  NoGeometry
+};
+
+/**
  * Capa vectorial abierta con GDAL/OGR (equivalente minimo a QgsVectorLayer).
  *
  * Es de solo lectura y es dueña del dataset de GDAL, que se cierra en el
@@ -52,9 +66,12 @@ public:
    *
    * `pgFailure` solo se rellena cuando la fuente es PostGIS: la CLI lo usa para
    * elegir entre codigo 2 (catalogo), 8 (conexion/autenticacion) y 3 (resto).
+   * `issue` distingue el archivo que abre pero no tiene geometria (por ejemplo
+   * una tabla Parquet), que la CLI trata como «sin capas» (codigo 5).
    */
   static std::shared_ptr<VectorLayer> open(const QString &path, Error *error = nullptr,
-                                           PgFailure *pgFailure = nullptr);
+                                           PgFailure *pgFailure = nullptr,
+                                           VectorOpenIssue *issue = nullptr);
 
   /**
    * Abre la capa `layerIndex` de un archivo que puede contener varias (un
@@ -66,7 +83,8 @@ public:
    */
   static std::shared_ptr<VectorLayer> open(const QString &path, int layerIndex,
                                            Error *error = nullptr,
-                                           PgFailure *pgFailure = nullptr);
+                                           PgFailure *pgFailure = nullptr,
+                                           VectorOpenIssue *issue = nullptr);
 
   /**
    * Nombres de todas las capas vectoriales que contiene un archivo, en orden.
