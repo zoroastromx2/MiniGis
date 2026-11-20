@@ -36,12 +36,17 @@ struct LayerEntry
   QString name;
   QString sourcePath;
   /**
-   * Nombre visible del archivo que contiene la capa. Solo lo llevan las capas de
-   * un archivo con varias (un GeoPackage): las de un archivo de una sola capa lo
-   * dejan vacio y se muestran como filas sueltas. Las filas con el mismo
-   * `sourcePath` se agrupan bajo este nombre.
+   * Nombre visible del grupo. Solo lo llevan las capas de un archivo con varias
+   * (un GeoPackage) y las tablas PostGIS: las demas se muestran como filas
+   * sueltas. Las filas con el mismo `groupKey` se agrupan bajo este nombre.
    */
   QString groupName;
+  /**
+   * Identidad del grupo: la ruta del archivo, o `pg:conexion/esquema` para las
+   * tablas PostGIS. Dos tablas del mismo esquema comparten grupo aunque cada una
+   * tenga su propia URI como `sourcePath`.
+   */
+  QString groupKey;
   QString kindText;
   QString countText;
   QString crsText;

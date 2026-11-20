@@ -40,11 +40,10 @@ QString groupLabel(const LayerEntry &entry)
   return QFileInfo(entry.sourcePath).fileName();
 }
 
-/** Dos filas pertenecen al mismo archivo (y por tanto al mismo grupo). */
+/** Dos filas pertenecen al mismo grupo (mismo archivo o misma conexion/esquema). */
 bool sameSource(const LayerEntry &left, const LayerEntry &right)
 {
-  return !left.sourcePath.isEmpty() && !left.groupName.isEmpty()
-         && left.sourcePath == right.sourcePath;
+  return !left.groupKey.isEmpty() && left.groupKey == right.groupKey;
 }
 
 } // namespace
@@ -180,7 +179,7 @@ void LayerPanel::setLayers(const std::vector<LayerEntry> &layers, const LayerEnt
       parent->setToolTip(ColumnName, QDir::toNativeSeparators(first.sourcePath));
       parent->setText(ColumnGeometry, QStringLiteral("%1 capas").arg(runEnd - index));
       parent->setFlags(parent->flags() & ~Qt::ItemIsUserCheckable);
-      parent->setData(ColumnName, kGroupRole, first.sourcePath);
+      parent->setData(ColumnName, kGroupRole, first.groupKey);
 
       QFont groupFont = parent->font(ColumnName);
       groupFont.setBold(true);
@@ -191,7 +190,7 @@ void LayerPanel::setLayers(const std::vector<LayerEntry> &layers, const LayerEnt
       addLayerRow(parent, row, current);
 
     if (parent)
-      parent->setExpanded(!mCollapsedGroups.contains(mLayers[index].sourcePath));
+      parent->setExpanded(!mCollapsedGroups.contains(mLayers[index].groupKey));
 
     index = runEnd;
   }

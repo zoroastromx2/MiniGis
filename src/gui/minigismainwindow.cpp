@@ -8,6 +8,9 @@
 #include "minigislayerpanel.h"
 #include "minigismapcanvas.h"
 #include "minigislabeldialog.h"
+#include "minigisconnections.h"
+#include "minigispostgisdialog.h"
+#include "minigispgsource.h"
 #include "minigisqgisproject.h"
 #include "minigisrasterlayer.h"
 #include "minigisrasterstyledialog.h"
@@ -133,6 +136,12 @@ void MainWindow::createActions()
   mOpenProjectAction->setStatusTip(QStringLiteral("Abrir un proyecto de QGIS (.qgz o .qgs)"));
   connect(mOpenProjectAction, &QAction::triggered, this, &MainWindow::openProjectDialog);
 
+  mPostgisAction = new QAction(QStringLiteral("Abrir conexión &PostGIS..."), this);
+  mPostgisAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+P")));
+  mPostgisAction->setStatusTip(
+    QStringLiteral("Abrir tablas de PostgreSQL/PostGIS con una conexión de Connections.xml"));
+  connect(mPostgisAction, &QAction::triggered, this, &MainWindow::openPostgisDialog);
+
   mSaveProjectAction = new QAction(QStringLiteral("&Guardar proyecto"), this);
   mSaveProjectAction->setShortcut(QKeySequence::Save);
   mSaveProjectAction->setStatusTip(QStringLiteral("Guardar los cambios en el proyecto abierto"));
@@ -220,6 +229,7 @@ void MainWindow::createMenusAndToolBar()
   QMenu *fileMenu = menuBar()->addMenu(QStringLiteral("&Archivo"));
   fileMenu->addAction(mOpenAction);
   fileMenu->addAction(mOpenProjectAction);
+  fileMenu->addAction(mPostgisAction);
   mRecentMenu = fileMenu->addMenu(QStringLiteral("Abrir recientes"));
   fileMenu->addAction(mSampleAction);
   fileMenu->addSeparator();
@@ -253,6 +263,7 @@ void MainWindow::createMenusAndToolBar()
   toolBar->setMovable(false);
   toolBar->addAction(mOpenAction);
   toolBar->addAction(mOpenProjectAction);
+  toolBar->addAction(mPostgisAction);
   toolBar->addAction(mSampleAction);
   toolBar->addSeparator();
   toolBar->addAction(mZoomOutAction);
@@ -479,12 +490,19 @@ void MainWindow::onLayerLoaded(const std::shared_ptr<VectorLayer> &layer, bool f
   const bool zoomToExtent = first || mCanvas->layers().empty();
   mCurrentRaster.reset();
   mCanvas->addLayer(layer, zoomToExtent);
-  mLastDirectory = QFileInfo(layer->sourcePath()).absolutePath();
 
-  // Un archivo con varias capas emite una senal por capa: se anota una sola vez
-  // en los recientes para no reescribir la configuracion N veces.
-  if (mRecentFiles.isEmpty() || mRecentFiles.first() != QFileInfo(layer->sourcePath()).absoluteFilePath())
-    addRecentFile(layer->sourcePath());
+  // Una tabla PostGIS no es una ruta de disco: no actualiza la carpeta de los
+  // dialogos ni entra en «Recientes» (que se valida con QFileInfo::exists).
+  if (!layer->isPostgis())
+  {
+    mLastDirectory = QFileInfo(layer->sourcePath()).absolutePath();
+
+    // Un archivo con varias capas emite una senal por capa: se anota una sola
+    // vez en los recientes para no reescribir la configuracion N veces.
+    if (mRecentFiles.isEmpty()
+        || mRecentFiles.first() != QFileInfo(layer->sourcePath()).absoluteFilePath())
+      addRecentFile(layer->sourcePath());
+  }
   updateCrsLabel();
 
   // Si la capa no cabia en memoria se ha indexado por envolventes: se avisa,
@@ -509,7 +527,8 @@ void MainWindow::onLayerLoaded(const std::shared_ptr<VectorLayer> &layer, bool f
 void MainWindow::onLayerLoadFailed(const QString &path, const QString &message, const QString &hint)
 {
   Error error {message, hint};
-  showError(QStringLiteral("No se pudo abrir «%1»").arg(QFileInfo(path).fileName()), error);
+  const QString name = path.isEmpty() ? QStringLiteral("la capa") : QFileInfo(path).fileName();
+  showError(QStringLiteral("No se pudo abrir «%1»").arg(name), error);
 }
 
 void MainWindow::onLoadFinished(int loaded, int failed, bool cancelled)
@@ -853,6 +872,8 @@ void MainWindow::saveProject()
   if (!mProject)
     return;
 
+  warnSkippedPostgisLayers();
+
   if (mProjectPath.isEmpty())
   {
     saveProjectAs();
@@ -879,6 +900,8 @@ void MainWindow::saveProjectAs()
 {
   if (!mProject)
     return;
+
+  warnSkippedPostgisLayers();
 
   const QString suggested = mProjectPath.isEmpty() ? QStringLiteral("proyecto.qgz") : mProjectPath;
   QString target = QFileDialog::getSaveFileName(this, QStringLiteral("Guardar proyecto como"), suggested,
@@ -1039,6 +1062,12 @@ ProjectSnapshot MainWindow::buildProjectSnapshot() const
     if (!vector)
       continue;
 
+    // Las capas PostGIS no se serializan en el .qgz (fuera de alcance en v1):
+    // su datasource incluiria la cadena de conexion y el provider postgres de
+    // QGIS es otro contrato.
+    if (vector->isPostgis())
+      continue;
+
     ProjectLayer layer;
     const QString id = vectorId(vector);
     const ProjectLayer *entry = id.isEmpty() ? nullptr : projectLayerById(id);
@@ -1179,9 +1208,41 @@ void MainWindow::showUnavailableProjectLayers()
   box.exec();
 }
 
+int MainWindow::postgisLayerCount() const
+{
+  int count = 0;
+  for (const std::shared_ptr<VectorLayer> &layer : mCanvas->layers())
+  {
+    if (layer && layer->isPostgis())
+      ++count;
+  }
+  return count;
+}
+
+void MainWindow::warnSkippedPostgisLayers()
+{
+  const int count = postgisLayerCount();
+  if (count <= 0)
+    return;
+
+  QMessageBox::information(
+    this, QStringLiteral("Capas PostGIS"),
+    QStringLiteral("%1 capa(s) PostGIS no se guardan en el proyecto: el .qgz solo conserva "
+                   "capas de archivo. Las capas siguen en esta sesion.")
+      .arg(count));
+}
+
 void MainWindow::onProjectLayerReady(const std::shared_ptr<VectorLayer> &layer, int requestId)
 {
-  if (!mProjectLoadActive || requestId < 0 || requestId >= mPendingProjectIds.size() || !layer)
+  // El cargador usa requestReady tambien para las tablas PostGIS del dialogo,
+  // que no forman parte de ningun proyecto.
+  if (!mProjectLoadActive)
+  {
+    onLayerLoaded(layer, mCanvas->layers().empty());
+    return;
+  }
+
+  if (requestId < 0 || requestId >= mPendingProjectIds.size() || !layer)
     return;
 
   const ProjectLayer *entry = projectLayerById(mPendingProjectIds.at(requestId));
@@ -1199,6 +1260,12 @@ void MainWindow::onProjectLayerReady(const std::shared_ptr<VectorLayer> &layer, 
 
 void MainWindow::onProjectLayerFailed(int requestId, const QString &message, const QString &hint)
 {
+  if (!mProjectLoadActive)
+  {
+    onLayerLoadFailed(QString(), message, hint);
+    return;
+  }
+
   Q_UNUSED(hint);
   if (!mProjectLoadActive || requestId < 0 || requestId >= mPendingProjectIds.size())
     return;
@@ -1215,6 +1282,50 @@ void MainWindow::openLayerDialog()
 
   if (!files.isEmpty())
     loadPaths(files);
+}
+
+void MainWindow::openPostgisDialog()
+{
+  if (mLoader->isRunning())
+  {
+    statusBar()->showMessage(QStringLiteral("Ya hay una carga en curso; espera o pulsa Cancelar."),
+                             kStatusTimeoutMs);
+    return;
+  }
+
+  PostgisDialog dialog(this);
+  dialog.setCatalogPath(PgConnectionCatalog::resolvePath(PgConnectionCatalog::explicitPath()));
+  if (dialog.exec() != QDialog::Accepted)
+    return;
+
+  const QVector<PgLayerSelection> selections = dialog.selections();
+  if (selections.isEmpty())
+    return;
+
+  QVector<LayerRequest> requests;
+  for (const PgLayerSelection &selection : selections)
+  {
+    PgSource source;
+    source.connection = selection.connection.name;
+    source.schema = selection.schema;
+    source.table = selection.table;
+
+    LayerRequest request;
+    request.path = source.uri();
+    request.layerIndex = 0;
+    request.buildStore = selection.buildStore;
+    requests.append(request);
+  }
+
+  mLoadStartVectorLayers = mCanvas->layers().size();
+  mLoadStartRasterLayers = mCanvas->rasterLayers().size();
+  mLoadBatchPending = true;
+
+  mLoader->setDestinationEpsg(mCanvas->destinationEpsg());
+  setLoadIndicatorVisible(true);
+  mLoadProgress->setValue(0);
+  mLoadLabel->setText(QStringLiteral("Abriendo %1 tabla(s) PostGIS...").arg(requests.size()));
+  mLoader->startRequests(requests);
 }
 
 void MainWindow::openRecentLayer()
@@ -1816,10 +1927,19 @@ void MainWindow::syncLayerPanel()
     entry.vector = layer;
     entry.name = layer->name();
     entry.sourcePath = layer->sourcePath();
-    // Solo se agrupa lo que viene de un archivo con varias capas: es lo que el
-    // usuario reconoce como carpetas y evita una carpeta con una sola capa.
-    if (layer->layerCount() > 1)
+    // Se agrupa lo que viene de un archivo con varias capas y tambien cada
+    // tabla PostGIS: su "carpeta" es conexion/esquema, aunque de momento tenga
+    // una sola capa. Dos tablas del mismo esquema comparten grupo.
+    if (layer->isPostgis())
+    {
       entry.groupName = layer->containerName();
+      entry.groupKey = QStringLiteral("pg:") + layer->containerName();
+    }
+    else if (layer->layerCount() > 1)
+    {
+      entry.groupName = layer->containerName();
+      entry.groupKey = layer->sourcePath();
+    }
     // KML y otros formatos sin tipo declarado: el nombre propio de la capa
     // ("Poligono", "Mixta") dice mas que el "Desconocido" del enumerado.
     entry.kindText = layer->geometryKind() == GeometryKind::Unknown

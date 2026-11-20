@@ -17,6 +17,8 @@ set(MINIGIS_GUI_SRCS
   minigisrasterstyledialog.cpp
   minigislabeldialog.h
   minigislabeldialog.cpp
+  minigispostgisdialog.h
+  minigispostgisdialog.cpp
   minigismainwindow.h
   minigismainwindow.cpp
 )

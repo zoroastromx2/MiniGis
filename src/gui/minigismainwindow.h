@@ -146,6 +146,8 @@ protected:
 
 private slots:
   void openLayerDialog();
+  /** Abre el dialogo de conexion PostGIS y carga las tablas elegidas. */
+  void openPostgisDialog();
   void openProjectDialog();
   void saveProject();
   void saveProjectAs();
@@ -212,6 +214,12 @@ private:
 
   /** Aviso con las capas del proyecto que no se pudieron abrir. */
   void showUnavailableProjectLayers();
+
+  /** Capas PostGIS abiertas en la sesion (no se guardan en el .qgz). */
+  int postgisLayerCount() const;
+
+  /** Avisa, al guardar, de las capas PostGIS que quedan fuera del proyecto. */
+  void warnSkippedPostgisLayers();
 
   /** Foto del estado actual del mapa para guardar y para la firma. */
   ProjectSnapshot buildProjectSnapshot() const;
@@ -297,6 +305,7 @@ private:
   QMenu *mRecentMenu = nullptr;
   QAction *mOpenAction = nullptr;
   QAction *mOpenProjectAction = nullptr;
+  QAction *mPostgisAction = nullptr;
   QAction *mSaveProjectAction = nullptr;
   QAction *mSaveProjectAsAction = nullptr;
   QAction *mSampleAction = nullptr;
