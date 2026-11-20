@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2"><Document><name>estilos varios</name>
+  <Style id="rojo"><LineStyle><color>ff0000ff</color><width>3</width></LineStyle><PolyStyle><color>7f0000ff</color></PolyStyle></Style>
+  <Style id="azul"><LineStyle><color>ffff0000</color><width>3</width></LineStyle><PolyStyle><color>7fff0000</color></PolyStyle></Style>
+  <Placemark><name>A1</name><styleUrl>#rojo</styleUrl><Polygon><outerBoundaryIs><LinearRing><coordinates>-5,39 -5,40 -4,40 -4,39 -5,39</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark>
+  <Placemark><name>A2</name><styleUrl>#rojo</styleUrl><Polygon><outerBoundaryIs><LinearRing><coordinates>-4,39 -4,40 -3,40 -3,39 -4,39</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark>
+  <Placemark><name>B1</name><styleUrl>#azul</styleUrl><Polygon><outerBoundaryIs><LinearRing><coordinates>-5,40 -5,41 -4,41 -4,40 -5,40</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark>
+  <Placemark><name>B2</name><styleUrl>#azul</styleUrl><Polygon><outerBoundaryIs><LinearRing><coordinates>-4,40 -4,41 -3,41 -3,40 -4,40</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark>
+</Document></kml>
+

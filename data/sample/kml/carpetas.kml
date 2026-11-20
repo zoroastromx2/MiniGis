@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2"><Document><name>carpetas</name>
+  <Folder><name>Puntos</name>
+    <Placemark><name>Uno</name><Point><coordinates>-3.7,40.4,0</coordinates></Point></Placemark>
+  </Folder>
+  <Folder><name>Areas</name>
+    <Placemark><name>Dos</name><Polygon><outerBoundaryIs><LinearRing><coordinates>-5,39 -5,41 -2,41 -2,39 -5,39</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark>
+  </Folder>
+</Document></kml>
+

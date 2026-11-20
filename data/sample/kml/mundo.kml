@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2"><Document><name>mundo</name>
+  <Schema name="paises" id="paises">
+    <SimpleField type="string" name="NOMBRE"></SimpleField>
+    <SimpleField type="int" name="POBLACION"></SimpleField>
+  </Schema>
+  <Placemark><name>Uno</name><ExtendedData><SchemaData schemaUrl="#paises">
+    <SimpleData name="NOMBRE">Alfa</SimpleData><SimpleData name="POBLACION">1000</SimpleData>
+  </SchemaData></ExtendedData>
+    <Polygon><outerBoundaryIs><LinearRing><coordinates>-10,40 -10,42 -8,42 -8,40 -10,40</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark>
+  <Placemark><name>Dos</name><ExtendedData><SchemaData schemaUrl="#paises">
+    <SimpleData name="NOMBRE">Beta</SimpleData><SimpleData name="POBLACION">2000</SimpleData>
+  </SchemaData></ExtendedData>
+    <Polygon><outerBoundaryIs><LinearRing><coordinates>-8,40 -8,42 -6,42 -6,40 -8,40</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark>
+  <Placemark><name>Tres</name><ExtendedData><SchemaData schemaUrl="#paises">
+    <SimpleData name="NOMBRE">Gamma</SimpleData><SimpleData name="POBLACION">3000</SimpleData>
+  </SchemaData></ExtendedData>
+    <Polygon><outerBoundaryIs><LinearRing><coordinates>-10,42 -10,44 -8,44 -8,42 -10,42</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark>
+</Document></kml>
+

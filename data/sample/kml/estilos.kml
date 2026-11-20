@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2"><Document><name>estilos</name>
+  <Style id="rojo">
+    <LineStyle><color>ff0000ff</color><width>4</width></LineStyle>
+    <PolyStyle><color>7f0000ff</color></PolyStyle>
+  </Style>
+  <Placemark><name>con estilo</name><styleUrl>#rojo</styleUrl>
+    <Polygon><outerBoundaryIs><LinearRing><coordinates>-5,39 -5,41 -2,41 -2,39 -5,39</coordinates></LinearRing></outerBoundaryIs></Polygon>
+  </Placemark>
+</Document></kml>
+

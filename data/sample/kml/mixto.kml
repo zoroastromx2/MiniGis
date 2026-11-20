@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2"><Document><name>mixto</name>
+  <Placemark><name>coleccion</name>
+    <MultiGeometry>
+      <Point><coordinates>-6.0,42.0,0</coordinates></Point>
+      <LineString><coordinates>-6,42 -4,43</coordinates></LineString>
+      <Polygon><outerBoundaryIs><LinearRing><coordinates>-6,43 -6,44 -4,44 -4,43 -6,43</coordinates></LinearRing></outerBoundaryIs></Polygon>
+    </MultiGeometry>
+  </Placemark>
+  <Placemark><name>poligono</name>
+    <Polygon><outerBoundaryIs><LinearRing><coordinates>-2,42 -2,43 -1,43 -1,42 -2,42</coordinates></LinearRing></outerBoundaryIs></Polygon>
+  </Placemark>
+</Document></kml>
+

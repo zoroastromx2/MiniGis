@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2"><Document><name>solo puntos</name>
+  <Placemark><name>Madrid</name><Point><coordinates>-3.7038,40.4168,0</coordinates></Point></Placemark>
+  <Placemark><name>Paris</name><Point><coordinates>2.3522,48.8566,0</coordinates></Point></Placemark>
+  <Placemark><name>Roma</name><Point><coordinates>12.4964,41.9028,0</coordinates></Point></Placemark>
+</Document></kml>
+
