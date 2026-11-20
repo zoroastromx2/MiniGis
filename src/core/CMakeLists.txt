@@ -31,6 +31,8 @@ set(MINIGIS_CORE_SRCS
   minigisgeometrystore.cpp
   minigiskmlinspect.h
   minigiskmlinspect.cpp
+  minigisgeoparquetinspect.h
+  minigisgeoparquetinspect.cpp
   minigisgeometrykinds.h
   minigisgeometryhit.h
   minigisgeometryhit.cpp
