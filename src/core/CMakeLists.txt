@@ -29,6 +29,9 @@ set(MINIGIS_CORE_SRCS
   minigisvectorlayer.cpp
   minigisgeometrystore.h
   minigisgeometrystore.cpp
+  minigiskmlinspect.h
+  minigiskmlinspect.cpp
+  minigisgeometrykinds.h
   minigisgeometryhit.h
   minigisgeometryhit.cpp
   minigisidentify.h
@@ -73,7 +76,12 @@ target_compile_definitions(minigis_core
     MINIGIS_SAMPLE_DATA_DIR="${MINIGIS_ROOT_DIR}/data/sample"
     MINIGIS_COMPILER_ID="${CMAKE_CXX_COMPILER_ID}"
     MINIGIS_COMPILER_VERSION="${CMAKE_CXX_COMPILER_VERSION}"
-    MINIGIS_BUILD_TYPE="${CMAKE_BUILD_TYPE}${CMAKE_CONFIGURATION_TYPES}"
+    # $<CONFIG> y no CMAKE_BUILD_TYPE + CMAKE_CONFIGURATION_TYPES: con un
+    # generador multi-config (Visual Studio, Ninja Multi-Config) la segunda es
+    # una lista "Debug;Release;..." y, al ir entre comillas, los ";" partirian
+    # la definicion en varias: moc recibia "-DMINIGIS_BUILD_TYPE=\"ReleaseDebug"
+    # y fallaba con un error de sintaxis en qnamespace.h.
+    MINIGIS_BUILD_TYPE="$<CONFIG>"
   PRIVATE
     # Rutas de datos de GDAL/PROJ instaladas por vcpkg (se usan como ultimo
     # recurso si las variables de entorno GDAL_DATA/PROJ_DATA no existen).

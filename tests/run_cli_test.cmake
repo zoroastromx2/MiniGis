@@ -569,6 +569,65 @@ elseif(MODE STREQUAL "check-project")
     message(STATUS "minigis --check-project OK")
   endif()
 
+elseif(MODE STREQUAL "kml")
+  # El archivo debe leerse completo: ni un elemento con geometria puede quedarse
+  # por el camino. La comprobacion compara lo que entrega OGR con lo que conserva
+  # el almacen de geometrias, que es donde se perdia la MultiGeometry mixta.
+  execute_process(
+    COMMAND "${MINIGIS_EXE}" --check-kml --json --layer "${SAMPLE}"
+    RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+  if(NOT _rc EQUAL EXPECT_EXIT)
+    message(FATAL_ERROR "minigis --check-kml fallo (codigo ${_rc}, esperado ${EXPECT_EXIT})\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")
+  endif()
+
+  if(EXPECT_EXIT EQUAL 0)
+    if(NOT _out MATCHES "\"ok\": true")
+      message(FATAL_ERROR "El KML no se lee completo:\n${_out}")
+    endif()
+    if(NOT _out MATCHES "\"driver\": \"LIBKML\"")
+      message(FATAL_ERROR "El KML no se abrio con el driver LIBKML:\n${_out}")
+    endif()
+    foreach(_key IN ITEMS "\"features\"" "\"geometry\"" "\"kinds\""
+                          "\"withoutGeometry\"" "\"unsupportedParts\"" "\"storeFeatures\""
+                          "\"crsEpsg\": 4326")
+      if(NOT _out MATCHES "${_key}")
+        message(FATAL_ERROR "La salida de --check-kml no contiene ${_key}:\n${_out}")
+      endif()
+    endforeach()
+    message(STATUS "minigis --check-kml OK")
+  endif()
+
+elseif(MODE STREQUAL "kml-estilos")
+  # Contrato de la simbologia importada: el archivo declara dos estilos y cada
+  # elemento se dibuja con el suyo. Un solo estilo por capa se informa como
+  # "single"; por encima del tope, "dominant".
+  execute_process(
+    COMMAND "${MINIGIS_EXE}" --check-kml --json --layer "${SAMPLE}"
+    RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+  if(NOT _rc EQUAL EXPECT_EXIT)
+    message(FATAL_ERROR "minigis --check-kml fallo (codigo ${_rc}, esperado ${EXPECT_EXIT})\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")
+  endif()
+
+  if(EXPECT_EXIT EQUAL 0)
+    foreach(_key IN ITEMS "\"styleMode\": \"${EXPECT_STYLE_MODE}\""
+                          "\"appliedStyles\": ${EXPECT_APPLIED}")
+      if(NOT _out MATCHES "${_key}")
+        message(FATAL_ERROR "La salida de --check-kml no contiene ${_key}:\n${_out}")
+      endif()
+    endforeach()
+
+    # Color y grosor solo cuando la prueba los fija: con mas estilos que el tope
+    # manda el dominante y no tiene sentido afirmar cual es.
+    if(NOT "${EXPECT_COLOR}" STREQUAL "")
+      foreach(_key IN ITEMS "\"strokeColor\": \"${EXPECT_COLOR}\"" "\"strokeWidth\": ${EXPECT_WIDTH}")
+        if(NOT _out MATCHES "${_key}")
+          message(FATAL_ERROR "La salida de --check-kml no contiene ${_key}:\n${_out}")
+        endif()
+      endforeach()
+    endif()
+    message(STATUS "minigis --check-kml (estilos) OK")
+  endif()
+
 else()
   message(FATAL_ERROR "MODE no soportado: ${MODE}")
 endif()

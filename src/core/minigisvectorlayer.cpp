@@ -1,6 +1,7 @@
 #include "minigisvectorlayer.h"
 
 #include "minigisgdalinit.h"
+#include "minigisgeometrykinds.h"
 
 #include <QDir>
 #include <QFileInfo>
@@ -240,12 +241,66 @@ void VectorLayer::readMetadata()
   const char *typeName = OGRGeometryTypeToName(geometryType);
   mGeometryTypeName = QString::fromUtf8(typeName ? typeName : "desconocido");
 
+  // KML y otros formatos no declaran el tipo de geometria de la capa. Sin esto,
+  // el panel y --info dirian "Unknown (any)" aunque la capa este llena de
+  // poligonos, y el usuario no sabria que tiene delante.
+  if (mKind == GeometryKind::Unknown)
+    summarizeGeometryKinds();
+
   OGREnvelope envelope;
   std::memset(&envelope, 0, sizeof(envelope));
   if (OGR_L_GetExtent(mLayerHandle, &envelope, 1) == OGRERR_NONE && envelope.IsInit())
     mExtent = Rectangle(envelope.MinX, envelope.MinY, envelope.MaxX, envelope.MaxY);
   else
     mExtent.setNull();
+}
+
+void VectorLayer::summarizeGeometryKinds()
+{
+  // Muestra acotada: recorrer la capa entera al abrir costaria tanto como
+  // indexarla y este resumen solo alimenta el panel y --info. Los elementos con
+  // geometria mixta y los que no traen geometria se reparten solos.
+  constexpr int kSampleFeatures = 64;
+
+  GeometryKindCounts counts;
+  OGR_L_ResetReading(mLayerHandle);
+  int read = 0;
+  while (OGRFeatureH feature = OGR_L_GetNextFeature(mLayerHandle))
+  {
+    countGeometryKinds(OGR_F_GetGeometryRef(feature), counts);
+    OGR_F_Destroy(feature);
+    if (++read >= kSampleFeatures)
+      break;
+  }
+  OGR_L_ResetReading(mLayerHandle);
+
+  if (counts.drawable() == 0)
+    return; // sin geometria dibujable: "desconocido" es la verdad
+
+  const int kinds =
+    (counts.points > 0 ? 1 : 0) + (counts.lines > 0 ? 1 : 0) + (counts.polygons > 0 ? 1 : 0);
+  if (kinds > 1)
+  {
+    mKind = GeometryKind::Unknown;
+    mGeometryTypeName = QStringLiteral("Mixta");
+    return;
+  }
+
+  if (counts.points > 0)
+  {
+    mKind = GeometryKind::Point;
+    mGeometryTypeName = QStringLiteral("Punto");
+  }
+  else if (counts.lines > 0)
+  {
+    mKind = GeometryKind::Line;
+    mGeometryTypeName = QStringLiteral("Linea");
+  }
+  else
+  {
+    mKind = GeometryKind::Polygon;
+    mGeometryTypeName = QStringLiteral("Poligono");
+  }
 }
 
 void VectorLayer::readFields()

@@ -122,6 +122,11 @@ public:
     const GeometryStore *store = nullptr;
     const Style *style = nullptr;
     bool visible = true;
+    /**
+     * True si manda la simbologia importada del archivo (KML) en lugar de
+     * `style`. El lienzo lo apaga cuando el usuario cambia el estilo a mano.
+     */
+    bool useStoreStyles = false;
   };
 
   /**
@@ -157,18 +162,24 @@ private:
   };
 
   /** Construye los lotes de una capa en un nivel de detalle dado. */
-  void buildBatch(Batch &batch, const GeometryStore &store, const GeometryStore::Level &level,
-                  const MapToPixel &transform, qint64 pointStride) const;
+  void buildBatch(std::vector<Batch> &batches, const GeometryStore &store,
+                  const GeometryStore::Level &level, const MapToPixel &transform,
+                  qint64 pointStride) const;
 
   /**
    * Igual, a partir de arrays planos por elemento. Los dos modos del almacen
    * (memoria y envolventes) comparten este bucle: solo cambia de donde salen los
    * anillos de cada elemento.
+   *
+   * `batches` viene dimensionado a uno por estilo; `styleOf` indica el estilo de
+   * cada elemento (nulo cuando la capa tiene una sola simbologia).
    */
-  void buildBatch(Batch &batch, const GeometryStore::Level &level, const std::vector<uint8_t> &ringKinds,
-                  const std::vector<uint32_t> &entryFirstRing, const std::vector<uint32_t> &entryRingCount,
+  void buildBatch(std::vector<Batch> &batches, const GeometryStore::Level &level,
+                  const std::vector<uint8_t> &ringKinds,
+                  const std::vector<uint32_t> &entryFirstRing,
+                  const std::vector<uint32_t> &entryRingCount,
                   const std::vector<uint32_t> &entries, const MapToPixel &transform,
-                  qint64 pointStride) const;
+                  qint64 pointStride, const std::vector<uint16_t> *styleOf) const;
 
   FrameStats mStats;
   std::vector<uint32_t> mCandidates;

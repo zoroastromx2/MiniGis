@@ -35,4 +35,16 @@ public:
   static QString kindName(GeometryKind kind);
 };
 
+/**
+ * Traduce el style string de OGR (lo que devuelve OGR_F_GetStyleString) a la
+ * simbologia de MiniGIS.
+ *
+ * Formato de referencia: `PEN(c:#RRGGBB,w:Npx)` y `BRUSH(fc:#RRGGBB,fo:N)`.
+ * Devuelve `fallback` cuando el texto no trae nada aprovechable, para que una
+ * capa sin estilos se quede con la simbologia por defecto.
+ *
+ * La anchura se acota a 20 px: un `width` desmedido de un KML taparia el mapa.
+ */
+Style styleFromOgrStyleString(const QString &styleString, const Style &fallback);
+
 } // namespace minigis

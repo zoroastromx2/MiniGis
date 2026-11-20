@@ -291,3 +291,74 @@ if(MINIGIS_RASTER_BENCH_DATASET)
     TIMEOUT 900
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endif()
+
+# --- KML / KMZ ------------------------------------------------------------
+# Caso que fallaba: una MultiGeometry mixta acompanada de otro poligono se
+# dibujaba sin ella y nadie lo avisaba. --check-kml compara lo que entrega OGR
+# con lo que conserva el almacen de geometrias, de modo que la perdida rompe la
+# prueba en vez de pasar inadvertida.
+set(MINIGIS_SAMPLE_KML_DIR "${MINIGIS_ROOT_DIR}/data/sample/kml")
+
+add_test(NAME minigis.kml-mundo
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DSAMPLE=${MINIGIS_SAMPLE_KML_DIR}/mundo.kml"
+          -DMODE=kml
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
+add_test(NAME minigis.kml-mixto
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DSAMPLE=${MINIGIS_SAMPLE_KML_DIR}/mixto.kml"
+          -DMODE=kml
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
+add_test(NAME minigis.kml-kmz
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DSAMPLE=${MINIGIS_SAMPLE_KML_DIR}/mixto.kmz"
+          -DMODE=kml
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
+set_tests_properties(minigis.kml-mundo minigis.kml-mixto minigis.kml-kmz
+  PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# Simbologia importada: dos estilos por elemento y un solo estilo. Comprueba
+# ademas que el color no se lee al reves (LIBKML entrega #RRGGBBAA).
+add_test(NAME minigis.kml-estilos
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DSAMPLE=${MINIGIS_SAMPLE_KML_DIR}/estilos_varios.kml"
+          "-DEXPECT_STYLE_MODE=perFeature"
+          "-DEXPECT_APPLIED=2"
+          "-DEXPECT_COLOR=#ff0000"
+          "-DEXPECT_WIDTH=3"
+          -DMODE=kml-estilos
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
+add_test(NAME minigis.kml-estilo-unico
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DSAMPLE=${MINIGIS_SAMPLE_KML_DIR}/estilos.kml"
+          "-DEXPECT_STYLE_MODE=single"
+          "-DEXPECT_APPLIED=1"
+          "-DEXPECT_COLOR=#ff0000"
+          "-DEXPECT_WIDTH=4"
+          -DMODE=kml-estilos
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
+set_tests_properties(minigis.kml-estilos minigis.kml-estilo-unico
+  PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# Tope de estilos: con 70 estilos distintos manda el dominante y se informa, en
+# lugar de pagar una pluma por elemento.
+add_test(NAME minigis.kml-estilos-tope
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DSAMPLE=${MINIGIS_SAMPLE_KML_DIR}/estilos_muchos.kml"
+          "-DEXPECT_STYLE_MODE=dominant"
+          "-DEXPECT_APPLIED=1"
+          -DMODE=kml-estilos
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
+set_tests_properties(minigis.kml-estilos-tope PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

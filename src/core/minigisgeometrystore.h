@@ -161,6 +161,18 @@ public:
     qint64 cacheBudget = 300000;
     /** Si el modo `InMemory` no cabe, se intenta el indice de envolventes. */
     bool allowEnvelopeFallback = true;
+    /**
+     * Simbologia base con la que se traduce la que trae el archivo (KML). Es la
+     * de la capa, para que un estilo importado que solo declare el trazo no
+     * pierda el relleno que el usuario ya tenia.
+     */
+    Style baseStyle;
+    /**
+     * Estilos distintos que se guardan por elemento. Por encima de este tope
+     * manda el dominante: un KML con un color por registro haria tantas plumas
+     * como elementos y el cuadro se degradaria sin que el usuario note nada.
+     */
+    int maximumStyles = 64;
   };
 
   /**
@@ -225,6 +237,21 @@ public:
   const std::vector<Feature> &features() const { return mFeatures; }
   /** Tipo de geometria de cada anillo (GeometryKind como entero). */
   const std::vector<uint8_t> &ringKinds() const { return mRingKinds; }
+
+  /**
+   * Simbologia importada del archivo, sin repetir. Vacia si el formato no trae
+   * estilos (shapefile, GeoPackage): en ese caso manda el estilo de la capa.
+   */
+  const std::vector<Style> &styles() const { return mStyles; }
+
+  /**
+   * Indice en `styles()` de cada elemento, en el mismo orden que `features()`.
+   * Vacio cuando no hay simbologia importada.
+   */
+  const std::vector<uint16_t> &featureStyles() const { return mFeatureStyles; }
+
+  /** True si hay mas de un estilo y por tanto hay que agrupar al dibujar. */
+  bool hasPerFeatureStyles() const { return mStyles.size() > 1; }
 
   /** Anillo inicial y numero de anillos de cada elemento, en arrays planos. */
   const std::vector<uint32_t> &entryFirstRing() const { return mEntryFirstRing; }
@@ -303,6 +330,10 @@ private:
 
   std::vector<Feature> mFeatures;
   std::vector<uint8_t> mRingKinds;
+
+  /** Simbologia importada del archivo y su indice por elemento. */
+  std::vector<Style> mStyles;
+  std::vector<uint16_t> mFeatureStyles;
 
   /** Arrays planos por elemento (mismo contenido que mFeatures, mejor recorrido). */
   std::vector<uint32_t> mEntryFirstRing;

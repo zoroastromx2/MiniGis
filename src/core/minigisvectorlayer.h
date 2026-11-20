@@ -150,8 +150,17 @@ public:
   void setStyle(const Style &style)
   {
     mStyle = style;
+    // A partir de aqui manda la simbologia elegida por el usuario: la importada
+    // del archivo (KML) deja de aplicarse.
+    mStyleOverridden = true;
     bumpRevision();
   }
+
+  /**
+   * True si el usuario ha cambiado la simbologia de la capa. Entonces manda su
+   * estilo y no el que traia el archivo.
+   */
+  bool styleOverridden() const { return mStyleOverridden; }
 
   /**
    * Etiquetas de los elementos de la capa (campos, fuente, halo, escala...).
@@ -200,6 +209,12 @@ private:
   void readFields();
 
   /**
+   * Deduce el tipo de geometria de la capa cuando el formato no lo declara
+   * (KML, GeoJSON mixto), mirando una muestra acotada de elementos.
+   */
+  void summarizeGeometryKinds();
+
+  /**
    * Si la capa no declara SRC, adopta el de la capa del mismo archivo cuya
    * extension se solape mas con la suya (o el primero que lo declare). Se llama
    * al abrir la capa, cuando aun se puede consultar el dataset.
@@ -227,6 +242,7 @@ private:
   /** SRC heredado de otra capa del archivo; nulo si la capa declara el suyo. */
   std::unique_ptr<OGRSpatialReference> mAssumedSrs;
   bool mVisible = true;
+  bool mStyleOverridden = false;
   quint64 mRevision = 1;
   mutable qint64 mFeatureCount = -1; // -1 = pendiente de calcular
 };

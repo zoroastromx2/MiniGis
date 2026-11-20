@@ -71,28 +71,36 @@ QPainterPath &startChunk(std::vector<QPainterPath> &chunks, int &featuresInChunk
 
 } // namespace
 
-void FastMapRenderer::buildBatch(Batch &batch, const GeometryStore &store, const GeometryStore::Level &level,
-                                 const MapToPixel &transform, qint64 pointStride) const
+void FastMapRenderer::buildBatch(std::vector<Batch> &batches, const GeometryStore &store,
+                                 const GeometryStore::Level &level, const MapToPixel &transform,
+                                 qint64 pointStride) const
 {
-  buildBatch(batch, level, store.ringKinds(), store.entryFirstRing(), store.entryRingCount(), mCandidates,
-             transform, pointStride);
+  const std::vector<uint16_t> &styleOf = store.featureStyles();
+  buildBatch(batches, level, store.ringKinds(), store.entryFirstRing(), store.entryRingCount(),
+             mCandidates, transform, pointStride, styleOf.empty() ? nullptr : &styleOf);
 }
 
-void FastMapRenderer::buildBatch(Batch &batch, const GeometryStore::Level &level,
+void FastMapRenderer::buildBatch(std::vector<Batch> &batches, const GeometryStore::Level &level,
                                  const std::vector<uint8_t> &ringKinds,
                                  const std::vector<uint32_t> &entryFirstRing,
                                  const std::vector<uint32_t> &entryRingCount,
                                  const std::vector<uint32_t> &entries, const MapToPixel &transform,
-                                 qint64 pointStride) const
+                                 qint64 pointStride, const std::vector<uint16_t> *styleOf) const
 {
   const double *coords = level.coords.data();
   const uint32_t *ringFirst = level.ringFirst.data();
   const uint32_t *ringCount = level.ringCount.data();
 
-  int polygonFeaturesInChunk = 0;
-  int lineFeaturesInChunk = 0;
-  QPainterPath *polygonPath = nullptr;
-  QPainterPath *linePath = nullptr;
+  const size_t groups = batches.empty() ? 1 : batches.size();
+
+  // Estado de troceado por grupo de estilo: un QPainterPath solo se puede
+  // dibujar con una pluma y un pincel, asi que cada estilo lleva su propio
+  // trazado en curso. Con un solo estilo esto es exactamente el bucle de antes.
+  std::vector<QPainterPath *> polygonPaths(groups, nullptr);
+  std::vector<QPainterPath *> linePaths(groups, nullptr);
+  std::vector<int> polygonCounts(groups, 0);
+  std::vector<int> lineCounts(groups, 0);
+
   const int chunkLimit = featuresPerChunkFor(entries.size());
   qint64 pointCounter = 0;
 
@@ -100,6 +108,11 @@ void FastMapRenderer::buildBatch(Batch &batch, const GeometryStore::Level &level
   {
     if (entryIndex >= entryFirstRing.size())
       continue;
+
+    size_t group = 0;
+    if (styleOf && entryIndex < styleOf->size())
+      group = std::min<size_t>((*styleOf)[entryIndex], groups - 1);
+    Batch &batch = batches[group];
 
     const uint32_t first = entryFirstRing[entryIndex];
     const uint32_t ringTotal = entryRingCount[entryIndex];
@@ -136,8 +149,8 @@ void FastMapRenderer::buildBatch(Batch &batch, const GeometryStore::Level &level
       }
 
       const bool isPolygon = (kind == kKindPolygon);
-      QPainterPath *&path = isPolygon ? polygonPath : linePath;
-      int &featuresInChunk = isPolygon ? polygonFeaturesInChunk : lineFeaturesInChunk;
+      QPainterPath *&path = isPolygon ? polygonPaths[group] : linePaths[group];
+      int &featuresInChunk = isPolygon ? polygonCounts[group] : lineCounts[group];
 
       // Cada cierto numero de elementos se empieza un trazado nuevo: un unico
       // QPainterPath con miles de subpaths degrada el rellenado de Qt.
@@ -165,10 +178,10 @@ void FastMapRenderer::buildBatch(Batch &batch, const GeometryStore::Level &level
     if (anyDrawn)
     {
       ++batch.features;
-      if (polygonPath)
-        ++polygonFeaturesInChunk;
-      if (linePath)
-        ++lineFeaturesInChunk;
+      if (polygonPaths[group])
+        ++polygonCounts[group];
+      if (linePaths[group])
+        ++lineCounts[group];
     }
   }
 }
@@ -244,7 +257,13 @@ void FastMapRenderer::paint(QPainter &painter, const std::vector<Layer> &layers,
     // Se construye el lote del nivel pedido; si el detalle sigue siendo excesivo
     // para el presupuesto de vertices, se sube un nivel de simplificacion.
     const int maximumLevel = std::min(store.maximumLevel(), level + std::max(0, options.maximumLevelAttempts));
-    Batch batch;
+
+    // Un lote por estilo: la simbologia importada del archivo (KML) puede variar
+    // de un elemento a otro y un QPainterPath solo se dibuja con una pluma y un
+    // pincel. Con un solo estilo hay un unico lote y el coste es el de siempre.
+    const bool useStoreStyles = layer.useStoreStyles && !store.styles().empty();
+    const size_t styleCount = useStoreStyles ? store.styles().size() : 1;
+    std::vector<Batch> batches(styleCount);
 
     if (store.mode() == GeometryStore::Mode::Envelopes)
     {
@@ -271,8 +290,11 @@ void FastMapRenderer::paint(QPainter &painter, const std::vector<Layer> &layers,
           mPositions[i] = static_cast<uint32_t>(i);
 
         timer.restart();
-        buildBatch(batch, *subset->level, subset->entryRingKind, subset->entryFirstRing,
-                   subset->entryRingCount, mPositions, transform, 1);
+        // El indice de estilo va por elemento del archivo y aqui las entradas son
+        // posiciones del subconjunto, asi que no se puede aplicar: el modo
+        // envolventes es de shapefile y no trae simbologia importada.
+        buildBatch(batches, *subset->level, subset->entryRingKind, subset->entryFirstRing,
+                   subset->entryRingCount, mPositions, transform, 1, nullptr);
         mStats.pathMs += timer.elapsed();
       }
 
@@ -327,16 +349,20 @@ void FastMapRenderer::paint(QPainter &painter, const std::vector<Layer> &layers,
         if (!levelData)
           break;
 
-        batch = Batch();
+        batches.assign(styleCount, Batch());
 
         timer.restart();
-        buildBatch(batch, store, *levelData, transform, pointStride);
+        buildBatch(batches, store, *levelData, transform, pointStride);
         mStats.pathMs += timer.elapsed();
 
         mStats.level = level;
         mStats.tolerance = levelData->tolerance;
 
-        const bool fits = (options.vertexBudget <= 0) || (batch.vertices <= options.vertexBudget);
+        qint64 batchVertices = 0;
+        for (const Batch &built : batches)
+          batchVertices += built.vertices;
+
+        const bool fits = (options.vertexBudget <= 0) || (batchVertices <= options.vertexBudget);
         if (fits || level >= maximumLevel)
           break;
 
@@ -347,8 +373,15 @@ void FastMapRenderer::paint(QPainter &painter, const std::vector<Layer> &layers,
       }
     }
 
-    mStats.drawnFeatures += batch.features;
-    mStats.drawnVertices += batch.vertices;
+    qint64 drawnFeatures = 0;
+    qint64 drawnVertices = 0;
+    for (const Batch &built : batches)
+    {
+      drawnFeatures += built.features;
+      drawnVertices += built.vertices;
+    }
+    mStats.drawnFeatures += drawnFeatures;
+    mStats.drawnVertices += drawnVertices;
 
     timer.restart();
     painter.setOpacity(std::clamp(style.opacity / 100.0, 0.0, 1.0));
@@ -359,66 +392,77 @@ void FastMapRenderer::paint(QPainter &painter, const std::vector<Layer> &layers,
     // encuadre exacto: al desplazar el mapa el numero de elementos visibles cambia
     // un poco y, si la decision oscilara entre cuadros, la parte copiada del cuadro
     // anterior y la franja nueva se dibujarian con estilos distintos.
-    const qint64 quantizedFeatures = (batch.features / 1024) * 1024;
+    const qint64 quantizedFeatures = (drawnFeatures / 1024) * 1024;
     const bool hairlineStroke =
       options.draft || (options.hairlineFeatureThreshold > 0
                         && quantizedFeatures >= options.hairlineFeatureThreshold);
 
-    if (!batch.polygonChunks.empty())
+    // Un grupo por estilo. Con una sola simbologia (lo habitual) esto es una
+    // vuelta y el dibujado es identico al de antes de existir los estilos.
+    for (size_t group = 0; group < batches.size(); ++group)
     {
-      for (QPainterPath &path : batch.polygonChunks)
-        path.setFillRule(Qt::WindingFill);
+      const Batch &batch = batches[group];
+      if (batch.polygonChunks.empty() && batch.lineChunks.empty() && batch.points.empty())
+        continue;
 
-      painter.setBrush(style.fillEnabled ? QBrush(style.fillColor) : Qt::NoBrush);
-      painter.setPen(strokePen(style, hairlineStroke));
-      for (const QPainterPath &path : batch.polygonChunks)
-        painter.drawPath(path);
-    }
+      const Style &drawStyle = useStoreStyles ? store.styles()[group] : style;
+      painter.setOpacity(std::clamp(drawStyle.opacity / 100.0, 0.0, 1.0));
 
-    if (!batch.lineChunks.empty())
-    {
-      painter.setBrush(Qt::NoBrush);
-      painter.setPen(hairlineStroke ? QPen(style.strokeColor, 0.0)
-                                    : QPen(style.strokeColor, std::max(style.strokeWidth, 0.1), Qt::SolidLine,
-                                           Qt::RoundCap, Qt::RoundJoin));
-      for (const QPainterPath &path : batch.lineChunks)
-        painter.drawPath(path);
-    }
-
-    if (!batch.points.empty())
-    {
-      // Los marcadores se dibujan como puntos con extremo redondeado: un trazo
-      // grueso con cap redondo es un circulo. Dos llamadas bastan para el
-      // contorno y el relleno de todos los puntos de la capa.
-      const int pointTotal = static_cast<int>(batch.points.size());
-      const QPointF *points = batch.points.data();
-
-      painter.setBrush(Qt::NoBrush);
-
-      if (pointStride > 1)
+      if (!batch.polygonChunks.empty())
       {
-        // Capa de millones de puntos muestreada: a esta densidad el simbolo
-        // completo no aporta informacion y cuesta. Se dibuja un punto de un
-        // pixel, sin suavizado y con pluma cosmetica (medido con 115.000
-        // puntos: 284 ms -> decenas de ms).
-        painter.setRenderHint(QPainter::Antialiasing, false);
-        painter.setPen(QPen(style.strokeColor, 0.0));
-        painter.drawPoints(points, pointTotal);
-        painter.setRenderHint(QPainter::Antialiasing, options.antialiasing);
+        // El troceado ya fija la regla de relleno al empezar cada trazado.
+        painter.setBrush(drawStyle.fillEnabled ? QBrush(drawStyle.fillColor) : Qt::NoBrush);
+        painter.setPen(strokePen(drawStyle, hairlineStroke));
+        for (const QPainterPath &path : batch.polygonChunks)
+          painter.drawPath(path);
       }
-      else
-      {
-        const double diameter = std::max(1.0, style.pointSize);
 
-        if (style.strokeWidth > 0.0)
+      if (!batch.lineChunks.empty())
+      {
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(hairlineStroke
+                         ? QPen(drawStyle.strokeColor, 0.0)
+                         : QPen(drawStyle.strokeColor, std::max(drawStyle.strokeWidth, 0.1), Qt::SolidLine,
+                                Qt::RoundCap, Qt::RoundJoin));
+        for (const QPainterPath &path : batch.lineChunks)
+          painter.drawPath(path);
+      }
+
+      if (!batch.points.empty())
+      {
+        // Los marcadores se dibujan como puntos con extremo redondeado: un trazo
+        // grueso con cap redondo es un circulo. Dos llamadas bastan para el
+        // contorno y el relleno de todos los puntos de la capa.
+        const int pointTotal = static_cast<int>(batch.points.size());
+        const QPointF *points = batch.points.data();
+
+        painter.setBrush(Qt::NoBrush);
+
+        if (pointStride > 1)
         {
-          painter.setPen(QPen(style.strokeColor, diameter, Qt::SolidLine, Qt::RoundCap));
+          // Capa de millones de puntos muestreada: a esta densidad el simbolo
+          // completo no aporta informacion y cuesta. Se dibuja un punto de un
+          // pixel, sin suavizado y con pluma cosmetica (medido con 115.000
+          // puntos: 284 ms -> decenas de ms).
+          painter.setRenderHint(QPainter::Antialiasing, false);
+          painter.setPen(QPen(drawStyle.strokeColor, 0.0));
+          painter.drawPoints(points, pointTotal);
+          painter.setRenderHint(QPainter::Antialiasing, options.antialiasing);
+        }
+        else
+        {
+          const double diameter = std::max(1.0, drawStyle.pointSize);
+
+          if (drawStyle.strokeWidth > 0.0)
+          {
+            painter.setPen(QPen(drawStyle.strokeColor, diameter, Qt::SolidLine, Qt::RoundCap));
+            painter.drawPoints(points, pointTotal);
+          }
+
+          const double innerDiameter = std::max(0.1, diameter - 2.0 * drawStyle.strokeWidth);
+          painter.setPen(QPen(drawStyle.fillColor, innerDiameter, Qt::SolidLine, Qt::RoundCap));
           painter.drawPoints(points, pointTotal);
         }
-
-        const double innerDiameter = std::max(0.1, diameter - 2.0 * style.strokeWidth);
-        painter.setPen(QPen(style.fillColor, innerDiameter, Qt::SolidLine, Qt::RoundCap));
-        painter.drawPoints(points, pointTotal);
       }
     }
 

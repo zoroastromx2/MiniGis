@@ -62,6 +62,7 @@ constexpr unsigned int kUtf8CodePage = 65001;
 #include "minigisgeometrystore.h"
 #include "minigisidentify.h"
 #include "minigisidentifypanel.h"
+#include "minigiskmlinspect.h"
 #include "minigislabeldialog.h"
 #include "minigislayerpanel.h"
 #include "minigismainwindow.h"
@@ -254,8 +255,13 @@ QString layerInfoText(const VectorLayer &layer)
   }
 
   lines << QStringLiteral("Driver      : %1").arg(layer.driverName());
-  lines << QStringLiteral("Geometria   : %1 (%2)")
-             .arg(layer.geometryTypeName(), Style::kindName(layer.geometryKind()));
+  // En capas sin tipo declarado (KML) el nombre propio ya dice lo que hay
+  // ("Poligono", "Mixta"): anadir "(Desconocido)" solo confunde.
+  if (Style::kindName(layer.geometryKind()) == QStringLiteral("Desconocido"))
+    lines << QStringLiteral("Geometria   : %1").arg(layer.geometryTypeName());
+  else
+    lines << QStringLiteral("Geometria   : %1 (%2)")
+                 .arg(layer.geometryTypeName(), Style::kindName(layer.geometryKind()));
   lines << QStringLiteral("Elementos   : %1").arg(layer.featureCount());
   lines << QStringLiteral("Extension   : %1").arg(layer.extent().toString());
   lines << QStringLiteral("SRC         : %1").arg(layer.crsDescription());
@@ -3982,6 +3988,7 @@ int main(int argc, char *argv[])
              || argument == QStringLiteral("--project-info")
              || argument == QStringLiteral("--save-project")
              || argument == QStringLiteral("--check-project")
+             || argument == QStringLiteral("--check-kml")
              || argument == QStringLiteral("--identify-at")
              || argument == QStringLiteral("--help") || argument == QStringLiteral("-h")
              || argument == QStringLiteral("--version") || argument == QStringLiteral("-v"))
@@ -4087,6 +4094,9 @@ int main(int argc, char *argv[])
     QStringLiteral("check-raster"),
     QStringLiteral("Comprueba el dibujado raster: cuadrantes, extension, reproyeccion, NoData, contraste, "
                    "paleta, redibujado, paneo y lectura acotada"));
+  const QCommandLineOption checkKmlOption(
+    QStringLiteral("check-kml"),
+    QStringLiteral("Comprueba que un KML/KMZ se lee completo: capas, elementos, tipos y estilos"));
   const QCommandLineOption identifyAtOption(
     QStringLiteral("identify-at"),
     QStringLiteral("Identifica el elemento bajo <x,y> (coordenadas del SRC de destino) y sale"),
@@ -4139,7 +4149,8 @@ int main(int argc, char *argv[])
                      snapshotRasterDialogOption, checkRasterOption, labelFieldOption, labelSizeOption,
                      labelMapSizeOption, noLabelsOption, rasterStretchOption, rasterBandsOption,
                      rasterOpacityOption, identifyAtOption, identifyRadiusOption, identifyLayerOption,
-                     checkIdentifyOption, projectInfoOption, saveProjectOption, checkProjectOption});
+                     checkIdentifyOption, projectInfoOption, saveProjectOption, checkProjectOption,
+                     checkKmlOption});
   parser.addPositionalArgument(QStringLiteral("archivo"),
                               QStringLiteral("Capas a cargar (opcional, se puede repetir)"),
                               QStringLiteral("[archivo...]"));
@@ -4625,6 +4636,52 @@ int main(int argc, char *argv[])
     }
 
     return runBenchmark(request);
+  }
+
+  // ---------------------------------------------------------------------
+  // Diagnostico de KML/KMZ (sin ventana)
+  // ---------------------------------------------------------------------
+  // Comprueba que el archivo se lee completo: cuenta los elementos con la API C
+  // de OGR y los compara con los que conserva el almacen de geometrias. Es la
+  // unica forma de detectar un elemento perdido sin mirar una imagen: el mapa
+  // sale igual de "bien" con un poligono de menos.
+  if (parser.isSet(checkKmlOption))
+  {
+    if (layerPaths.size() != 1)
+    {
+      writeErr(QStringLiteral("Se necesita exactamente un archivo KML o KMZ, por ejemplo:"));
+      writeErr(QStringLiteral("  minigis --check-kml data/sample/kml/mixto.kml --json"));
+      return ExitUsage;
+    }
+
+    const QString path = layerPaths.first();
+    if (!QFileInfo::exists(path))
+    {
+      writeErr(QStringLiteral("No existe el archivo: %1").arg(QDir::toNativeSeparators(path)));
+      return ExitFileNotFound;
+    }
+
+    Error kmlError;
+    KmlReport report;
+    if (!inspectKml(path, &report, &kmlError))
+    {
+      writeErr(kmlError.toText());
+      return ExitOpenFailed;
+    }
+
+    if (report.layers.isEmpty())
+    {
+      writeErr(QStringLiteral("«%1» no contiene capas vectoriales.")
+                 .arg(QDir::toNativeSeparators(path)));
+      return ExitNoLayers;
+    }
+
+    if (parser.isSet(jsonOption))
+      writeOut(QString::fromUtf8(QJsonDocument(report.toJson()).toJson(QJsonDocument::Indented)));
+    else
+      writeOut(report.toText());
+
+    return report.ok() ? ExitOk : ExitRenderFailed;
   }
 
   // ---------------------------------------------------------------------

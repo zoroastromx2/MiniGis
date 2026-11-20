@@ -140,6 +140,12 @@ RuntimeInfo initializeGdal()
     }
 
     GDALAllRegister();
+
+    // LIBKML resuelve `styleUrl` contra la tabla de estilos del documento y deja
+    // el estilo de cada elemento en su style string de OGR. Es la unica forma de
+    // leer la simbologia del KML sin reimplementar su parser: con esto,
+    // OGR_F_GetStyleString devuelve PEN(...)/BRUSH(...) ya resuelto.
+    CPLSetConfigOption("LIBKML_RESOLVE_STYLE", "YES");
   }
 
   info.gdalVersion = QString::fromUtf8(GDALVersionInfo("RELEASE_NAME"));

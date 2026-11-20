@@ -6,6 +6,7 @@
 
 #include <QElapsedTimer>
 #include <QFileInfo>
+#include <QHash>
 #include <QString>
 
 #include <algorithm>
@@ -511,6 +512,36 @@ uint8_t kindForOgrType(OGRwkbGeometryType type)
 }
 
 /**
+ * True si la geometria, o alguna parte de una coleccion, se puede dibujar.
+ *
+ * Por que no basta con mirar el tipo de arriba: una `MultiGeometry` de KML con
+ * contenido mixto llega como coleccion, y su tipo aplanado (GeometryCollection)
+ * no es un tipo de dibujo. Antes se descartaba el elemento entero con esa
+ * premisa, y el mapa salia "bien" con un poligono de menos: el caso que
+ * reproduce data/sample/kml/mixto.kml.
+ */
+bool hasDrawableGeometry(const OGRGeometry *geometry)
+{
+  if (!geometry || geometry->IsEmpty())
+    return false;
+
+  if (kindForOgrType(geometry->getGeometryType()) != kKindUnknown)
+    return true;
+
+  const OGRGeometryCollection *collection = geometry->toGeometryCollection();
+  if (!collection)
+    return false; // superficies 3D, TIN, poliedros: no se pueden dibujar
+
+  const int count = collection->getNumGeometries();
+  for (int i = 0; i < count; ++i)
+  {
+    if (hasDrawableGeometry(collection->getGeometryRef(i)))
+      return true;
+  }
+  return false;
+}
+
+/**
  * Ignora temporalmente todos los campos de una capa y los restaura al salir.
  *
  * Por que hace falta un guardian: en cuanto se ignoran los campos, toda lectura
@@ -633,12 +664,21 @@ std::shared_ptr<GeometryStore> GeometryStore::build(
 
   layer->ResetReading();
 
+  // Simbologia por elemento (KML y formatos que la declaren). La tabla guarda
+  // los estilos distintos y cada elemento apunta al suyo; un archivo sin estilos
+  // no paga nada porque la tabla queda vacia y se usa el estilo de la capa.
+  std::vector<Style> styles;
+  std::vector<uint16_t> featureStyles;
+  std::vector<qint64> styleUses;
+  QHash<QString, uint16_t> styleIndexByText;
+  bool styleOverflow = false;
+
   qint64 read = 0;
   int lastPercent = -1;
   while (OGRFeature *feature = layer->GetNextFeature())
   {
     OGRGeometry *geometry = feature->GetGeometryRef();
-    if (geometry && kindForOgrType(geometry->getGeometryType()) != kKindUnknown)
+    if (hasDrawableGeometry(geometry))
     {
       builder.beginFeature();
 
@@ -656,6 +696,33 @@ std::shared_ptr<GeometryStore> GeometryStore::build(
       }
 
       builder.endFeature();
+
+      // El estilo se guarda solo de los elementos que entran en el almacen: el
+      // indice por elemento tiene que cuadrar con la lista de features.
+      uint16_t styleIndex = 0;
+      if (const char *styleText = feature->GetStyleString(); styleText && *styleText)
+      {
+        const QString text = QString::fromUtf8(styleText);
+        const auto found = styleIndexByText.constFind(text);
+        if (found != styleIndexByText.cend())
+        {
+          styleIndex = found.value();
+        }
+        else if (static_cast<int>(styles.size()) < options.maximumStyles)
+        {
+          styleIndex = static_cast<uint16_t>(styles.size());
+          styles.push_back(styleFromOgrStyleString(text, options.baseStyle));
+          styleUses.push_back(0);
+          styleIndexByText.insert(text, styleIndex);
+        }
+        else
+        {
+          styleOverflow = true;
+          styleIndex = 0;
+        }
+        ++styleUses[styleIndex];
+      }
+      featureStyles.push_back(styleIndex);
     }
 
     OGRFeature::DestroyFeature(feature);
@@ -704,6 +771,24 @@ std::shared_ptr<GeometryStore> GeometryStore::build(
 
   layer->ResetReading();
 
+  // Mas estilos que el tope: manda el dominante y el diagnostico --check-kml lo
+  // publica. Asi un KML con un color por registro no paga una pluma por elemento
+  // y la simplificacion nunca es silenciosa.
+  if (styleOverflow && !styles.empty())
+  {
+    size_t dominant = 0;
+    for (size_t i = 1; i < styleUses.size(); ++i)
+    {
+      if (styleUses[i] > styleUses[dominant])
+        dominant = i;
+    }
+    styles = {styles[dominant]};
+    std::fill(featureStyles.begin(), featureStyles.end(), static_cast<uint16_t>(0));
+  }
+
+  if (styles.empty())
+    featureStyles.clear(); // sin simbologia no hace falta un indice por elemento
+
   if (builder.features.empty())
     return fail(QStringLiteral("La capa no contiene geometrias que se puedan indexar."));
 
@@ -714,6 +799,8 @@ std::shared_ptr<GeometryStore> GeometryStore::build(
   auto store = std::shared_ptr<GeometryStore>(new GeometryStore);
   store->mFeatures = std::move(builder.features);
   store->mRingKinds = std::move(builder.ringKinds);
+  store->mStyles = std::move(styles);
+  store->mFeatureStyles = std::move(featureStyles);
   store->mDestinationEpsg = destinationEpsg;
   store->mReprojected = reprojected;
   store->mReadMs = phaseTimer.elapsed();
@@ -834,7 +921,12 @@ std::shared_ptr<GeometryStore> GeometryStore::buildFromLayer(
   // El SRC sale del VectorLayer, no de la capa OGR: si la capa no lo declara, lo
   // hereda de otra capa del archivo (VectorLayer::spatialRef) y aqui hace falta
   // para reproyectar las geometrias.
-  return build(reinterpret_cast<OGRLayer *>(handle), layer.spatialRef(), destinationEpsg, options,
+  //
+  // La simbologia base es la de la capa: un estilo importado del archivo que solo
+  // declare el trazo conserva el relleno y el grosor que la capa ya tenia.
+  Options effective = options;
+  effective.baseStyle = layer.style();
+  return build(reinterpret_cast<OGRLayer *>(handle), layer.spatialRef(), destinationEpsg, effective,
                progress, error);
 }
 
