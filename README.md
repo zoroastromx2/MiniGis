@@ -198,7 +198,11 @@ minigis [opciones] [archivos...]
 
 | Opción | Descripción |
 |---|---|
-| `archivos...` / `-l, --layer <archivo>` | Archivos vectoriales o ráster a cargar (se pueden repetir); de cada uno se abren todas sus capas |
+| `archivos...` / `-l, --layer <archivo>` | Archivos vectoriales o ráster a cargar (se pueden repetir); de cada uno se abren todas sus capas. También acepta fuentes PostGIS con la URI `pg:conexion/esquema/tabla` |
+| `--connections <Connections.xml>` | Catálogo de conexiones PostGIS de Mapa Digital (si no se pasa, se usa `MINIGIS_CONNECTIONS` o el ajuste del GUI) |
+| `--check-pg -l pg:conexion/esquema` | Inventario de un esquema PostGIS: tablas, geometría, elementos y apertura; con `--json`, contrato para scripts |
+| `--snapshot-pg-dialog <archivo.png>` | Captura el diálogo de conexión PostGIS y sale |
+| `--pg-no-index` | Con capas PostGIS: dibuja bajo demanda sin construir el almacén (tablas enormes) |
 | `-i, --info` | Resumen de todas las capas de cada archivo (vectoriales y ráster: bandas, tamaño, SRC, NoData, paleta) |
 | `--json` | Salida JSON (junto a `--info`), pensada para scripts |
 | `--list-drivers` | Drivers vectoriales disponibles en GDAL |
@@ -228,10 +232,13 @@ minigis [opciones] [archivos...]
 |---|---|
 | 0 | Éxito |
 | 1 | Uso incorrecto |
-| 2 | Archivo no encontrado |
-| 3 | GDAL no pudo abrir la capa |
+| 2 | Archivo no encontrado (o catálogo de conexiones ausente) |
+| 3 | GDAL no pudo abrir la capa (o esquema/tabla PostGIS inexistente) |
 | 4 | No se pudo escribir la imagen |
 | 5 | No hay capas que renderizar |
+| 6 | Presupuesto de `--bench-budget` superado |
+| 7 | El proyecto de QGIS no se pudo abrir o guardar |
+| 8 | No se pudo conectar o autenticar con PostGIS |
 
 Ejemplos:
 
@@ -256,11 +263,20 @@ minigis --check-raster -l data\sample\rasters\ortho_rgb.tif ^
 minigis data\sample\geopackage\ejemplo.gpkg
 minigis --info -l data\sample\geopackage\ejemplo.gpkg
 minigis --check-layers -l data\sample\geopackage\ejemplo.gpkg
+
+:: PostGIS: catalogo de Mapa Digital, contrasena por PGPASSWORD o por el dialogo
+set PGPASSWORD=<tu contrasena>
+minigis --connections "...\Connections.xml" --check-pg -l pg:dataware_FDAC/mgn_2025 --json
+minigis --connections "...\Connections.xml" ^
+        --info -l pg:dataware_FDAC/mgn_2025/areas_geoestadisticas_estatales
+minigis --connections "...\Connections.xml" ^
+        --snapshot estados.png -l pg:dataware_FDAC/mgn_2025/areas_geoestadisticas_estatales
 ```
 
 En la interfaz:
 
-* `Ctrl+O` abrir capa (vectorial o ráster) · `Ctrl+W` cerrar capa · `Ctrl+Q` salir
+* `Ctrl+O` abrir capa (vectorial o ráster) · `Ctrl+Shift+P` abrir conexión PostGIS ·
+  `Ctrl+Shift+O` abrir proyecto · `Ctrl+W` cerrar capa · `Ctrl+Q` salir
 * `Ctrl+ +` / `Ctrl+ -` zoom · `Ctrl+Shift+F` extensión completa · `Ctrl+Shift+L` zoom a la capa
 * rueda del ratón = zoom anclado al cursor · arrastrar con el botón izquierdo = paneo
 * `F6` tabla de atributos · `Ctrl+Shift+Y` simbología (en un ráster, diálogo de contraste)
@@ -274,6 +290,38 @@ En la interfaz:
   el nombre del archivo y una capa por subítem, cada una con su visibilidad, simbología,
   etiquetas y tabla de atributos, y el mapa se encuadra a la **unión** de todas las capas
   (no solo a la primera)
+
+### 6.1 PostGIS (PostgreSQL)
+
+**Archivo → Abrir conexión PostGIS…** (`Ctrl+Shift+P`) lista las conexiones `PGIS` del
+`Connections.xml` de Mapa Digital y permite elegir esquema y una o varias tablas.
+
+* **Dónde está el catálogo**: `--connections <ruta>`, la variable `MINIGIS_CONNECTIONS` o el
+  ajuste que guarda el diálogo (botón «Examinar…»). El archivo real suele estar en
+  `...\mapadigital_2027\bin\Connections.xml`.
+* **Contraseña**: `Connections.xml` la guarda cifrada con un esquema propietario que MiniGIS
+  no puede descifrar, así que se pide la primera vez. «Recordar» viene marcado: la contraseña
+  se cifra con DPAPI en `%APPDATA%\MiniGIS\postgis-credentials.json` (solo tu usuario de Windows
+  puede descifrarla) y nunca se escribe en claro ni en el proyecto. En la CLI se usa
+  `PGPASSWORD`, `PGPASSFILE` o `pgpass.conf`.
+* **Sin reconectar cada vez**: mientras MiniGIS está abierto, la conexión queda en una sesión
+  (`PgSession`): el catálogo mantiene sus conexiones abiertas y cachea esquemas y tablas, así que
+  al volver a abrir el diálogo aparece ya conectado y con las tablas al instante. El botón
+  **Actualizar** cierra la conexión y relee el catálogo por si han cambiado las tablas. Tras
+  reiniciar, con «Recordar» marcado, se conecta solo; si no hay contraseña guardada, solo hay que
+  escribirla y pulsar Conectar.
+* **Identidad de la capa**: `pg:conexion/esquema/tabla`, sin credenciales. Es lo que aparece
+  en `--info`, en el panel (grupo `conexion/esquema`) y en los mensajes.
+* **Solo lectura**: todo se abre con `GDAL_OF_READONLY`; no hay creación ni edición.
+* **Tablas grandes** (> 1 000 000 de elementos): el diálogo avisa y deja elegir entre preparar
+  el índice de dibujo o dibujar bajo demanda. En la CLI, `--pg-no-index` fuerza lo segundo.
+* **Proyectos**: las capas PostGIS no se guardan en el `.qgz` (v1); se avisa al guardar y
+  siguen en la sesión. El proveedor `postgres` de QGIS queda para una spec posterior.
+
+```bat
+minigis --connections "...\Connections.xml" --check-pg -l pg:dataware_FDAC/mgn_2025 --json
+minigis --connections "...\Connections.xml" --info -l pg:dataware_FDAC/mgn_2025/poligonos_de_manzana
+```
 
 ---
 
@@ -290,6 +338,10 @@ En la interfaz:
   Si una capa del archivo no declara SRC (GeoPackage con `srs_id 99999`), se usa el de otra capa
   del mismo archivo y se avisa en la descripción del SRC; sin eso sus coordenadas no se pueden
   reproyectar y caen fuera de la vista.
+* **PostGIS de solo lectura**: con el `Connections.xml` de Mapa Digital abre tablas de
+  PostgreSQL/PostGIS (`pg:conexion/esquema/tabla`), las dibuja, identifica y etiqueta como
+  cualquier capa, y agrupa las de un mismo esquema en el panel. La contraseña se pide una vez y
+  se recuerda cifrada con DPAPI si se marca «Recordar».
 * Dibuja puntos, líneas y polígonos **con huecos**; reproyecta al vuelo si el SRC de la capa
   difiere del de destino (por ejemplo, un shapefile UTM sobre un mapa en EPSG:4326), tanto las
   geometrías como la extensión con la que se encuadra la capa.
@@ -373,6 +425,14 @@ ctest --preset windows-msvc-release --output-on-failure
 * `minigis.identificar-ventana` — captura de la interfaz con el panel de resultados lleno, el
   resalte del objeto y la tabla en su registro.
 * `minigis.rendimiento-raster` — puerta opcional de rendimiento con `MINIGIS_RASTER_BENCH_DATASET`.
+* `minigis.pg-catalogo` — piezas PostGIS sin servidor: URI `pg:`, catálogo `Connections.xml`,
+  cadena de conexión, escapado, saneado de la contraseña y credenciales DPAPI.
+* `minigis.pg-sin-catalogo`, `minigis.pg-conexion-inexistente`, `minigis.pg-cli-uso` — códigos de
+  salida 2, 8 y 1 sin tocar la red.
+* `minigis.pg-dialogo` — captura del diálogo de conexión con el catálogo de ejemplo.
+* `minigis.pg`, `minigis.pg-window`, `minigis.pg-bench` — integración **opt-in**: corren solo si
+  existen `MINIGIS_PG_TEST_CONNECTIONS`, `MINIGIS_PG_TEST_URI` y `MINIGIS_PG_TEST_LAYER`; si no,
+  aparecen como omitidas (no fallan).
 
 ### 8.1 Rendimiento
 
@@ -553,7 +613,13 @@ Todo lo siguiente se ejecutó sobre este equipo con Qt 6.10.3 y el preset `windo
 | Tabla de atributos del KML de 258 países | Los 258 elementos con sus campos (la primera fila ya no sale vacía ni falta el último) y una sola lectura al origen por fila: la segunda lectura de la misma fila sale de la caché (`--check-kml` informa `attributeCache: true`) |
 | `minigis --identify-at --json` (Madrid, capa limitada, UTM y hueco) | Contrato JSON y códigos de salida correctos; incluye `selection` (o `null` en el hueco) |
 | `minigis --snapshot-window --with-attributes --identify-at` | Captura con el resalte del objeto y la tabla movida a su fila |
-| `ctest --preset windows-msvc-release` | **18/18 pruebas superadas** (24/24 con las pruebas de proyecto, ver abajo) |
+| `minigis --check-pg -l pg:dataware_FDAC/mgn_2025 --json` | 16 tablas, `ok: true`, ~1,2 s; el JSON no contiene `password` |
+| `minigis --info` de `areas_geoestadisticas_estatales` | driver `PostgreSQL`, 32 elementos, `EPSG:6365`; salida sin credenciales |
+| `minigis --snapshot` de la misma tabla | PNG 1200×800 (36 ms de render) |
+| `minigis --bench` de `areas_geoestadisticas_municipales` | p90 55 ms, `budget_ok: true`; `--pg-no-index` informa `store.mode: "none"` |
+| `minigis --snapshot-pg-dialog` | Diálogo con las 6 conexiones `PGIS` del catálogo real |
+| Ventana con dos tablas de `mgn_2025` | Carga en segundo plano, grupo `dataware_FDAC/mgn_2025` con 2 capas y ambas dibujadas |
+| `ctest --preset windows-msvc-release` | **39/39**: 36 en verde y 3 opt-in omitidas sin variables; con `MINIGIS_PG_TEST_*`, **8/8** también en verde |
 
 El kit de Qt Creator también se compiló con el toolset **VS2026 (19.51)**:
 `build\Desktop_Qt_6_10_3_MSVC2022_64bit_Release` y **24/24** pruebas. Si Qt
