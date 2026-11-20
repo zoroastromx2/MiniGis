@@ -9,6 +9,37 @@
 #############################################################
 cmake_minimum_required(VERSION 3.22...4.3)
 
+# --- Coherencia entre el generador y el programa de compilacion ------------
+# Los generadores de Visual Studio usan CMAKE_MAKE_PROGRAM como el propio
+# MSBuild: invocan "MSBuild.exe <proyecto>.vcxproj /p:Configuration=...". Si la
+# cache conserva un valor de otro generador (Qt Creator lo arrastra al duplicar
+# una configuracion Ninja: -DCMAKE_MAKE_PROGRAM=C:/Strawberry/c/bin/ninja.exe),
+# se ejecuta ninja con argumentos de MSBuild y la comprobacion del compilador
+# falla con un mensaje que no orienta nada:
+#
+#   Run Build Command(s): .../ninja.exe cmTC_xxxx.vcxproj /p:Configuration=Debug
+#   ninja: error: loading 'build.ninja': GetLastError() = 2
+#   The C++ compiler ... is not able to compile a simple test program.
+#
+# El valor se descarta (el generador vuelve a elegir MSBuild) y se avisa de que
+# la configuracion de Qt Creator sigue enviando ese argumento. Es mejor reparar
+# aqui que dejar que el usuario persiga un "compilador roto" que funciona.
+if(CMAKE_GENERATOR MATCHES "^Visual Studio")
+  if(DEFINED CMAKE_MAKE_PROGRAM
+     AND NOT CMAKE_MAKE_PROGRAM MATCHES "[Mm][Ss][Bb]uild(\\.exe)?$")
+    message(WARNING
+      "MiniGIS: el generador es \"${CMAKE_GENERATOR}\", pero CMAKE_MAKE_PROGRAM\n"
+      "  apunta a \"${CMAKE_MAKE_PROGRAM}\", que no es MSBuild. Se descarta ese valor\n"
+      "  para que el generador elija su propia herramienta.\n"
+      "  Causa habitual: una configuracion de Qt Creator clonada de un kit Ninja que\n"
+      "  conserva -DCMAKE_MAKE_PROGRAM=C:/Strawberry/c/bin/ninja.exe. En Projects >\n"
+      "  Build & Run, borra esa linea de los parametros de CMake (o usa el preset\n"
+      "  windows-msvc-release, que es el verificado con Qt 6.10.3 y GDAL de vcpkg).")
+    unset(CMAKE_MAKE_PROGRAM CACHE)
+    unset(CMAKE_MAKE_PROGRAM)
+  endif()
+endif()
+
 set(CMAKE_COLOR_MAKEFILE ON)
 set(MINIGIS_CMAKE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 list(APPEND CMAKE_MODULE_PATH "${MINIGIS_CMAKE_DIR}")
