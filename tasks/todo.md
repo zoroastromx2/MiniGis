@@ -1,194 +1,319 @@
-# Task List: Selección del objeto identificado
+# Tareas: apertura y visualización de KML/KMZ
 
-> Derivado de [plan.md](plan.md) y [SPEC-seleccion.md](../SPEC-seleccion.md)
-> (aprobado el 2026-10-22: primer resultado, tabla cambia de capa sin tocar el
-> árbol, halo + amarillo, tabla oculta no se abre, sin selección desde el panel,
-> sin `Esc`, el panel marca «(seleccionado)»).
-> Cada tarea se completa con: compila, 18/18 pruebas verdes y la verificación
-> indicada. **Estado: implementado y verificado (2026-10-22)** — 18/18 pruebas,
-> comprobaciones 24–31 de `--check-identify` en `OK`, `selection` en el JSON y
-> captura nativa con resalte y tabla.
+Plan: `tasks/plan.md` · Spec: `SPEC-kml.md`
 
-## Comandos de referencia
+Estado: **T1–T9 hechas y verificadas (30/30 pruebas CTest)**. Primer incremento:
+T1–T4. Segundo: T5–T9.
 
-```bat
-scripts\configure.bat windows-msvc-release
-scripts\build.bat     windows-msvc-release
-ctest --preset windows-msvc-release --output-on-failure
-```
+| Tarea | Estado | Evidencia |
+|---|---|---|
+| T1 fixtures | hecha | 8 archivos en `data/sample/kml/`; los 8 abren con exit 0 |
+| T2 `--check-kml` | hecha | `mixto.kml` daba `storeFeatures 1` de 2 → rojo |
+| T3 clasificación | hecha | `mixto.kml` da 2 de 2 y el `--snapshot` dibuja las 4 partes |
+| T4 estilos | hecha | `estilos.kml` → `PEN(c:#FF0000FF,w:4.000000px)`; apertura del KML de 21,6 MB: 583 → ~600 ms |
+| T5 tabla de estilos | hecha | `estilos_varios.kml` → 2 estilos con su índice por elemento |
+| T6 render por estilo | hecha | captura del GUI: dos polígonos rojos y dos azules; el KML de 21,6 MB sigue en ~600 ms |
+| T7 panel | hecha | fila «Polígonos · 2 estilos»; `--info` dice `Mixta`/`Poligono`, no `(Desconocido)` |
+| T8 KMZ y errores | hecha | el diálogo ofrece `*.kml *.kmz` y un filtro «KML» propio |
+| T9 documentación | hecha | `README.md`, `SPEC-kml.md` y estas tareas al día |
 
-Ejecutable: `build\windows-msvc-release\bin\minigis.exe`.
-
-Contrato: `--check-identify` mantiene las 23 comprobaciones actuales y añade las
-24–31 de §8.2 del spec. Las comprobaciones de geometría/CLI llaman al motor; las
-de interacción envían eventos y leen el panel y la tabla.
 
 ---
 
-## Fase A — Resalte visible
+## Task 1: Fixtures KML/KMZ deterministas
 
-### Checkpoint 0 — antes de tocar código
+**Description:** Crear el juego de archivos de ejemplo con el que se reproduce el
+fallo actual y se prueban los casos límite. Todos propios, pequeños y legibles,
+para poder versionarlos y usarlos en `ctest`. No se versiona el KML del usuario
+(21,6 MB, datos de terceros): solo se usa para medir a mano.
 
-- [x] Plan y lista de tareas revisados por una persona
-- [x] Confirmado el orden de overlays (etiquetas → selección → marcador) y los
-      lápices cosméticos
+**Acceptance criteria:**
+- [ ] `data/sample/kml/mixto.kml` contiene una `MultiGeometry` (punto + línea +
+  polígono) **y** otro polígono suelto: con el binario actual la colección no
+  aparece en el mapa.
+- [ ] `data/sample/kml/mixto.kmz` es el mismo contenido empaquetado (ZIP con un
+  `.kml` dentro) y `--info` da las mismas capas y elementos.
+- [ ] `carpetas.kml` tiene dos `<Folder>` con nombre; `solo_puntos.kml` tiene
+  puntos con `<name>`; `sin_geometria.kml` tiene un placemark sin geometría.
+- [ ] `estilos.kml` declara un `<Style>` con `LineStyle` rojo (`ff0000ff`) y
+  `width` 4, y `PolyStyle`; `estilos_varios.kml` tiene tres elementos con un
+  estilo y uno con otro.
+- [ ] `mundo.kml` (polígonos con `Schema`/`SimpleField`) sirve de caso «real»
+  pequeño y sin estilos.
 
----
+**Verification:**
+- [ ] `bin\minigis.exe --info <archivo>` abre los seis sin error (exit 0).
+- [ ] `bin\minigis.exe --snapshot mixto.png -l data\sample\kml\mixto.kml` deja
+  constancia visual del fallo (falta la colección).
+- [ ] `--info` de `mixto.kmz` y de `mixto.kml` coinciden salvo en la ruta.
 
-### [x] T1 — Núcleo y lienzo: anillos, selección y resalte
+**Dependencies:** None
 
-**Descripción:** añadir `GeometryStore::featureRings()` (copia del nivel 0 y, en
-modo envolventes, de la caché) y el estado de selección en `MapCanvas`:
-`setSelectedFeature`, `clearSelectedFeature`, accesores, trazado cacheado en
-coordenadas de mapa y overlay con halo oscuro (1 px) + amarillo `#FFD400` (3 px),
-dibujado después de la caché y antes del marcador. Puntos con anillo de 6 px. Se
-limpia al quitar la capa, al vaciar capas y al cambiar el SRC de destino; una capa
-oculta no se dibuja. Añadir las comprobaciones 25 y 30.
+**Files likely touched:**
+- `data/sample/kml/mixto.kml`, `.kmz`
+- `data/sample/kml/carpetas.kml`, `solo_puntos.kml`, `sin_geometria.kml`
+- `data/sample/kml/estilos.kml`, `estilos_varios.kml`, `mundo.kml`
 
-**Criterios de aceptación:**
-- [x] `featureRings` devuelve los anillos del elemento en memoria y en modo
-      envolventes, y `false` si no hay geometría
-- [x] Con P-001 seleccionado se ve `#FFD400` a ±1 px del borde superior y no se
-      veía antes de seleccionar
-- [x] `renderToImage` posterior a la selección reutiliza el cuadro
-      (`lastFrameReused()`)
-- [x] Al quitar la capa seleccionada, `hasSelectedFeature()` pasa a false
-- [x] Una capa oculta no dibuja el resalte
-- [x] Las 18 pruebas actuales siguen pasando
-
-**Verificación:**
-- [x] `scripts\build.bat windows-msvc-release`
-- [x] `minigis.exe --check-identify -l parcels -l cities -l ortho` con 25 y 30 en `OK`
-- [x] `ctest --preset windows-msvc-release` (18/18)
-- [x] Revisar una captura con P-001 seleccionado
-
-**Dependencias:** ninguna · **Archivos:** `src/core/minigisgeometrystore.h/.cpp`,
-`src/gui/minigismapcanvas.h/.cpp`, `src/app/main.cpp` · **Tamaño:** M
+**Estimated scope:** S (datos + ningún código)
 
 ---
 
-### Checkpoint A — resalte
+## Task 2: `--check-kml`, el diagnóstico por elemento
 
-- [x] Compila y 18/18 pruebas verdes
-- [x] Comprobaciones 25 y 30 en `OK`; el resalte se ve con el color y el grosor
-      previstos
-- [x] Revisión humana antes de la integración (o autorización para continuar)
+**Description:** Añadir un modo sin ventana que recorra el archivo con la API C de
+OGR y cuente, **por elemento**: tipo de geometría, partes no soportadas,
+elementos sin geometría y estilos distintos. Además compara ese recuento con lo
+que el almacén de geometrías construyó, y devuelve `ok: false` si no coinciden.
+Es la prueba que hoy debe salir en rojo.
 
----
+**Acceptance criteria:**
+- [ ] Existe `--check-kml <archivo>` con `--json`, documentado en `--help`.
+- [ ] La salida JSON sigue el contrato de `SPEC-kml.md` §R11 (`ok`, `driver`,
+  `layers[]` con `features`, `geometry`, `kinds`, `withoutGeometry`,
+  `unsupportedParts`, `distinctStyles`, `extent`, `crsEpsg`; y `appliedStyles`,
+  `style`).
+- [ ] Con `mixto.kml` y el binario actual devuelve `ok: false` e informa la
+  diferencia entre elementos de OGR y elementos del almacén.
+- [ ] Códigos de salida: `0` correcto, `1` uso, `2` archivo no encontrado, `3`
+  GDAL no abre, `5` sin capas. Sin códigos nuevos.
+- [ ] Funciona igual sobre `.kmz`.
 
-## Fase B — Integración
+**Verification:**
+- [ ] `bin\minigis.exe --check-kml data\sample\kml\mixto.kml --json` imprime el
+  JSON esperado y sale con 0 (el `ok: false` va dentro del JSON, no en el código
+  de salida).
+- [ ] `ctest -R kml-mixto` falla por la comparación de recuentos (rojo
+  intencionado).
+- [ ] `--check-kml` sobre un archivo inexistente sale con 2, y sobre un `.shp`
+  corrupto con 3.
 
-### [x] T2 — Identificar selecciona; tabla y panel
+**Dependencies:** Task 1
 
-**Descripción:** en `identifyAtMapPoint`, seleccionar `hits.front()` y limpiar en
-un clic sin resultados. Si el dock de atributos está visible, poner el modelo en
-la capa del objeto (sin tocar el árbol), seleccionar la fila `fid` y centrarla;
-sin foco en la tabla. Añadir los accesores de verificación y el sufijo
-«(seleccionado)» en el panel. Comprobar el aviso del tope de 100 000 filas.
+**Files likely touched:**
+- `src/core/minigiskmlinspect.h`, `src/core/minigiskmlinspect.cpp` (nuevos)
+- `src/core/CMakeLists.txt`
+- `src/app/main.cpp`
+- `tests/CMakeLists.txt`
 
-**Criterios de aceptación:**
-- [x] Tras el clic en P-001, la selección es `parcels`/fid 0 y la capa del árbol
-      no cambia
-- [x] Un clic en el hueco limpia la selección y el resalte
-- [x] Con la tabla visible en parcels, un clic en P-003 deja la fila actual en 2
-- [x] Con la tabla visible en parcels, un clic en Madrid cambia a cities y fila 0
-- [x] Con la tabla oculta, un clic en Madrid no cambia su capa ni su fila
-- [x] El panel marca la fila del elemento con «(seleccionado)»
-- [x] Las 18 pruebas actuales siguen pasando
-
-**Verificación:**
-- [x] `minigis.exe --check-identify …` con 24, 26–29 y 31 en `OK`
-- [x] `ctest --preset windows-msvc-release` (18/18)
-- [x] `minigis.exe --snapshot-window s.png --identify-at …` (resalte, panel y fila)
-
-**Dependencias:** T1 · **Archivos:** `src/gui/minigismainwindow.h/.cpp`,
-`src/gui/minigisidentifypanel.h/.cpp`, `src/app/main.cpp` · **Tamaño:** M
-
----
-
-### Checkpoint B — integración
-
-- [x] Compila y 18/18 pruebas verdes
-- [x] Comprobaciones 24, 26–29 y 31 en `OK`
-- [x] La tabla salta a la fila y el panel marca el elemento seleccionado
-- [x] Revisión humana antes del contrato (o autorización para continuar)
+**Estimated scope:** M (4-5 archivos)
 
 ---
 
-## Fase C — Contrato y cierre
+## Task 3: Clasificación de geometría por elemento
 
-### [x] T3 — CLI, JSON, capturas y CTest
+**Description:** Corregir la raíz del fallo: en capas cuyo tipo declarado es
+desconocido, clasificar cada elemento por su geometría real, recorrer las
+colecciones completas y no descartar ningún elemento. Resumir el tipo de la capa
+(`Punto`, `Línea`, `Polígono`, `Mixta`) para que el panel y `--info` muestren algo
+legible.
 
-**Descripción:** añadir `"selection"` al JSON de `--identify-at` (o `null` sin
-resultados), aplicar la selección en `--snapshot` y `--snapshot-window` con
-`--identify-at` mediante un ayudante compartido, y ampliar
-`tests/run_cli_test.cmake` con las etiquetas 24–31 y las comprobaciones del JSON.
-No se añaden pruebas nuevas: `minigis.identificar` y `minigis.identificar-cli`
-crecen.
+**Acceptance criteria:**
+- [ ] Un elemento con `MultiGeometry` mixta se conserva y se dibujan todas sus
+  partes, aunque conviva con otros elementos de la misma capa.
+- [ ] Las partes de tipo no soportado se cuentan como `unsupportedParts`, no
+  tiran el elemento entero.
+- [ ] `VectorLayer::geometryKind()` y `geometryTypeName()` devuelven un tipo
+  legible para capas KML; nunca «Unknown (any)» si hay geometría.
+- [ ] En una capa de tipo conocido (shapefile, GeoPackage, GeoJSON homogéneo) el
+  comportamiento no cambia: `--info --json` y `--snapshot` idénticos a `main`.
 
-**Criterios de aceptación:**
-- [x] `--identify-at --json` incluye `"selection"` con la capa y el FID, y `null`
-      cuando no hay resultados
-- [x] `--snapshot` y `--snapshot-window` con `--identify-at` muestran el resalte
-      (y el panel en la ventana)
-- [x] `minigis.identificar` exige las etiquetas 24–31 y falla con cualquier
-      `FALLO`
-- [x] `minigis.identificar-cli` comprueba `selection` y su `null`
-- [x] `ctest` 18/18
+**Verification:**
+- [ ] `ctest --preset windows-msvc-release --output-on-failure` en verde, con
+  `kml-mixto` ya pasando.
+- [ ] `bin\minigis.exe --snapshot mixto.png -l data\sample\kml\mixto.kml` muestra
+  los dos polígonos, la línea y el punto.
+- [ ] Comparación manual de `--info --json` y `--snapshot` de
+  `data\sample\shapefiles\parcels.shp`, `data\sample\geopackage\ejemplo.gpkg` y un
+  GeoJSON contra el binario anterior.
 
-**Verificación:**
-- [x] Las cuatro invocaciones de `--identify-at` del spec
-- [x] `ctest --preset windows-msvc-release -R "identificar" --output-on-failure`
-- [x] `ctest --preset windows-msvc-release` (18/18)
+**Dependencies:** Task 2
 
-**Dependencias:** T2 · **Archivos:** `src/app/main.cpp`,
-`tests/run_cli_test.cmake` · **Tamaño:** M
+**Files likely touched:**
+- `src/core/minigisgeometrystore.cpp`
+- `src/core/minigisvectorlayer.cpp`, `src/core/minigisvectorlayer.h`
+- `src/core/minigiskmlinspect.cpp`
 
----
-
-### [x] T4 — README y verificación final
-
-**Descripción:** documentar la selección, el resalte, el salto de la tabla y la
-clave `selection`; actualizar §5, §7, §8 y §11 del README. Pasar
-`SPEC-seleccion.md` a «implementado» con la verificación real y cerrar las tareas.
-
-**Criterios de aceptación:**
-- [x] README describe el comportamiento y los comandos tal como funcionan
-- [x] `SPEC-seleccion.md` pasa a «implementado» con 18/18 y las comprobaciones
-      24–31
-- [x] SC1–SC13 comprobados uno a uno
-- [x] `git status` solo muestra archivos previstos (sin restos de `build\`)
-
-**Verificación:**
-- [x] Bucle completo (configurar, compilar, `ctest`)
-- [x] Ejecutar los ejemplos del README
-- [x] `git status --short`
-
-**Dependencias:** T3 · **Archivos:** `README.md`, `SPEC-seleccion.md`,
-`tasks/todo.md` · **Tamaño:** S
+**Estimated scope:** M (3-4 archivos)
 
 ---
 
-### Checkpoint C — contrato
+## Task 4: Resolver los estilos del KML con GDAL
 
-- [x] 24–31 en `OK`, `selection` en el JSON y 18/18
-- [x] Captura con resalte, panel y fila de la tabla
+**Description:** Activar `LIBKML_RESOLVE_STYLE=YES` en la inicialización de GDAL y
+convertir el *style string* de OGR de cada elemento (`PEN(c:#rrggbb,w:Npx)`,
+`BRUSH(fc:#rrggbb,fo:N)`) al `Style` de MiniGIS. Medir el coste con el archivo
+real de 21,6 MB.
 
-### Checkpoint D — cierre
+**Acceptance criteria:**
+- [ ] Con `LIBKML_RESOLVE_STYLE=YES`, `OGR_F_GetStyleString` devuelve el estilo
+  resuelto para un KML con `styleUrl` a un `<Style>` del documento.
+- [ ] `parseOgrStyleString()` traduce color y anchura de trazo y color y
+  opacidad de relleno, con anchura acotada a 20 px.
+- [ ] Tolera variantes del formato (`w:4` sin `px`, claves en otro orden,
+  `BRUSH(fc:none)`, ausencia de `PEN` o de `BRUSH`).
+- [ ] La apertura del KML de 21,6 MB no supera 1,5× el tiempo actual (583 ms →
+  ≤ 875 ms). Si lo supera, se cachea la resolución por `styleUrl` antes de dar la
+  tarea por buena.
 
-- [x] SC1–SC13 verificados y anotados
-- [x] README y spec al día
-- [x] Revisión humana final: el trabajo del spec está terminado
+**Verification:**
+- [ ] `bin\minigis.exe --check-kml data\sample\kml\estilos.kml --json` informa
+  `appliedStyles: 1` y el color y la anchura esperados.
+- [ ] Medición de tres tandas de `--info` del KML de 21,6 MB, anotada en el
+  resumen de la tarea.
+- [ ] `ctest -R kml-estilos` en verde.
+
+**Dependencies:** Task 1
+
+**Files likely touched:**
+- `src/core/minigisstyle.cpp`, `src/core/minigisstyle.h`
+- `src/core/minigisgdalinit.cpp`
+- `src/core/minigiskmlinspect.cpp`
+- `tests/CMakeLists.txt`
+
+**Estimated scope:** M (4 archivos)
 
 ---
 
-## Verificación final (2026-10-22)
+## Task 5: Tabla de estilos e índice por elemento en el almacén
 
-- Compilación limpia del preset `windows-msvc-release` y `ctest`: **18/18**.
-- `--check-identify`: **31/31** comprobaciones en `OK` (24–31 de selección,
-  resalte, limpieza, tabla y panel).
-- `minigis.identificar-cli`: `selection` con capa y FID, y `null` en el hueco.
-- `minigis.identificar-ventana` y la captura nativa
-  `build\test-output\selection-native.png`: Madrid seleccionado con anillo
-  amarillo, «(seleccionado)» en el panel y fila 0 de la tabla resaltada.
-- La tabla oculta no se abre ni se mueve (comprobación 29).
+**Description:** Guardar en el almacén de geometrías, por elemento, un índice a
+una tabla de estilos únicos (color y grosor de trazo, color y opacidad de
+relleno). Con más de 64 estilos distintos se repliega al dominante y se marca la
+capa en modo dominante.
+
+**Acceptance criteria:**
+- [ ] `GeometryStore` expone la tabla de estilos y el índice de estilo por
+  elemento, sin cambiar el formato de geometría que ya usa el renderizador.
+- [ ] Con `estilos_varios.kml`: dos estilos en la tabla y el índice correcto en
+  cada elemento.
+- [ ] Con más de 64 estilos: tabla de un solo estilo (el dominante) y
+  `styleMode: "dominant"` en el diagnóstico.
+- [ ] Una capa sin estilos guarda un único estilo y no paga coste extra.
+
+**Verification:**
+- [ ] `bin\minigis.exe --check-kml data\sample\kml\estilos_varios.kml --json`
+  informa `distinctStyles: 2`.
+- [ ] `ctest -R kml-estilos` en verde.
+
+**Dependencies:** Task 3, Task 4
+
+**Files likely touched:**
+- `src/core/minigisgeometrystore.h`, `src/core/minigisgeometrystore.cpp`
+- `src/core/minigisvectorlayer.cpp`, `src/core/minigisvectorlayer.h`
+
+**Estimated scope:** M (4 archivos)
+
+---
+
+## Task 6: Render agrupado por estilo y medición
+
+**Description:** Dibujar por grupos de estilo, aplicando a cada grupo su `Style`,
+sin perder el batching ni la caché por revisión. Medir contra la puerta de
+rendimiento.
+
+**Acceptance criteria:**
+- [ ] `estilos_varios.kml` se dibuja con los dos colores, cada elemento con el
+  suyo (`styleMode: "perFeature"`).
+- [ ] Una capa sin estilos sigue haciendo una sola agrupación: mismo número de
+  operaciones de dibujo que hoy.
+- [ ] `ctest -R minigis.rendimiento` en verde.
+- [ ] El `--snapshot` del KML de 21,6 MB no empeora más de un 20 %.
+- [ ] Cambiar el estilo desde el diálogo sobrescribe el importado y sube
+  `revision()`.
+
+**Verification:**
+- [ ] `bin\minigis.exe --snapshot varios.png -l data\sample\kml\estilos_varios.kml`
+  con los dos colores comprobados a simple vista.
+- [ ] `ctest -R "minigis.rendimiento"` y `ctest -R kml-` en verde.
+- [ ] Medición de tres tandas anotada en el resumen de la tarea.
+
+**Dependencies:** Task 5
+
+**Files likely touched:**
+- `src/core/minigisfastrenderer.cpp`
+- `src/core/minigisgeometrystore.h`, `src/core/minigisgeometrystore.cpp`
+- `src/core/minigisvectorlayer.cpp`
+
+**Estimated scope:** M (4 archivos)
+
+---
+
+## Task 7: Panel de capas legible
+
+**Description:** Sustituir el tipo de geometría heredado de OGR por el resumen
+propio: `Punto`, `Línea`, `Polígono` o `Mixta`, y añadir el número de estilos
+cuando sea mayor que uno.
+
+**Acceptance criteria:**
+- [ ] La columna **Geometría** muestra `Polígono` para `mundo.kml` y `Mixta` para
+  `mixto.kml`.
+- [ ] Ninguna capa con geometría muestra «Unknown (any)» ni «Desconocido».
+- [ ] Una capa con varios estilos lo indica («2 estilos») sin romper el ancho de
+  la columna.
+
+**Verification:**
+- [ ] `bin\minigis.exe --snapshot-window ventana.png -l data\sample\kml\mixto.kml`
+  y revisión de la captura.
+- [ ] `ctest` completo en verde.
+
+**Dependencies:** Task 3, Task 5
+
+**Files likely touched:**
+- `src/gui/minigislayerpanel.cpp`
+- `src/gui/minigismainwindow.cpp`
+
+**Estimated scope:** S (2 archivos)
+
+---
+
+## Task 8: KMZ en el diálogo y errores con causa y acción
+
+**Description:** Añadir `*.kmz` al filtro de *Archivo > Abrir capa* y al
+arrastrar y soltar, y comprobar que un KML/KMZ que GDAL no puede abrir da un
+`Error` con causa y acción en vez de un mensaje genérico.
+
+**Acceptance criteria:**
+- [ ] El filtro incluye `*.kml *.kmz` y el `.kmz` se abre desde el diálogo.
+- [ ] Arrastrar `mixto.kmz` sobre el lienzo lo abre.
+- [ ] Un `.kmz` que no es ZIP, o un `.kml` mal formado, muestran un mensaje con
+  la causa de GDAL y qué hacer, y la CLI sale con 3.
+
+**Verification:**
+- [ ] `ctest -R kml-error` en verde.
+- [ ] Prueba manual del diálogo y del arrastre con `mixto.kmz`.
+
+**Dependencies:** Task 1
+
+**Files likely touched:**
+- `src/gui/minigismainwindow.cpp`
+
+**Estimated scope:** S (1 archivo)
+
+---
+
+## Task 9: Documentación, medición final y cierre de la spec
+
+**Description:** Actualizar `README.md` (tabla de la CLI con `--check-kml`,
+formatos con `.kmz`, sección de comprobaciones), cerrar las preguntas de
+`SPEC-kml.md` con lo decidido y registrar las mediciones finales.
+
+**Acceptance criteria:**
+- [ ] `README.md` documenta `--check-kml` y `.kmz` en la tabla de la CLI y en la
+  lista de formatos.
+- [ ] `SPEC-kml.md` pasa a estado **aprobada**, con Q1 y Q7 cerradas y el estado
+  de partida actualizado con los tiempos finales.
+- [ ] Los ocho criterios de éxito de §11 están verificados uno a uno y anotados.
+
+**Verification:**
+- [ ] `ctest --preset windows-msvc-release --output-on-failure` en verde,
+  incluida `minigis.rendimiento`.
+- [ ] Repaso de los ocho criterios con la salida de los comandos en la mano.
+
+**Dependencies:** Tasks 3, 5, 6, 7
+
+**Files likely touched:**
+- `README.md`
+- `SPEC-kml.md`
+- `tasks/plan.md`
+
+**Estimated scope:** S (3 archivos)
