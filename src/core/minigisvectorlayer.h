@@ -1,10 +1,12 @@
 #pragma once
 
+#include <QCache>
 #include <QString>
 #include <QStringList>
 #include <QVector>
 
 #include <memory>
+#include <vector>
 
 #include "minigiserror.h"
 #include "minigislabelstyle.h"
@@ -134,8 +136,30 @@ public:
   /**
    * Valores de todos los campos de una fila. Hace una sola lectura en GDAL,
    * por lo que es la forma recomendada para pintar la tabla de atributos.
+   *
+   * Las filas leidas se guardan en una cache pequena y acotada: una lectura
+   * cuesta unos 2,5 ms en un KML de 166 campos (LIBKML resuelve cada elemento
+   * releyendo el arbol), y la tabla vuelve a pedir las mismas filas visibles en
+   * cada repintado.
    */
   QVector<QString> fieldValues(qint64 row) const;
+
+  /**
+   * Numero de lecturas de atributos que se han hecho al origen. Existe para
+   * poder comprobar sin ventana que la cache evita relecturas.
+   */
+  quint64 attributeReads() const { return mAttributeReads; }
+
+  /**
+   * FID de OGR de la fila `row` (0 = primer elemento). No siempre coincide con
+   * la fila: en KML los FID empiezan en 1 y no son contiguos, asi que usar la
+   * fila como FID dejaba la primera fila vacia y perdia el ultimo elemento.
+   * Devuelve -1 si la fila no existe.
+   */
+  qint64 fidForRow(qint64 row) const;
+
+  /** Fila de la tabla que corresponde a un FID, o -1 si no esta. */
+  qint64 rowForFid(qint64 fid) const;
 
   bool isVisible() const { return mVisible; }
   void setVisible(bool visible)
@@ -243,6 +267,19 @@ private:
   std::unique_ptr<OGRSpatialReference> mAssumedSrs;
   bool mVisible = true;
   bool mStyleOverridden = false;
+  /** Cache de filas ya leidas (FIFO acotado) y contador de lecturas al origen. */
+  mutable QCache<qint64, QVector<QString>> mAttributeCache {200};
+  mutable quint64 mAttributeReads = 0;
+
+  /**
+   * Mapa fila -> FID, construido la primera vez que se piden atributos. Si los
+   * FID coinciden con las filas (shapefile, GeoPackage, GeoJSON) no se construye
+   * y todo queda en una comprobacion.
+   */
+  void ensureRowToFid() const;
+  mutable std::vector<qint64> mRowToFid;
+  mutable bool mRowMapReady = false;
+  mutable bool mRowsAreFids = true;
   quint64 mRevision = 1;
   mutable qint64 mFeatureCount = -1; // -1 = pendiente de calcular
 };

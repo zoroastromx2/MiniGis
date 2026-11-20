@@ -589,6 +589,7 @@ elseif(MODE STREQUAL "kml")
     endif()
     foreach(_key IN ITEMS "\"features\"" "\"geometry\"" "\"kinds\""
                           "\"withoutGeometry\"" "\"unsupportedParts\"" "\"storeFeatures\""
+                          "\"attributeCache\": true"
                           "\"crsEpsg\": 4326")
       if(NOT _out MATCHES "${_key}")
         message(FATAL_ERROR "La salida de --check-kml no contiene ${_key}:\n${_out}")

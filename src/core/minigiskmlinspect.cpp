@@ -94,6 +94,7 @@ QJsonObject layerJson(const KmlLayerReport &layer)
   json.insert(QStringLiteral("unsupportedParts"), layer.unsupportedParts);
   json.insert(QStringLiteral("storeFeatures"), layer.storeFeatures);
   json.insert(QStringLiteral("distinctStyles"), layer.distinctStyles);
+  json.insert(QStringLiteral("attributeCache"), layer.attributeCache);
   json.insert(QStringLiteral("extent"), extent);
   json.insert(QStringLiteral("crsEpsg"), layer.crsEpsg);
   return json;
@@ -139,7 +140,7 @@ bool KmlReport::ok() const
 
   for (const KmlLayerReport &layer : layers)
   {
-    if (layer.unsupportedParts > 0 || layer.missingInStore())
+    if (layer.unsupportedParts > 0 || layer.missingInStore() || !layer.attributeCache)
       return false;
   }
   return true;
@@ -259,6 +260,17 @@ bool inspectKml(const QString &path, KmlReport *report, Error *error)
     layerReport.crsEpsg = layer->crsEpsg();
     layerReport.extent = layer->extent();
 
+    // La tabla de atributos vuelve a pedir las mismas filas en cada repintado:
+    // una lectura cuesta milisegundos en KML, asi que la segunda debe salir de
+    // la cache. Se comprueba aqui, sin ventana, con dos lecturas de la fila 0.
+    if (layer->featureCount() > 0)
+    {
+      layer->fieldValues(0);
+      const quint64 readsBefore = layer->attributeReads();
+      const QVector<QString> again = layer->fieldValues(0);
+      layerReport.attributeCache = !again.isEmpty() && layer->attributeReads() == readsBefore;
+    }
+
     countLayer(*layer, &layerReport);
 
     // La otra orilla: cuantos de esos elementos conserva el almacen que usa el
@@ -271,6 +283,9 @@ bool inspectKml(const QString &path, KmlReport *report, Error *error)
     if (store && !store->styles().empty())
       report->style = store->styles().front();
 
+    // La tabla de atributos vuelve a pedir las mismas filas en cada repintado:
+    // una lectura cuesta milisegundos en KML, asi que la segunda debe salir de
+    // la cache. Se comprueba aqui, sin ventana, con dos lecturas de la fila 0.
     report->layers.append(layerReport);
   }
 

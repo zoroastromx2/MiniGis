@@ -1959,6 +1959,8 @@ void MainWindow::showAttributeSelection(const std::shared_ptr<VectorLayer> &laye
   if (mAttributeModel->layer() != layer)
     setAttributeLayer(layer);
 
+  // El identificador que llega de Identificar es el indice del elemento en el
+  // almacen, que es el mismo orden que la tabla: no hay que traducirlo a FID.
   const int row = static_cast<int>(fid);
   if (row >= mAttributeModel->rowCount())
   {

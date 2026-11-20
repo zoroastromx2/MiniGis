@@ -493,20 +493,13 @@ QString VectorLayer::fieldValue(qint64 row, int fieldIndex) const
   if (!mLayerHandle || fieldIndex < 0 || fieldIndex >= mFields.size())
     return {};
 
-  OGRFeatureH feature = OGR_L_GetFeature(mLayerHandle, static_cast<GIntBig>(row));
-  if (!feature)
+  // Se pasa por fieldValues() para aprovechar la cache de filas: la tabla pide
+  // los campos de una fila seguidos y no tiene sentido releer el elemento por
+  // cada uno de los 166 campos de un KML.
+  const QVector<QString> values = fieldValues(row);
+  if (fieldIndex >= values.size())
     return {};
-
-  QString value;
-  if (OGR_F_IsFieldSetAndNotNull(feature, fieldIndex))
-  {
-    const char *raw = OGR_F_GetFieldAsString(feature, fieldIndex);
-    if (raw)
-      value = QString::fromUtf8(raw);
-  }
-
-  OGR_F_Destroy(feature);
-  return value;
+  return values.at(fieldIndex);
 }
 
 Rectangle VectorLayer::featureEnvelope(qint64 row) const
@@ -532,14 +525,24 @@ Rectangle VectorLayer::featureEnvelope(qint64 row) const
   return result;
 }
 
-QVector<QString> VectorLayer::fieldValues(qint64 row) const{
+QVector<QString> VectorLayer::fieldValues(qint64 row) const
+{
   QVector<QString> values;
   if (!mLayerHandle)
     return values;
 
-  OGRFeatureH feature = OGR_L_GetFeature(mLayerHandle, static_cast<GIntBig>(row));
+  if (const QVector<QString> *cached = mAttributeCache.object(row))
+    return *cached;
+
+  const qint64 fid = fidForRow(row);
+  if (fid < 0)
+    return values;
+
+  OGRFeatureH feature = OGR_L_GetFeature(mLayerHandle, static_cast<GIntBig>(fid));
   if (!feature)
     return values;
+
+  ++mAttributeReads;
 
   values.reserve(mFields.size());
   for (int i = 0; i < mFields.size(); ++i)
@@ -555,7 +558,80 @@ QVector<QString> VectorLayer::fieldValues(qint64 row) const{
   }
 
   OGR_F_Destroy(feature);
+
+  // La cache es FIFO por coste: cada fila cuenta uno y al pasar de 200 se
+  // descarta la mas antigua. Con 166 campos son unos pocos MB como maximo.
+  mAttributeCache.insert(row, new QVector<QString>(values), 1);
   return values;
+}
+
+void VectorLayer::ensureRowToFid() const
+{
+  if (mRowMapReady)
+    return;
+  mRowMapReady = true;
+  mRowsAreFids = true;
+
+  const qint64 total = featureCount();
+  if (!mLayerHandle || total <= 0)
+    return;
+
+  // Camino rapido: si el FID coincide con la fila (shapefile, GeoPackage,
+  // GeoJSON) no hay que recorrer nada. Se comprueba con la primera y la ultima.
+  OGRFeatureH first = OGR_L_GetFeature(mLayerHandle, 0);
+  OGRFeatureH last = OGR_L_GetFeature(mLayerHandle, static_cast<GIntBig>(total - 1));
+  const bool contiguous = (first != nullptr) && (last != nullptr);
+  if (first)
+    OGR_F_Destroy(first);
+  if (last)
+    OGR_F_Destroy(last);
+  if (contiguous)
+    return;
+
+  // KML y otros formatos: los FID no empiezan en 0 ni son contiguos. El mapa se
+  // construye con una sola pasada secuencial, que es la unica forma de ir de
+  // fila a FID; sin el, la primera fila salia vacia y faltaba el ultimo
+  // elemento.
+  mRowsAreFids = false;
+  mRowToFid.clear();
+  mRowToFid.reserve(static_cast<size_t>(total));
+  OGR_L_ResetReading(mLayerHandle);
+  while (OGRFeatureH feature = OGR_L_GetNextFeature(mLayerHandle))
+  {
+    mRowToFid.push_back(static_cast<qint64>(OGR_F_GetFID(feature)));
+    OGR_F_Destroy(feature);
+  }
+  OGR_L_ResetReading(mLayerHandle);
+}
+
+qint64 VectorLayer::fidForRow(qint64 row) const
+{
+  if (!mLayerHandle || row < 0)
+    return -1;
+
+  ensureRowToFid();
+  if (mRowsAreFids)
+    return row;
+  if (row >= static_cast<qint64>(mRowToFid.size()))
+    return -1;
+  return mRowToFid[static_cast<size_t>(row)];
+}
+
+qint64 VectorLayer::rowForFid(qint64 fid) const
+{
+  if (!mLayerHandle || fid < 0)
+    return -1;
+
+  ensureRowToFid();
+  if (mRowsAreFids)
+    return fid;
+
+  for (size_t index = 0; index < mRowToFid.size(); ++index)
+  {
+    if (mRowToFid[index] == fid)
+      return static_cast<qint64>(index);
+  }
+  return -1;
 }
 
 Rectangle VectorLayer::extentInEpsg(int destinationEpsg) const

@@ -31,6 +31,8 @@ struct KmlLayerReport
   qint64 lines = 0;
   qint64 polygons = 0;
   qint64 storeFeatures = -1;   // -1 = no se pudo construir el almacen
+  /** True si la segunda lectura de una misma fila no vuelve al origen. */
+  bool attributeCache = true;
   int distinctStyles = 0;      // estilos distintos declarados por los elementos
   int appliedStyles = 0;       // estilos que el almacen guardo (1 si se replego)
   QString styleString;         // style string dominante, vacio si no hay estilos

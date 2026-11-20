@@ -159,6 +159,13 @@ Esta es la raíz del defecto observado y la parte central del cambio.
 * La tabla de atributos muestra los campos que aporta `LIBKML` (`Name`,
   `description`, `timestamp`…) y los `SimpleField` definidos en el `Schema`, con
   su tipo (`entero`, `real`, `texto`).
+* La fila de la tabla **no** es el FID de OGR: en KML los FID empiezan en 1 y no
+  son contiguos, así que el acceso por fila pasa por un mapa fila→FID. Sin él, la
+  primera fila salía vacía y faltaba el último elemento (visto con el KML de 258
+  países: la fila 0 aparecía en blanco y no había forma de llegar al último).
+* Las filas ya leídas se guardan en una caché acotada (200 filas): una lectura
+  cuesta unos 2,5 ms con 166 campos y la tabla vuelve a pedir las mismas filas
+  visibles en cada repintado.
 * Los textos con HTML (típico en `description`) se muestran tal cual en la
   tabla; no se interpretan ni se recortan en el dato.
 * Identificar (§ ver `SPEC-identificar.md`) devuelve los mismos atributos que la
@@ -270,6 +277,7 @@ Contrato mínimo de la salida JSON:
       "withoutGeometry": 1,
       "unsupportedParts": 0,
       "distinctStyles": 1,
+      "attributeCache": true,
       "extent": [-6.0, 39.0, -1.0, 44.0],
       "crsEpsg": 4326
     }
