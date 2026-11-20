@@ -11,7 +11,12 @@
   "description": "MiniGIS: visor SIG minimo (Qt 6 + GDAL) siguiendo las convenciones de compilacion de QGIS",
   "homepage": "https://github.com/",
   "dependencies": [
-    "gdal",
+    {
+      "name": "gdal",
+      "features": [
+        "parquet"
+      ]
+    },
     "minizip"
   ]
 }
