@@ -10,6 +10,7 @@
 
 #include "minigiserror.h"
 #include "minigislabelstyle.h"
+#include "minigispgsource.h"
 #include "minigisrectangle.h"
 #include "minigisstyle.h"
 
@@ -48,8 +49,12 @@ public:
   /**
    * Abre una capa vectorial. En caso de fallo devuelve nullptr y rellena
    * `error` con la causa y la accion sugerida. Es la primera capa del archivo.
+   *
+   * `pgFailure` solo se rellena cuando la fuente es PostGIS: la CLI lo usa para
+   * elegir entre codigo 2 (catalogo), 8 (conexion/autenticacion) y 3 (resto).
    */
-  static std::shared_ptr<VectorLayer> open(const QString &path, Error *error = nullptr);
+  static std::shared_ptr<VectorLayer> open(const QString &path, Error *error = nullptr,
+                                           PgFailure *pgFailure = nullptr);
 
   /**
    * Abre la capa `layerIndex` de un archivo que puede contener varias (un
@@ -59,7 +64,9 @@ public:
    * un hilo de trabajo y entrega las capas a la interfaz, y dos capas del mismo
    * archivo no deben compartir un dataset que esos dos hilos usarian a la vez.
    */
-  static std::shared_ptr<VectorLayer> open(const QString &path, int layerIndex, Error *error = nullptr);
+  static std::shared_ptr<VectorLayer> open(const QString &path, int layerIndex,
+                                           Error *error = nullptr,
+                                           PgFailure *pgFailure = nullptr);
 
   /**
    * Nombres de todas las capas vectoriales que contiene un archivo, en orden.
@@ -68,7 +75,17 @@ public:
    * tiene. Si el archivo no se puede abrir como vectorial devuelve una lista
    * vacia y rellena `error`.
    */
-  static QStringList layerNames(const QString &path, Error *error = nullptr);
+  static QStringList layerNames(const QString &path, Error *error = nullptr,
+                                PgFailure *pgFailure = nullptr);
+
+  /** True si la capa se abrio desde una fuente pg: (PostGIS). */
+  bool isPostgis() const { return !mPgSource.connection.isEmpty(); }
+
+  /** Fuente PostGIS de la capa; vacia si es un archivo. */
+  const PgSource &postgisSource() const { return mPgSource; }
+
+  /** Datos de la conexion (sin contrasena); vacios si es un archivo. */
+  const PgConnection &postgisConnection() const { return mPgConnection; }
 
   QString sourcePath() const { return mSourcePath; }
   QString name() const { return mDisplayName.isEmpty() ? mName : mDisplayName; }
@@ -251,6 +268,9 @@ private:
   OGRLayerH mLayerHandle = nullptr;
   QString mSourcePath;
   QString mContainerName;
+  /** Fuente y conexion cuando la capa viene de PostGIS; vacias si es archivo. */
+  PgSource mPgSource;
+  PgConnection mPgConnection;
   int mLayerIndex = 0;
   int mLayerCount = 1;
   QString mName;

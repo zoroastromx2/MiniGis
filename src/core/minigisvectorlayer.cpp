@@ -1,7 +1,9 @@
 #include "minigisvectorlayer.h"
 
+#include "minigisconnections.h"
 #include "minigisgdalinit.h"
 #include "minigisgeometrykinds.h"
+#include "minigispgcatalog.h"
 
 #include <QDir>
 #include <QFileInfo>
@@ -58,22 +60,56 @@ GeometryKind kindForGeometryType(OGRwkbGeometryType geometryType)
 }
 
 /**
- * Abre el dataset vectorial de un archivo. Es el unico sitio que decide como se
- * informa de un archivo que no existe o que GDAL no reconoce, para que abrir una
- * capa y enumerar las capas de un archivo den el mismo mensaje.
+ * Texto con el que se nombra una fuente en los mensajes: la ruta nativa para un
+ * archivo y la URI tal cual para PostGIS (toNativeSeparators convertiria sus
+ * barras en '\').
  */
-GDALDatasetH openVectorDataset(const QString &path, Error *error)
+QString sourceLabel(const QString &path)
 {
-  const auto fail = [error](const QString &message, const QString &hint) -> GDALDatasetH {
+  return PgSource::looksLike(path) ? path : QDir::toNativeSeparators(path);
+}
+
+/**
+ * Abre el dataset vectorial de un archivo o de una fuente pg:. Es el unico
+ * sitio que decide como se informa de una fuente que no existe o que GDAL no
+ * reconoce, para que abrir una capa y enumerar las capas den el mismo mensaje.
+ */
+GDALDatasetH openVectorDataset(const QString &path, Error *error, PgFailure *failure = nullptr,
+                               PgSource *pgSource = nullptr)
+{
+  const auto fail = [error, failure](const QString &message, const QString &hint) -> GDALDatasetH {
     if (error)
       *error = Error {message, hint};
+    if (failure)
+      *failure = PgFailure::Other;
     return nullptr;
   };
+
+  if (failure)
+    *failure = PgFailure::None;
 
   if (path.trimmed().isEmpty())
   {
     return fail(QStringLiteral("No se ha indicado ninguna capa."),
                 QStringLiteral("Arrastra un archivo .shp sobre el lienzo o usa Archivo > Abrir capa (Ctrl+O)."));
+  }
+
+  if (PgSource::looksLike(path))
+  {
+    PgSource source;
+    Error parseError;
+    if (!PgSource::parse(path, &source, &parseError))
+    {
+      if (error)
+        *error = parseError;
+      if (failure)
+        *failure = PgFailure::Other;
+      return nullptr;
+    }
+
+    if (pgSource)
+      *pgSource = source;
+    return openPgDataset(source, error, failure);
   }
 
   if (!QFileInfo::exists(path))
@@ -114,12 +150,13 @@ VectorLayer::~VectorLayer()
   }
 }
 
-std::shared_ptr<VectorLayer> VectorLayer::open(const QString &path, Error *error)
+std::shared_ptr<VectorLayer> VectorLayer::open(const QString &path, Error *error,
+                                               PgFailure *pgFailure)
 {
-  return open(path, 0, error);
+  return open(path, 0, error, pgFailure);
 }
 
-QStringList VectorLayer::layerNames(const QString &path, Error *error)
+QStringList VectorLayer::layerNames(const QString &path, Error *error, PgFailure *pgFailure)
 {
   const auto fail = [error](const QString &message, const QString &hint) -> QStringList {
     if (error)
@@ -128,12 +165,15 @@ QStringList VectorLayer::layerNames(const QString &path, Error *error)
   };
 
   Error openError;
-  GDALDatasetH datasetHandle = openVectorDataset(path, &openError);
+  PgFailure failure = PgFailure::None;
+  GDALDatasetH datasetHandle = openVectorDataset(path, &openError, &failure);
 
   if (!datasetHandle)
   {
     if (error)
       *error = openError;
+    if (pgFailure)
+      *pgFailure = failure;
     return {};
   }
 
@@ -155,14 +195,15 @@ QStringList VectorLayer::layerNames(const QString &path, Error *error)
 
   if (names.isEmpty())
   {
-    return fail(QStringLiteral("«%1» no contiene ninguna capa vectorial legible.").arg(QDir::toNativeSeparators(path)),
-                QStringLiteral("Comprueba el contenido con: ogrinfo -so \"%1\"").arg(QDir::toNativeSeparators(path)));
+    return fail(QStringLiteral("«%1» no contiene ninguna capa vectorial legible.").arg(sourceLabel(path)),
+                QStringLiteral("Comprueba el contenido con: ogrinfo -so \"%1\"").arg(sourceLabel(path)));
   }
 
   return names;
 }
 
-std::shared_ptr<VectorLayer> VectorLayer::open(const QString &path, int layerIndex, Error *error)
+std::shared_ptr<VectorLayer> VectorLayer::open(const QString &path, int layerIndex, Error *error,
+                                               PgFailure *pgFailure)
 {
   const auto fail = [error](const QString &message, const QString &hint) -> std::shared_ptr<VectorLayer> {
     if (error)
@@ -171,11 +212,15 @@ std::shared_ptr<VectorLayer> VectorLayer::open(const QString &path, int layerInd
   };
 
   Error openError;
-  GDALDatasetH datasetHandle = openVectorDataset(path, &openError);
+  PgFailure failure = PgFailure::None;
+  PgSource pgSource;
+  GDALDatasetH datasetHandle = openVectorDataset(path, &openError, &failure, &pgSource);
   if (!datasetHandle)
   {
     if (error)
       *error = openError;
+    if (pgFailure)
+      *pgFailure = failure;
     return {};
   }
 
@@ -183,15 +228,15 @@ std::shared_ptr<VectorLayer> VectorLayer::open(const QString &path, int layerInd
   if (layerCount <= 0)
   {
     GDALClose(datasetHandle);
-    return fail(QStringLiteral("«%1» no contiene ninguna capa vectorial legible.").arg(QDir::toNativeSeparators(path)),
-                QStringLiteral("Comprueba el contenido con: ogrinfo -so \"%1\"").arg(QDir::toNativeSeparators(path)));
+    return fail(QStringLiteral("«%1» no contiene ninguna capa vectorial legible.").arg(sourceLabel(path)),
+                QStringLiteral("Comprueba el contenido con: ogrinfo -so \"%1\"").arg(sourceLabel(path)));
   }
 
   if (layerIndex < 0 || layerIndex >= layerCount)
   {
     GDALClose(datasetHandle);
     return fail(QStringLiteral("«%1» no tiene una capa en la posicion %2.")
-                  .arg(QDir::toNativeSeparators(path))
+                  .arg(sourceLabel(path))
                   .arg(layerIndex + 1),
                 QStringLiteral("El archivo contiene %1 capa(s); usa un indice entre 1 y %1.")
                   .arg(layerCount));
@@ -201,15 +246,30 @@ std::shared_ptr<VectorLayer> VectorLayer::open(const QString &path, int layerInd
   if (!layerHandle)
   {
     GDALClose(datasetHandle);
-    return fail(QStringLiteral("«%1» no contiene ninguna capa vectorial legible.").arg(QDir::toNativeSeparators(path)),
-                QStringLiteral("Comprueba el contenido con: ogrinfo -so \"%1\"").arg(QDir::toNativeSeparators(path)));
+    return fail(QStringLiteral("«%1» no contiene ninguna capa vectorial legible.").arg(sourceLabel(path)),
+                QStringLiteral("Comprueba el contenido con: ogrinfo -so \"%1\"").arg(sourceLabel(path)));
   }
 
   std::shared_ptr<VectorLayer> layer(new VectorLayer);
   layer->mDatasetHandle = datasetHandle;
   layer->mLayerHandle = layerHandle;
   layer->mSourcePath = path;
-  layer->mContainerName = QFileInfo(path).fileName();
+
+  if (pgSource.isValid())
+  {
+    layer->mPgSource = pgSource;
+    layer->mContainerName = pgSource.connection + QLatin1Char('/') + pgSource.schema;
+    if (const PgConnectionCatalog *catalog = PgConnectionCatalog::shared(nullptr))
+    {
+      if (const PgConnection *connection = catalog->find(pgSource.connection))
+        layer->mPgConnection = *connection;
+    }
+  }
+  else
+  {
+    layer->mContainerName = QFileInfo(path).fileName();
+  }
+
   layer->mLayerIndex = layerIndex;
   layer->mLayerCount = layerCount;
 

@@ -1,6 +1,7 @@
 #include "minigislayerkind.h"
 
 #include "minigisgdalinit.h"
+#include "minigispgsource.h"
 
 #include <QDir>
 #include <QFileInfo>
@@ -21,6 +22,12 @@ LayerKind detectLayerKind(const QString &path, Error *error)
   if (path.trimmed().isEmpty())
     return fail(QStringLiteral("No se ha indicado ningun archivo."),
                 QStringLiteral("Indica una capa vectorial o raster, por ejemplo un .shp o un .tif."));
+
+  // Una fuente PostGIS no se comprueba contra el disco: se clasifica como
+  // vectorial sin abrir la red. El fallo de conexion se informa al cargar, con
+  // su causa y su accion, no al elegir el tipo de capa.
+  if (PgSource::looksLike(path))
+    return LayerKind::Vector;
 
   if (!QFileInfo::exists(path))
   {

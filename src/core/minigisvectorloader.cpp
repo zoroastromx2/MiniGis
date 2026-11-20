@@ -300,7 +300,7 @@ void VectorLayerLoader::runRequests(const QVector<LayerRequest> &requests)
       continue;
     }
 
-    if (mBuildGeometryStore)
+    if (mBuildGeometryStore && request.buildStore)
     {
       const int innerBase = base + std::max(1, (end - base) / 10);
       const int innerSpan = std::max(0, end - innerBase);

@@ -26,6 +26,11 @@ struct LayerRequest
   QString layerName;
   /** Indice ya resuelto (-1 = resolver por nombre o usar la primera). */
   int layerIndex = -1;
+  /**
+   * Si es false, esta capa se abre sin construir el almacen indexado (dibujo
+   * bajo demanda). Lo usan las tablas PostGIS enormes.
+   */
+  bool buildStore = true;
 };
 
 /**
