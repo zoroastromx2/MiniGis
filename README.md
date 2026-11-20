@@ -1,7 +1,7 @@
 # MiniGIS
 
 Visor SIG mínimo en **C++ con Qt 6 y GDAL**: carga capas vectoriales (shapefile, GeoJSON,
-GeoPackage, KML/KMZ…) y **ráster** (GeoTIFF y cualquier formato que abra GDAL), las dibuja, permite
+GeoPackage, KML/KMZ, GeoParquet…) y **ráster** (GeoTIFF y cualquier formato que abra GDAL), las dibuja, permite
 hacer zoom y paneo, consultar la tabla de atributos, cambiar la simbología básica y ajustar el
 contraste de los rásters.
 
@@ -92,7 +92,7 @@ MiniGIS/
 │   │   └── minigismainwindow.*
 │   └── app/main.cpp            # GUI + modos de línea de comandos
 ├── tests/                      # pruebas de humo con CTest
-├── data/sample/                # GeoJSON origen, shapefiles, GeoPackage multicapa y GeoTIFF de ejemplo
+├── data/sample/                # GeoJSON origen, shapefiles, GeoPackage, KML, GeoParquet y GeoTIFF de ejemplo
 └── scripts/                    # env / configure / build / run / deploy / datos
 ```
 
@@ -112,6 +112,18 @@ ctest --preset windows-msvc-release          :: pruebas de humo
 
 `scripts\env.bat` prepara el entorno (llama a `vcvars64.bat`, añade Qt y las DLLs de vcpkg al
 `PATH`). Si tus rutas cambian, edita ese archivo: es el único sitio con rutas absolutas.
+
+> **GeoParquet:** el driver `Parquet` no viene en la build base de GDAL de vcpkg. Instálalo una
+> sola vez en el árbol compartido y vuelve a configurar:
+>
+> ```bat
+> D:\VCPKG\vcpkg.exe install "gdal[parquet]" --triplet x64-windows --recurse
+> ```
+>
+> Es una compilación larga (Arrow, Boost, Thrift). La feature también está declarada en
+> `vcpkg/vcpkg.json` para el modo manifiesto opcional
+> (`-DMINIGIS_USE_VCPKG_MANIFEST=ON`), pero el preset verificado usa el árbol ya instalado
+> (modo clásico): `scripts\configure.bat` por sí solo **no** instala nada.
 
 Presets disponibles:
 
@@ -204,7 +216,7 @@ minigis [opciones] [archivos...]
 | `--snapshot-pg-dialog <archivo.png>` | Captura el diálogo de conexión PostGIS y sale |
 | `--pg-no-index` | Con capas PostGIS: dibuja bajo demanda sin construir el almacén (tablas enormes) |
 | `-i, --info` | Resumen de todas las capas de cada archivo (vectoriales y ráster: bandas, tamaño, SRC, NoData, paleta) |
-| `--json` | Salida JSON (junto a `--info`), pensada para scripts |
+| `--json` | Salida JSON (junto a `--info`, `--check-*` o `--project-info`), pensada para scripts |
 | `--list-drivers` | Drivers vectoriales disponibles en GDAL |
 | `--snapshot <archivo.png>` | Renderiza el mapa a PNG sin abrir ventana |
 | `--snapshot-window <archivo.png>` | Captura la interfaz completa a PNG |
@@ -222,6 +234,7 @@ minigis [opciones] [archivos...]
 | `--identify-layer <nombre>` | Limita Identificar a la capa con ese nombre (el resto no se consulta) |
 | `--check-identify` | Comprueba Identificar: geometría exacta, huecos, radio, capas sin índice, orden, alcance del árbol, panel, marcador, selección/resalte, tabla y caché |
 | `--check-kml` | Comprueba que un KML/KMZ se lee completo (elementos por tipo, sin geometría, partes no soportadas), que el almacén conserva todos los elementos que traen geometría y qué simbología se aplica (`styleMode`) |
+| `--check-geoparquet` | Comprueba que un GeoParquet se lee completo: capas, elementos por tipo, filas sin geometría, SRC, atributos, FID y que el almacén conserva todos los elementos con geometría; con `--json`, contrato para scripts |
 | `--snapshot-raster-dialog <archivo.png>` | Captura el diálogo de estilo ráster y sale |
 | `-V, --verbose` | Trazas en `stderr` (los datos siguen limpios en `stdout`) |
 | `-h, --help` / `-v, --version` | Ayuda con ejemplos / versiones de Qt, GDAL y PROJ y rutas de datos |
@@ -471,6 +484,11 @@ bin\minigis.exe --check-labels -l data\sample\shapefiles\parcels.shp
 bin\minigis.exe --check-kml --json -l data\sample\kml\mixto.kml
 bin\minigis.exe --check-kml -l "C:\datos\fronteras.kml"
 
+:: GeoParquet: abrir, dibujar y comprobar que se lee entero
+bin\minigis.exe --info --json -l data\sample\geoparquet\parcels.parquet
+bin\minigis.exe --check-geoparquet --json -l data\sample\geoparquet\parcels.parquet
+bin\minigis.exe --snapshot manzanas.png -l "D:\F\IRIS 4.0\2026\GeoParquet\09Man.parquet" --size 1600x900
+
 :: etiquetas desde la linea de ordenes (util para capturas y para el banco de pruebas)
 bin\minigis.exe --snapshot mapa.png -l capa.shp --label-field "nombre,uso" --label-size 11
 bin\minigis.exe --snapshot mapa.png -l capa.shp --label-field nombre --label-map-size 25
@@ -536,7 +554,11 @@ ctest --preset windows-msvc-release -R minigis.rendimiento
 | Aviso `No se encontro proj.db` | Define `PROJ_DATA=D:\VCPKG\installed\x64-windows\share\proj` (o copia esa carpeta junto al `.exe`) |
 | `La configuracion Debug necesita la variante Debug de GDAL` | Usa `windows-msvc-release` (o `windows-msvc-reldbg`), o instala la variante debug: `D:\VCPKG\vcpkg.exe install gdal --triplet x64-windows` |
 | Aviso de que no se pudo detectar el prefijo de `/showIncludes` | Es MSVC en español sin paquete de idioma inglés. Compila igual, pero CMake **no registra las dependencias de cabeceras**, así que tras cambiar un `.h` pueden quedar objetos viejos y fallos difíciles de explicar (un cambio de estilo que no se ve, un test que falla solo en incremental). Instala el idioma inglés en Visual Studio o, mientras tanto, recompila limpio (`cmake --build --preset <preset> --clean-first` o borra `build\<preset>`) |
-| CMake no encuentra GDAL | `D:\VCPKG\vcpkg.exe install gdal --triplet x64-windows` y reconfigura |
+| CMake no encuentra GDAL | `D:\VCPKG\vcpkg.exe install "gdal[parquet]" --triplet x64-windows` y reconfigura (incluye GeoParquet) |
+| Un `.parquet` dice `Este GDAL no incluye el driver Parquet` | Falta la feature en el GDAL de vcpkg: `D:\VCPKG\vcpkg.exe install "gdal[parquet]" --triplet x64-windows --recurse`, configura y compila. Comprueba con `minigis --list-drivers` que aparece `Parquet` |
+| Un GeoParquet escrito por GeoPandas se abre con «SRC desconocido» | GDAL 3.12.4 no lee el `crs` PROJJSON de esos archivos aunque sea válido; los escritos por GDAL/QGIS (como `09Man`/`09Mun`) sí. MiniGIS avisa y **no** asume EPSG:4326. Si las coordenadas no caen en su sitio, convierte el archivo con `ogr2ogr` o vuelve a exportarlo desde QGIS |
+| Un `.parquet` se rechaza con «no contiene ninguna columna de geometria» | Es una tabla Parquet, no un GeoParquet. Exporta la capa con geometría desde QGIS, DuckDB u `ogr2ogr` |
+| Una carpeta con `.parquet` no se abre | Las colecciones particionadas necesitan `arrow[dataset]` y no están soportadas: abre uno de los archivos |
 | El shapefile se abre sin SRC | Al `.shp` le falta el `.prj`; usa `ogr2ogr ... -a_srs EPSG:xxxx` (ver `scripts\make_sample_data.bat`) |
 
 ---

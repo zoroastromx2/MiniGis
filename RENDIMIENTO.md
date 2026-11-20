@@ -1295,3 +1295,31 @@ ctest --preset windows-msvc-release -R minigis.rendimiento-raster
 Pruebas nuevas en CTest: `minigis.raster-info`, `minigis.raster-dibujo`,
 `minigis.raster-dialogo`, `minigis.raster-ventana` y la puerta opcional
 `minigis.rendimiento-raster`. Total: 13 pruebas (14 con la puerta activada).
+
+---
+
+## 14. GeoParquet (2026-11-20)
+
+Primera medición del formato con los archivos reales `09Mun.parquet` (16
+municipios) y `09Man.parquet` (67 375 manzanas, 22,3 MB, 1 403 803 vértices,
+LCC mexicano sin código EPSG). El motor es el mismo almacén de siempre; el
+driver `Parquet` de GDAL entrega las geometrías y el almacén las reproyecta a
+4326 al construirse.
+
+| Operación (Release, 1600×900) | `09Mun` | `09Man` |
+|---|---|---|
+| `--info --json` (apertura, recuento y extensión) | 113 ms | **109 ms** |
+| `--check-geoparquet --json` (lectura + almacén + comparación) | 215 ms | **1,13 s** |
+| `--snapshot` (render total) | 323 ms | **1,16 s** |
+| Render del cuadro | 12 ms | **113 ms** |
+| `--snapshot-window --with-attributes` (carga en segundo plano, interfaz y tabla) | — | **2,20 s** |
+
+El almacén conservó **67 375 de 67 375** elementos con geometría; la compuerta
+de rendimiento vectorial (`minigis.rendimiento`) sigue en verde. No se añadió
+una prueba de rendimiento específica porque los archivos del usuario no se
+versionan: se miden a mano con los comandos de la sección 8 y `--check-geoparquet`.
+
+Pruebas nuevas: `minigis.geoparquet-info`, `-utm`, `-snapshot`, `-check`,
+`-mixto`, `-sin-geometria`, `-sin-crs`, `-vacio`, `-fid`, `-tabla`,
+`-carpeta` y `-sin-driver` (12). Total del proyecto: 51 pruebas (48 en verde,
+3 de PostGIS omitidas sin servidor).
