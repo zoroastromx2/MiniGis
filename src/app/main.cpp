@@ -67,6 +67,7 @@ constexpr unsigned int kUtf8CodePage = 65001;
 #include "minigisidentify.h"
 #include "minigisidentifypanel.h"
 #include "minigiskmlinspect.h"
+#include "minigisgeoparquetinspect.h"
 #include "minigislabeldialog.h"
 #include "minigislayerpanel.h"
 #include "minigismainwindow.h"
@@ -212,6 +213,7 @@ QString helpText(const QCommandLineParser &parser)
                           "  minigis --project-info --json p.qgz    resume un proyecto QGIS (sin ventana)\n"
                           "  minigis --connections C.xml -l pg:dataware_FDAC/mgn_2025/tabla  capa PostGIS\n"
                           "  minigis --check-pg -l pg:dataware_FDAC/mgn_2025  inventario del esquema\n"
+                          "  minigis --check-geoparquet -l capa.parquet   comprueba que se lee entero\n"
                           "\nRendimiento (sin ventana):\n"
                           "  minigis --bench 40 -l capa.gpkg                 mide 40 cuadros de paneo/zoom\n"
                           "  minigis --bench 40 --bench-scenario zoom -l c.gpkg\n"
@@ -4091,6 +4093,7 @@ int main(int argc, char *argv[])
              || argument == QStringLiteral("--save-project")
              || argument == QStringLiteral("--check-project")
              || argument == QStringLiteral("--check-kml")
+             || argument == QStringLiteral("--check-geoparquet")
              || argument == QStringLiteral("--check-pg")
              || argument == QStringLiteral("--identify-at")
              || argument == QStringLiteral("--help") || argument == QStringLiteral("-h")
@@ -4123,7 +4126,7 @@ int main(int argc, char *argv[])
   const QCommandLineOption infoOption({QStringLiteral("i"), QStringLiteral("info")},
                                       QStringLiteral("Muestra la informacion de las capas y sale"));
   const QCommandLineOption jsonOption(QStringLiteral("json"),
-                                      QStringLiteral("Salida en JSON (se usa junto a --info o --project-info)"));
+                                      QStringLiteral("Salida en JSON (junto a --info, --check-* o --project-info)"));
   const QCommandLineOption driversOption(QStringLiteral("list-drivers"),
                                          QStringLiteral("Lista los drivers vectoriales de GDAL y sale"));
   const QCommandLineOption snapshotOption(QStringLiteral("snapshot"),
@@ -4207,6 +4210,10 @@ int main(int argc, char *argv[])
   const QCommandLineOption checkKmlOption(
     QStringLiteral("check-kml"),
     QStringLiteral("Comprueba que un KML/KMZ se lee completo: capas, elementos, tipos y estilos"));
+  const QCommandLineOption checkGeoParquetOption(
+    QStringLiteral("check-geoparquet"),
+    QStringLiteral("Comprueba que un GeoParquet se lee completo: capas, elementos, geometria, "
+                   "atributos y almacen"));
   const QCommandLineOption checkPgOption(
     QStringLiteral("check-pg"),
     QStringLiteral("Comprueba un esquema PostGIS: tablas, geometria, elementos y apertura"));
@@ -4268,7 +4275,8 @@ int main(int argc, char *argv[])
                      labelMapSizeOption, noLabelsOption, rasterStretchOption, rasterBandsOption,
                      rasterOpacityOption, identifyAtOption, identifyRadiusOption, identifyLayerOption,
                      checkIdentifyOption, projectInfoOption, saveProjectOption, checkProjectOption,
-                     checkKmlOption, checkPgOption, connectionsOption, snapshotPgDialogOption});
+                     checkKmlOption, checkGeoParquetOption, checkPgOption, connectionsOption,
+                     snapshotPgDialogOption});
   parser.addPositionalArgument(QStringLiteral("archivo"),
                               QStringLiteral("Capas a cargar (opcional, se puede repetir)"),
                               QStringLiteral("[archivo...]"));
@@ -4810,6 +4818,52 @@ int main(int argc, char *argv[])
   }
 
   // ---------------------------------------------------------------------
+  // Diagnostico de GeoParquet (sin ventana)
+  // ---------------------------------------------------------------------
+  // Mismo contrato que --check-kml: cuenta lo que entrega OGR, construye el
+  // almacen de geometrias y compara. Un elemento perdido por el camino rompe la
+  // comprobacion en vez de pasar inadvertido en el mapa.
+  if (parser.isSet(checkGeoParquetOption))
+  {
+    if (layerPaths.size() != 1)
+    {
+      writeErr(QStringLiteral("Se necesita exactamente un archivo GeoParquet, por ejemplo:"));
+      writeErr(QStringLiteral("  minigis --check-geoparquet -l data/sample/geoparquet/parcels.parquet --json"));
+      return ExitUsage;
+    }
+
+    const QString path = layerPaths.first();
+    if (!QFileInfo::exists(path))
+    {
+      writeErr(QStringLiteral("No existe el archivo: %1").arg(QDir::toNativeSeparators(path)));
+      return ExitFileNotFound;
+    }
+
+    Error geoParquetError;
+    VectorOpenIssue issue = VectorOpenIssue::None;
+    GeoParquetReport report;
+    if (!inspectGeoParquet(path, &report, &geoParquetError, &issue))
+    {
+      writeErr(geoParquetError.toText());
+      return issue == VectorOpenIssue::NoGeometry ? ExitNoLayers : ExitOpenFailed;
+    }
+
+    if (report.layers.isEmpty())
+    {
+      writeErr(QStringLiteral("«%1» no contiene capas vectoriales.")
+                 .arg(QDir::toNativeSeparators(path)));
+      return ExitNoLayers;
+    }
+
+    if (parser.isSet(jsonOption))
+      writeOut(QString::fromUtf8(QJsonDocument(report.toJson()).toJson(QJsonDocument::Indented)));
+    else
+      writeOut(report.toText());
+
+    return report.ok() ? ExitOk : ExitRenderFailed;
+  }
+
+  // ---------------------------------------------------------------------
   // Diagnostico de un esquema PostGIS (sin ventana)
   // ---------------------------------------------------------------------
   if (parser.isSet(checkPgOption))
@@ -4906,11 +4960,14 @@ int main(int argc, char *argv[])
         {
           Error error;
           PgFailure layerFailure = PgFailure::None;
+          VectorOpenIssue layerIssue = VectorOpenIssue::None;
           const std::shared_ptr<VectorLayer> layer =
-            VectorLayer::open(path, index, &error, &layerFailure);
+            VectorLayer::open(path, index, &error, &layerFailure, &layerIssue);
           if (!layer)
           {
             writeErr(error.toText());
+            if (layerIssue == VectorOpenIssue::NoGeometry)
+              return ExitNoLayers;
             return layerFailure == PgFailure::None ? ExitOpenFailed
                                                    : exitCodeForPgFailure(layerFailure);
           }
@@ -5167,11 +5224,14 @@ int main(int argc, char *argv[])
         {
           Error error;
           PgFailure layerFailure = PgFailure::None;
+          VectorOpenIssue layerIssue = VectorOpenIssue::None;
           const std::shared_ptr<VectorLayer> layer =
-            VectorLayer::open(path, index, &error, &layerFailure);
+            VectorLayer::open(path, index, &error, &layerFailure, &layerIssue);
           if (!layer)
           {
             writeErr(error.toText());
+            if (layerIssue == VectorOpenIssue::NoGeometry)
+              return ExitNoLayers;
             return layerFailure == PgFailure::None ? ExitOpenFailed
                                                    : exitCodeForPgFailure(layerFailure);
           }
