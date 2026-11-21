@@ -6,6 +6,8 @@ set(MINIGIS_CORE_SRCS
   minigiserror.h
   minigisgdalinit.h
   minigisgdalinit.cpp
+  minigisruntimedlls.h
+  minigisruntimedlls.cpp
   minigislayerkind.h
   minigislayerkind.cpp
   minigisrectangle.h
@@ -63,10 +65,18 @@ set(MINIGIS_CORE_SRCS
   minigisfastrenderer.cpp
 )
 
+# Mapa DLL -> version del puerto de vcpkg que la aporta. Lo necesita
+# minigisruntimedlls.cpp porque Arrow, Parquet, PROJ y GEOS se compilan sin
+# recurso de version en el PE. Se genera al configurar (ver MiniGisDllVersions).
+include(MiniGisDllVersions)
+minigis_generate_vcpkg_dll_versions(MINIGIS_VCPKG_VERSIONS_HEADER)
+list(APPEND MINIGIS_CORE_SRCS "${MINIGIS_VCPKG_VERSIONS_HEADER}")
+
 add_library(minigis_core STATIC ${MINIGIS_CORE_SRCS})
 add_library(MiniGIS::core ALIAS minigis_core)
 
 target_include_directories(minigis_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+target_include_directories(minigis_core PRIVATE "${CMAKE_BINARY_DIR}/generated")
 
 # minizip lo instala vcpkg como dependencia de GDAL; se usa para leer y escribir
 # el ZIP de los proyectos .qgz (la API C clasica zip.h/unzip.h).
@@ -78,6 +88,8 @@ if(WIN32)
   # DPAPI (CryptProtectData) para recordar la contrasena de PostGIS sin
   # guardarla en claro en el perfil del usuario.
   target_link_libraries(minigis_core PRIVATE crypt32)
+  # GetFileVersionInfo/VerQueryValue: version de las DLLs para "Acerca de".
+  target_link_libraries(minigis_core PRIVATE version)
 endif()
 
 target_link_libraries(minigis_core

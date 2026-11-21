@@ -1,6 +1,7 @@
 #include "minigismainwindow.h"
 
 #include "minigisattributetablemodel.h"
+#include "minigisaboutdialog.h"
 #include "minigiserror.h"
 #include "minigisgdalinit.h"
 #include "minigisgeometrystore.h"
@@ -2251,18 +2252,10 @@ void MainWindow::showError(const QString &title, const Error &error)
 
 void MainWindow::showAboutDialog()
 {
-  const RuntimeInfo info = initializeGdal();
-
-  const QString text =
-    QStringLiteral("<h3>MiniGIS %1</h3>"
-                   "<p>Visor SIG mínimo para cargar shapefiles, dibujarlos y consultar sus atributos.</p>"
-                   "<p>Construido en C++ con Qt 6 y GDAL, siguiendo las convenciones de compilacion de QGIS "
-                   "(CMake + vcpkg + capas core/gui/app).</p>"
-                   "<p><b>Qt</b>: %2<br><b>GDAL</b>: %3<br><b>PROJ</b>: %4</p>"
-                   "<p>Los formatos vectoriales los aporta GDAL/OGR; no se reutiliza código de QGIS.</p>")
-      .arg(QString::fromUtf8(MINIGIS_VERSION), QString::fromUtf8(qVersion()), info.gdalVersion, info.projVersion);
-
-  QMessageBox::about(this, QStringLiteral("Acerca de MiniGIS"), text);
+  // El dialogo ensena las versiones del motor y la tabla de DLLs cargadas desde
+  // la carpeta del ejecutable (ver minigisaboutdialog.h).
+  AboutDialog dialog(this);
+  dialog.exec();
 }
 
 void MainWindow::showSystemInfo()

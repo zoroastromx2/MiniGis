@@ -9,6 +9,7 @@
  *   minigis --check-layers -l x.gpkg          todas las capas del archivo y su grupo en el panel
  *   minigis --bench 40 --layer x.gpkg         mide cuadros de paneo/zoom (rendimiento)
  *   minigis --list-drivers                    drivers vectoriales de GDAL
+ *   minigis --dlls                            DLLs cargadas y sus versiones
  *   minigis --project-info x.qgz              resume un proyecto de QGIS, sin ventana
  *   minigis --connections C.xml --info -l pg:dataware_FDAC/mgn_2025/tabla
  *                                             informa de una tabla PostGIS, sin ventana
@@ -62,6 +63,7 @@ constexpr unsigned int kUtf8CodePage = 65001;
 #endif
 
 #include "minigisgdalinit.h"
+#include "minigisaboutdialog.h"
 #include "minigisconnections.h"
 #include "minigisgeometrystore.h"
 #include "minigisidentify.h"
@@ -81,6 +83,7 @@ constexpr unsigned int kUtf8CodePage = 65001;
 #include "minigisrasterstyledialog.h"
 #include "minigisrasterstyle.h"
 #include "minigisrectangle.h"
+#include "minigisruntimedlls.h"
 #include "minigisshapefileindex.h"
 #include "minigisstyle.h"
 #include "minigisvectorlayer.h"
@@ -214,6 +217,7 @@ QString helpText(const QCommandLineParser &parser)
                           "  minigis --connections C.xml -l pg:dataware_FDAC/mgn_2025/tabla  capa PostGIS\n"
                           "  minigis --check-pg -l pg:dataware_FDAC/mgn_2025  inventario del esquema\n"
                           "  minigis --check-geoparquet -l capa.parquet   comprueba que se lee entero\n"
+                          "  minigis --dlls                            DLLs cargadas y sus versiones\n"
                           "\nRendimiento (sin ventana):\n"
                           "  minigis --bench 40 -l capa.gpkg                 mide 40 cuadros de paneo/zoom\n"
                           "  minigis --bench 40 --bench-scenario zoom -l c.gpkg\n"
@@ -4075,13 +4079,14 @@ int main(int argc, char *argv[])
   for (int i = 1; i < argc; ++i)
   {
     const QString argument = QString::fromLocal8Bit(argv[i]);
-    if (argument == QStringLiteral("--snapshot-window"))
+    if (argument == QStringLiteral("--snapshot-window") || argument == QStringLiteral("--snapshot-about"))
     {
       headlessRequested = true;
       windowCapture = true;
     }
     else if (argument == QStringLiteral("--info") || argument == QStringLiteral("-i")
              || argument == QStringLiteral("--list-drivers")
+             || argument == QStringLiteral("--dlls")
              || argument == QStringLiteral("--snapshot")
              || argument == QStringLiteral("--bench")
              || argument == QStringLiteral("--index-shp")
@@ -4129,6 +4134,13 @@ int main(int argc, char *argv[])
                                       QStringLiteral("Salida en JSON (junto a --info, --check-* o --project-info)"));
   const QCommandLineOption driversOption(QStringLiteral("list-drivers"),
                                          QStringLiteral("Lista los drivers vectoriales de GDAL y sale"));
+  const QCommandLineOption dllsOption(
+    QStringLiteral("dlls"),
+    QStringLiteral("Lista las DLLs cargadas desde la carpeta del ejecutable y su version"));
+  const QCommandLineOption snapshotAboutOption(
+    QStringLiteral("snapshot-about"),
+    QStringLiteral("Captura el dialogo «Acerca de» a <archivo.png> y sale"),
+    QStringLiteral("archivo.png"));
   const QCommandLineOption snapshotOption(QStringLiteral("snapshot"),
                                           QStringLiteral("Renderiza el mapa a <archivo.png> sin abrir ventana"),
                                           QStringLiteral("archivo.png"));
@@ -4265,7 +4277,8 @@ int main(int argc, char *argv[])
                                                QStringLiteral("Opacidad de los rasters (0-100)"),
                                                QStringLiteral("0-100"), QStringLiteral("100"));
 
-  parser.addOptions({infoOption, jsonOption, driversOption, snapshotOption, snapshotWindowOption,
+  parser.addOptions({infoOption, jsonOption, driversOption, dllsOption, snapshotOption, snapshotWindowOption,
+                     snapshotAboutOption,
                      layerOption, extentOption, sizeOption, crsOption, maxFeaturesOption, verboseOption,
                      benchOption, benchScenarioOption, benchBudgetOption, rendererOption, vertexBudgetOption,
                      spatialFilterOption, readBudgetOption, indexShpOption, withAttributesOption,
@@ -4353,6 +4366,35 @@ int main(int argc, char *argv[])
     logVerbose(QStringLiteral("drivers vectoriales disponibles: %1").arg(drivers.size()));
     for (const QString &name : drivers)
       writeOut(name);
+    return ExitOk;
+  }
+
+  // DLLs cargadas desde la carpeta del ejecutable: es la misma lista que muestra
+  // el dialogo "Acerca de" y sirve para comprobarla sin abrir la interfaz.
+  if (parser.isSet(dllsOption))
+  {
+    const QList<RuntimeDllInfo> dlls = loadedRuntimeDlls();
+    logVerbose(QStringLiteral("DLLs cargadas desde el ejecutable: %1").arg(dlls.size()));
+    writeOut(runtimeDllsText());
+    return ExitOk;
+  }
+
+  // Captura del dialogo "Acerca de": mismo patron que --snapshot-dialog y
+  // --snapshot-raster-dialog, para revisar el diseno y para las pruebas.
+  if (parser.isSet(snapshotAboutOption))
+  {
+    AboutDialog dialog(nullptr);
+    dialog.show();
+    QCoreApplication::processEvents();
+
+    const QString dialogPath = parser.value(snapshotAboutOption);
+    if (!dialog.grab().save(dialogPath))
+    {
+      writeErr(QStringLiteral("No se pudo escribir la imagen: %1").arg(QDir::toNativeSeparators(dialogPath)));
+      return ExitRenderFailed;
+    }
+
+    writeOut(QStringLiteral("Imagen escrita: %1").arg(QDir::toNativeSeparators(dialogPath)));
     return ExitOk;
   }
 

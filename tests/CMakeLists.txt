@@ -9,6 +9,25 @@ set(MINIGIS_SAMPLE_SHP "${MINIGIS_ROOT_DIR}/data/sample/shapefiles/cities.shp")
 add_test(NAME minigis.help COMMAND minigis --help)
 add_test(NAME minigis.version COMMAND minigis --version)
 
+# "Acerca de": el dialogo ensena las DLLs cargadas desde la carpeta del
+# ejecutable con su version. --dlls publica la misma lista sin abrir ventana y
+# --snapshot-about captura el dialogo (misma fuente de datos).
+add_test(NAME minigis.dlls
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          -DMODE=dlls
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
+add_test(NAME minigis.acerca
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DOUT=${CMAKE_BINARY_DIR}/test-output/about-dialog.png"
+          -DMODE=about
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
+set_tests_properties(minigis.dlls minigis.acerca PROPERTIES
+  ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 add_test(NAME minigis.info
   COMMAND ${CMAKE_COMMAND}
           "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"

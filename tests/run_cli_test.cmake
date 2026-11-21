@@ -56,6 +56,97 @@ elseif(MODE STREQUAL "snapshot")
     message(STATUS "minigis --snapshot OK: ${OUT} (${_size} bytes)")
   endif()
 
+elseif(MODE STREQUAL "dlls")
+  # --dlls es la misma lista que ensena "Acerca de": nombre de cada DLL cargada
+  # desde la carpeta del ejecutable y su version. Comprueba que estan las que
+  # aporta la feature parquet (Arrow/Parquet no llevan version en el PE: la
+  # cifra tiene que venir del mapa de puertos de vcpkg generado al configurar).
+  execute_process(
+    COMMAND "${MINIGIS_EXE}" --dlls
+    RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+  if(NOT _rc EQUAL EXPECT_EXIT)
+    message(FATAL_ERROR "minigis --dlls fallo (codigo ${_rc}, esperado ${EXPECT_EXIT})\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")
+  endif()
+  if(EXPECT_EXIT EQUAL 0)
+    foreach(_key IN ITEMS "gdal.dll +3[.]" "Qt6Core.dll +6[.]"
+                          "arrow.dll +25[.]" "parquet.dll +25[.]")
+      if(NOT _out MATCHES "${_key}")
+        message(FATAL_ERROR "La lista de DLLs no contiene «${_key}»:\n${_out}")
+      endif()
+    endforeach()
+    message(STATUS "minigis --dlls OK")
+  endif()
+
+elseif(MODE STREQUAL "about")
+  # Captura del dialogo "Acerca de" (no debe quedar vacio). El contenido de la
+  # tabla es el mismo de --dlls, que ya comprueba los nombres y las versiones.
+  # La plataforma offscreen no tiene fuentes y el texto sale como cajas, asi que
+  # el umbral de tamano es bajo: solo descarta un dialogo sin tabla.
+  get_filename_component(_outdir "${OUT}" DIRECTORY)
+  file(MAKE_DIRECTORY "${_outdir}")
+  if(EXISTS "${OUT}")
+    file(REMOVE "${OUT}")
+  endif()
+  execute_process(
+    COMMAND "${MINIGIS_EXE}" --snapshot-about "${OUT}"
+    RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+  if(NOT _rc EQUAL EXPECT_EXIT)
+    message(FATAL_ERROR "minigis --snapshot-about fallo (codigo ${_rc})\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")
+  endif()
+  if(EXPECT_EXIT EQUAL 0)
+    if(NOT EXISTS "${OUT}")
+      message(FATAL_ERROR "No se genero la captura del dialogo: ${OUT}")
+    endif()
+    file(SIZE "${OUT}" _size)
+    if(_size LESS 4000)
+      message(FATAL_ERROR "La captura del dialogo parece vacia (${_size} bytes)")
+    endif()
+    message(STATUS "minigis --snapshot-about OK: ${_size} bytes")
+  endif()
+
+elseif(MODE STREQUAL "rendimiento-geoparquet")
+  # Puerta opt-in con una capa GeoParquet grande real (no versionada). Se omite
+  # si no esta MINIGIS_GEOPARQUET_BENCH_DATASET; el presupuesto se puede ajustar
+  # con MINIGIS_GEOPARQUET_BUDGET_MS (200 ms por defecto, mediana del cuadro).
+  if("$ENV{MINIGIS_GEOPARQUET_BENCH_DATASET}" STREQUAL "")
+    message("OMITIDA: define MINIGIS_GEOPARQUET_BENCH_DATASET para medir la capa grande")
+  else()
+    set(_dataset "$ENV{MINIGIS_GEOPARQUET_BENCH_DATASET}")
+    set(_budget "200")
+    if(NOT "$ENV{MINIGIS_GEOPARQUET_BUDGET_MS}" STREQUAL "")
+      set(_budget "$ENV{MINIGIS_GEOPARQUET_BUDGET_MS}")
+    endif()
+
+    execute_process(
+      COMMAND "${MINIGIS_EXE}" --bench 24 --bench-scenario mixed --size 1200x800 --json
+              --layer "${_dataset}"
+      RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+    if(NOT _rc EQUAL 0)
+      message(FATAL_ERROR "minigis --bench de la capa grande fallo (codigo ${_rc})\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")
+    endif()
+
+    if(NOT _out MATCHES "\"mode\": \"memory\"")
+      message(FATAL_ERROR "La capa grande no se dibujo desde el almacen:\n${_out}")
+    endif()
+
+    if(NOT _out MATCHES "\"median_ms\": ([0-9.]+)")
+      message(FATAL_ERROR "La salida de --bench no trae la mediana:\n${_out}")
+    endif()
+    set(_median "${CMAKE_MATCH_1}")
+    if(_median GREATER _budget)
+      message(FATAL_ERROR "Mediana de ${_median} ms por cuadro: supera el presupuesto de ${_budget} ms")
+    endif()
+
+    if(NOT _out MATCHES "\"features\": ([0-9]+)")
+      message(FATAL_ERROR "La salida de --bench no trae los elementos del almacen:\n${_out}")
+    endif()
+    if(CMAKE_MATCH_1 EQUAL 0)
+      message(FATAL_ERROR "El almacen se construyo vacio:\n${_out}")
+    endif()
+
+    message(STATUS "minigis rendimiento-geoparquet OK: mediana ${_median} ms (presupuesto ${_budget} ms)")
+  endif()
+
 elseif(MODE STREQUAL "geopackage")
   # Un GeoPackage contiene varias capas: --info debe describirlas TODAS y decir a
   # que archivo y en que posicion pertenece cada una. Antes solo se informaba de

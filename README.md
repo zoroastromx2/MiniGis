@@ -226,8 +226,10 @@ minigis [opciones] [archivos...]
 | `-i, --info` | Resumen de todas las capas de cada archivo (vectoriales y ráster: bandas, tamaño, SRC, NoData, paleta) |
 | `--json` | Salida JSON (junto a `--info`, `--check-*` o `--project-info`), pensada para scripts |
 | `--list-drivers` | Drivers vectoriales disponibles en GDAL |
+| `--dlls` | Lista las DLLs cargadas desde la carpeta del ejecutable y su versión (la misma tabla que «Acerca de MiniGIS») |
 | `--snapshot <archivo.png>` | Renderiza el mapa a PNG sin abrir ventana |
 | `--snapshot-window <archivo.png>` | Captura la interfaz completa a PNG |
+| `--snapshot-about <archivo.png>` | Captura el diálogo «Acerca de MiniGIS» (versiones y tabla de DLLs) y sale |
 | `--extent <xmin,ymin,xmax,ymax>` | Extensión inicial del mapa |
 | `--size <AnchoxAlto>` | Tamaño de la imagen (por defecto `1200x800`) |
 | `--crs <EPSG:xxxx>` | SRC de destino del dibujo (por defecto `EPSG:4326`) |
@@ -311,6 +313,10 @@ En la interfaz:
   el nombre del archivo y una capa por subítem, cada una con su visibilidad, simbología,
   etiquetas y tabla de atributos, y el mapa se encuadra a la **unión** de todas las capas
   (no solo a la primera)
+* **Ayuda → Acerca de MiniGIS** muestra las versiones del motor (Qt, GDAL, PROJ, Arrow y
+  Parquet) y la tabla de **DLLs cargadas desde la carpeta del ejecutable** con su versión: es
+  la forma de comprobar qué build de GDAL/Arrow/Parquet se está ejecutando (la versión sale
+  del recurso del archivo o, si no lo lleva, del puerto de vcpkg que la instala)
 
 ### 6.1 PostGIS (PostgreSQL)
 
@@ -420,6 +426,12 @@ ctest --preset windows-msvc-release --output-on-failure
 ```
 
 * `minigis.help` y `minigis.version` — contrato de la CLI.
+* `minigis.dlls` — `--dlls` publica el nombre y la versión de cada DLL cargada desde la carpeta
+  del ejecutable y comprueba que están `gdal.dll` (3.12.4), `Qt6Core.dll` (6.10.3), `arrow.dll` y
+  `parquet.dll` (25.0.0); estas dos últimas no llevan recurso de versión en el PE y su cifra sale
+  del mapa de puertos de vcpkg generado al configurar.
+* `minigis.acerca` — `--snapshot-about` captura el diálogo «Acerca de» (resumen de versiones y
+  tabla de DLLs) y verifica que la imagen no está vacía.
 * `minigis.info` — abre el shapefile de ejemplo con GDAL y comprueba que el JSON informa de
   `features` y de `EPSG:4326`.
 * `minigis.snapshot` — renderiza el shapefile a PNG (plataforma `offscreen`) y verifica que la
