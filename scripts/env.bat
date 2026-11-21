@@ -29,8 +29,8 @@ rem MSVC en espanol escribe las notas de /showIncludes como "Nota: ..." y CMake
 rem no las reconoce: con VSLANG en ingles la salida de compilacion queda limpia.
 set "VSLANG=1033"
 
-set "QT_ROOT=C:\Qtwin\6.10.3\msvc2022_64"
-set "VCPKG_ROOT=D:\VCPKG"
+set "QT_ROOT=D:\QtWin\6.10.3\msvc2022_64"
+set "VCPKG_ROOT=E:\vcpkg"
 set "MINIGIS_QT_DIR=%QT_ROOT%\lib\cmake\Qt6"
 set "PATH=%QT_ROOT%\bin;%VCPKG_ROOT%\installed\x64-windows\bin;%PATH%"
 
@@ -41,7 +41,8 @@ if not exist "%QT_ROOT%\bin\Qt6Core.dll" (
 )
 if not exist "%VCPKG_ROOT%\installed\x64-windows\share\gdal\GDALConfig.cmake" (
   echo [error] vcpkg no tiene GDAL instalado en "%VCPKG_ROOT%\installed\x64-windows".
-  echo         Ejecuta:  "%VCPKG_ROOT%\vcpkg.exe" install gdal --triplet x64-windows
+  echo         Ejecuta:  "%VCPKG_ROOT%\vcpkg.exe" install "gdal[parquet]" --triplet x64-windows --recurse
+  echo         La feature parquet es la que trae el driver de GeoParquet.
   exit /b 1
 )
 

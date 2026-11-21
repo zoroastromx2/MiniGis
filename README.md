@@ -38,18 +38,19 @@ externa igual que cualquier otra aplicación SIG.
 
 | Componente | Ruta | Versión |
 |---|---|---|
-| Qt (oficial) | `C:\Qtwin\6.10.3\msvc2022_64` | 6.10.3 |
-| Qt Creator | `C:\Qtwin\Tools\QtCreator\bin\qtcreator.exe` | 20.0.2 |
+| Qt (oficial) | `D:\QtWin\6.10.3\msvc2022_64` | 6.10.3 |
+| Qt Creator | `D:\QtWin\Tools\QtCreator\bin\qtcreator.exe` | 20.0.2 |
 | Compilador | VS2022 Community (`C:\Program Files\...\2022\Community`) o VS2026 (`D:\Program Files\...\18\Community`) | MSVC 19.44 o 19.51 (x64) |
 | CMake | `C:\Develop\4.4.2\bin\cmake.exe` (el del `PATH`) | 4.4.4 |
 | Ninja | `C:\Strawberry\c\bin\ninja.exe` | 1.12.0 |
-| vcpkg | `D:\VCPKG` | GDAL 3.12.4 (`x64-windows`), release |
-| Windows SDK (rc/mt) | `D:\Windows Kits\10\bin\10.0.26100.0\x64` | 10.0.26100 (fijado en los presets) |
+| vcpkg | `E:\vcpkg` | GDAL 3.12.4 (`x64-windows`) con Arrow 25.0.0 y la feature `parquet` |
+| Windows SDK (rc/mt) | `C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64` | 10.0.26100 (fijado en los presets) |
 | Datos de ejemplo | `data\sample\shapefiles`, `data\sample\geopackage` y `data\sample\rasters` | — |
 
-> En este equipo vcpkg solo tiene la variante **Release** de GDAL, así que la compilación
-> verificada es `windows-msvc-release`. Los presets `Debug`/`RelWithDebInfo` siguen
-> disponibles, pero necesitan la variante Debug de GDAL (`D:\VCPKG\installed\x64-windows\debug`).
+> La instalación con la feature `parquet` dejó en `E:\vcpkg\installed\x64-windows` las
+> variantes **Release** (`gdal.dll`) y **Debug** (`debug\bin\gdald.dll`) de GDAL, así que el
+> preset `windows-msvc-debug` ya configura. La compilación verificada sigue siendo
+> `windows-msvc-release`.
 
 > Estas son las rutas de este equipo. Si cambian, edita `scripts\env.bat` (el
 > único sitio con rutas absolutas para los scripts) y las variables de
@@ -113,15 +114,22 @@ ctest --preset windows-msvc-release          :: pruebas de humo
 `scripts\env.bat` prepara el entorno (llama a `vcvars64.bat`, añade Qt y las DLLs de vcpkg al
 `PATH`). Si tus rutas cambian, edita ese archivo: es el único sitio con rutas absolutas.
 
-> **GeoParquet:** el driver `Parquet` no viene en la build base de GDAL de vcpkg. Instálalo una
-> sola vez en el árbol compartido y vuelve a configurar:
+> **GeoParquet:** el driver `Parquet` no viene en la build base de GDAL de vcpkg: hay que
+> compilarlo **dentro de `gdal.dll`** con la feature `parquet`. Instálalo una sola vez en el
+> árbol compartido y vuelve a configurar:
 >
 > ```bat
-> D:\VCPKG\vcpkg.exe install "gdal[parquet]" --triplet x64-windows --recurse
+> E:\vcpkg\vcpkg.exe install "gdal[parquet]" --triplet x64-windows --recurse
 > ```
 >
-> Es una compilación larga (Arrow, Boost, Thrift). La feature también está declarada en
-> `vcpkg/vcpkg.json` para el modo manifiesto opcional
+> Es una compilación larga (Arrow, Boost, Thrift; ~40 min en este equipo). Al recompilar,
+> `MINIGIS_COPY_RUNTIME_DLLS` copia junto al `.exe` todas las DLLs nuevas del árbol de vcpkg
+> (`arrow.dll`, `parquet.dll`, `snappy.dll`, `re2.dll`, `gflags.dll`, `utf8proc.dll`,
+> `mimalloc*.dll`): **no hay que copiarlas a mano**. Copiar solo `parquet.dll`/`arrow.dll` a la
+> carpeta del ejecutable **no sirve** si `gdal.dll` no se compiló con la feature, porque el
+> driver vive dentro de `gdal.dll`.
+>
+> La feature también está declarada en `vcpkg/vcpkg.json` para el modo manifiesto opcional
 > (`-DMINIGIS_USE_VCPKG_MANIFEST=ON`), pero el preset verificado usa el árbol ya instalado
 > (modo clásico): `scripts\configure.bat` por sí solo **no** instala nada.
 
@@ -139,13 +147,13 @@ Presets disponibles:
 :: desde una consola "x64 Native Tools" de VS 2022 (o tras vcvars64.bat)
 cmake -S . -B build\manual -G Ninja ^
   -DCMAKE_BUILD_TYPE=Release ^
-  "-DCMAKE_RC_COMPILER=D:/Windows Kits/10/bin/10.0.26100.0/x64/rc.exe" ^
-  "-DCMAKE_MT=D:/Windows Kits/10/bin/10.0.26100.0/x64/mt.exe" ^
-  -DCMAKE_TOOLCHAIN_FILE=D:/VCPKG/scripts/buildsystems/vcpkg.cmake ^
+  "-DCMAKE_RC_COMPILER=C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64/rc.exe" ^
+  "-DCMAKE_MT=C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64/mt.exe" ^
+  -DCMAKE_TOOLCHAIN_FILE=E:/vcpkg/scripts/buildsystems/vcpkg.cmake ^
   -DVCPKG_TARGET_TRIPLET=x64-windows ^
-  -DVCPKG_INSTALLED_DIR=D:/VCPKG/installed ^
-  -DQt6_DIR=C:/Qtwin/6.10.3/msvc2022_64/lib/cmake/Qt6 ^
-  -DCMAKE_PREFIX_PATH=C:/Qtwin/6.10.3/msvc2022_64
+  -DVCPKG_INSTALLED_DIR=E:/vcpkg/installed ^
+  -DQt6_DIR=D:/QtWin/6.10.3/msvc2022_64/lib/cmake/Qt6 ^
+  -DCMAKE_PREFIX_PATH=D:/QtWin/6.10.3/msvc2022_64
 cmake --build build\manual
 ```
 
@@ -154,7 +162,7 @@ cmake --build build\manual
 > `LNK1327: invalid option: -ologo`. Los presets ya los fijan.
 
 > **Nota (importante) sobre vcpkg.** Por defecto se usa el **árbol ya compilado**
-> (`D:\VCPKG\installed`, `MINIGIS_USE_VCPKG_MANIFEST=OFF`). Activar el modo manifiesto
+> (`E:\vcpkg\installed`, `MINIGIS_USE_VCPKG_MANIFEST=OFF`). Activar el modo manifiesto
 > (`-DMINIGIS_USE_VCPKG_MANIFEST=ON`) haría que vcpkg **recompilase GDAL y su cadena** en un
 > árbol propio del proyecto; además, si se apuntase al árbol compartido, vcpkg **eliminaría**
 > paquetes ajenos al manifiesto (por ejemplo `qtbase` o `qgis-o2`). Por eso el modo manifiesto
@@ -164,7 +172,7 @@ cmake --build build\manual
 
 ## 5. Depurar en Qt Creator
 
-1. **Abre el proyecto**: `File > Open File or Project…` → `D:\AAA\MiniGIS\MiniGisCode\CMakeLists.txt`.
+1. **Abre el proyecto**: `File > Open File or Project…` → `E:\AAA\Proyecto nuevo\MiniGIS\CMakeLists.txt`.
 2. **Selecciona el preset**: en `Projects > Build & Run > CMake`, elige
    `windows-msvc-release` (Qt Creator los muestra en la lista de *presets*). Si prefieres
    configurar a mano, usa:
@@ -182,7 +190,7 @@ cmake --build build\manual
    ventana. Si aun así quieres tenerlo a mano al depurar, añade en `Projects > Run >
    Environment`:
    ```
-   C:\Qtwin\6.10.3\msvc2022_64\bin;D:\VCPKG\installed\x64-windows\bin
+   D:\QtWin\6.10.3\msvc2022_64\bin;E:\vcpkg\installed\x64-windows\bin
    ```
 5. **Punto de entrada**: `src\app\main.cpp`. Pon un punto de ruptura en
    `MainWindow::openLayer` (`src\gui\minigismainwindow.cpp`) y abre un `.gpkg` con `Ctrl+O`:
@@ -538,24 +546,24 @@ ctest --preset windows-msvc-release -R minigis.rendimiento
 
 | Síntoma | Causa y solución |
 |---|---|
-| `No se encuentra Qt` o Qt equivocado (vcpkg) | Fija el kit: `-DQt6_DIR=C:/Qtwin/6.10.3/msvc2022_64/lib/cmake/Qt6`. MiniGIS fija además las herramientas (`Qt6CoreTools`…) al mismo Qt para que vcpkg no mezcle su `qtbase` |
-| Al configurar con el kit aparece `Qt6: 6.11.1 (D:/VCPKG/...)` o `Unknown CMake command "_qt_internal_should_include_targets"` | El toolchain de vcpkg antepone su árbol a `CMAKE_PREFIX_PATH`, y **Qt Creator inyecta un *provider* de `find_package` que busca justo ahí**, así que encontraba el `qtbase` de vcpkg y reescribía `Qt6_DIR`. MiniGIS lo evita: detecta el Qt del kit, descarta las variables `Qt6*_DIR` cacheadas que apunten a vcpkg y **excluye ese árbol de `CMAKE_PREFIX_PATH` y `CMAKE_FIND_ROOT_PATH` durante la búsqueda de Qt**. Basta con volver a configurar (Qt Creator → *Run CMake*); si ves el aviso `"debug_and_release" set to "OFF"` al cambiar de Qt, borra `build/<kit>` para partir de cero |
-| `LNK1327: error durante la ejecución de rc.exe` / `RC1106: invalid option: -ologo` | El `rc.exe` del SDK que detecta VS por defecto no acepta la opción que le pasa el enlazador. Los presets fijan el de `D:/Windows Kits/10/bin/10.0.26100.0/x64`; en una configuración manual añade `-DCMAKE_RC_COMPILER` y `-DCMAKE_MT` como en 4.2 |
+| `No se encuentra Qt` o Qt equivocado (vcpkg) | Fija el kit: `-DQt6_DIR=D:/QtWin/6.10.3/msvc2022_64/lib/cmake/Qt6`. MiniGIS fija además las herramientas (`Qt6CoreTools`…) al mismo Qt para que vcpkg no mezcle su `qtbase` |
+| Al configurar con el kit aparece `Qt6: 6.11.1 (E:/vcpkg/...)` o `Unknown CMake command "_qt_internal_should_include_targets"` | El toolchain de vcpkg antepone su árbol a `CMAKE_PREFIX_PATH`, y **Qt Creator inyecta un *provider* de `find_package` que busca justo ahí**, así que encontraba el `qtbase` de vcpkg y reescribía `Qt6_DIR`. MiniGIS lo evita: detecta el Qt del kit, descarta las variables `Qt6*_DIR` cacheadas que apunten a vcpkg y **excluye ese árbol de `CMAKE_PREFIX_PATH` y `CMAKE_FIND_ROOT_PATH` durante la búsqueda de Qt**. Basta con volver a configurar (Qt Creator → *Run CMake*); si ves el aviso `"debug_and_release" set to "OFF"` al cambiar de Qt, borra `build/<kit>` para partir de cero |
+| `LNK1327: error durante la ejecución de rc.exe` / `RC1106: invalid option: -ologo` | El `rc.exe` del SDK que detecta VS por defecto no acepta la opción que le pasa el enlazador. Los presets fijan el de `C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64`; en una configuración manual añade `-DCMAKE_RC_COMPILER` y `-DCMAKE_MT` como en 4.2 |
 | Al reabrir un proyecto guardado el mapa queda en blanco hasta pulsar «Zoom a la capa» | Ocurría con proyectos cuyo `<mapcanvas>` usa un **SRC local sin código EPSG** (por ejemplo `TCAR01`): el encuadre se escribía en grados (SRC de dibujo) dentro de un `mapcanvas` en metros, y al reabrir se interpretaba como metros. Corregido: el encuadre se guarda transformado al SRC real del `mapcanvas` y no se reescribe si la vista no cambió. Actualiza a esta versión y vuelve a guardar el proyecto |
 | `error C2338: ... STL1001: Unexpected compiler version` al compilar en Qt Creator | El kit aplica el entorno de **VS2026** (`INCLUDE`/`LIB` de 14.51) pero CMake conserva un compilador de **VS2022** (14.44) de una configuración anterior. Elige en *Projects > Build & Run* un kit cuyo compilador coincida con su entorno (VS2026 con VS2026, o VS2022 con VS2022), **borra `build/<kit>`** y vuelve a configurar. Si abriste Qt Creator desde un *Developer Command Prompt* de VS2026, ciérralo y ábrelo desde su acceso directo normal. MiniGIS detecta esta mezcla al configurar y muestra un error con esta misma explicación |
 | `ninja: error: loading 'build.ninja': GetLastError() = 2` y `The C++ compiler ... is not able to compile a simple test program` al configurar | La caché mezcla dos generadores: `CMAKE_GENERATOR=Visual Studio 17 2022` con `CMAKE_MAKE_PROGRAM=C:/Strawberry/c/bin/ninja.exe`. Con un generador de Visual Studio, CMake usa `CMAKE_MAKE_PROGRAM` como **MSBuild**, así que lanza `ninja.exe <proyecto>.vcxproj /p:Configuration=…` y falla. Ocurre al clonar en Qt Creator una configuración Ninja y cambiarle el kit: la lista de parámetros iniciales conserva el `-DCMAKE_MAKE_PROGRAM`. MiniGIS lo detecta, descarta el valor y sigue (verás el aviso `MiniGIS: el generador es "Visual Studio ..."`). Para dejarlo limpio, borra esa línea en *Projects > Build & Run > CMake configuration* o, mejor, usa el preset `windows-msvc-release` (Ninja). Si la caché ya está creada, borra `build\<config>` |
-| `Cannot update Qt version information from .../qmake.exe: ... is not an executable` al abrir Qt Creator | Queda registrada una versión de Qt que salió del árbol de vcpkg (vcpkg solo tiene GDAL en este equipo, su `tools/Qt6` ya no existe). En *Preferences > Kits > Qt Versions*, elimina esa entrada; los kits deben usar `C:/Qtwin/6.10.3/msvc2022_64/bin/qmake.exe` |
+| `Cannot update Qt version information from .../qmake.exe: ... is not an executable` al abrir Qt Creator | Queda registrada una versión de Qt que salió del árbol de vcpkg (vcpkg solo tiene GDAL en este equipo, su `tools/Qt6` ya no existe). En *Preferences > Kits > Qt Versions*, elimina esa entrada; los kits deben usar `D:/QtWin/6.10.3/msvc2022_64/bin/qmake.exe` |
 | `Target ... "gdal.dll" is not a directory` al copiar DLLs | Ocurría con CMake 3.30 (el del kit): la opción `-t` de `copy_if_different` no existe ahí. Ya se usa la forma `origenes... destino`, compatible con todas las versiones |
 | `Could not find the Qt platform plugin "windows"` (o `"offscreen"`) al ejecutar | Los plugins de plataforma se copian **siempre** junto al ejecutable (antes dependían de `windeployqt`, que no existe si Qt sale de vcpkg). Si aun así falta, comprueba `build\<kit>\bin\platforms\` y recompila |
 | Error `Mezcla de versiones de Qt: Qt6 6.x con Qt6Core 6.y` | `CMAKE_PREFIX_PATH` está apuntando a dos instalaciones de Qt: deja solo el Qt oficial |
 | `ASSERT: "theme" in qstylehints.cpp` o `Could not find the Qt platform plugin` | Hay un Qt de vcpkg copiado junto al ejecutable. MiniGIS **excluye a propósito** las DLLs `Qt6*.dll` de vcpkg al copiar dependencias: borra `build\<preset>\bin\Qt6*.dll` y recompila |
 | `gdal.dll` / `Qt6Core.dll` no encontradas al ejecutar | Ejecuta desde Qt Creator o con `scripts\run.bat`; para una carpeta autónoma usa `scripts\deploy.bat` |
 | `could not find or load the Qt platform plugin "offscreen"` | `MINIGIS_DEPLOY_QT_RUNTIME` está en `OFF` y las pruebas necesitan ese plugin: actívalo, ejecuta `scripts\deploy.bat`, o define `QT_QPA_PLATFORM=windows` |
-| Aviso `No se encontro proj.db` | Define `PROJ_DATA=D:\VCPKG\installed\x64-windows\share\proj` (o copia esa carpeta junto al `.exe`) |
-| `La configuracion Debug necesita la variante Debug de GDAL` | Usa `windows-msvc-release` (o `windows-msvc-reldbg`), o instala la variante debug: `D:\VCPKG\vcpkg.exe install gdal --triplet x64-windows` |
+| Aviso `No se encontro proj.db` | Define `PROJ_DATA=E:\vcpkg\installed\x64-windows\share\proj` (o copia esa carpeta junto al `.exe`) |
+| `La configuracion Debug necesita la variante Debug de GDAL` | Usa `windows-msvc-release` (o `windows-msvc-reldbg`), o instala la variante debug: `E:\vcpkg\vcpkg.exe install gdal --triplet x64-windows` |
 | Aviso de que no se pudo detectar el prefijo de `/showIncludes` | Es MSVC en español sin paquete de idioma inglés. Compila igual, pero CMake **no registra las dependencias de cabeceras**, así que tras cambiar un `.h` pueden quedar objetos viejos y fallos difíciles de explicar (un cambio de estilo que no se ve, un test que falla solo en incremental). Instala el idioma inglés en Visual Studio o, mientras tanto, recompila limpio (`cmake --build --preset <preset> --clean-first` o borra `build\<preset>`) |
-| CMake no encuentra GDAL | `D:\VCPKG\vcpkg.exe install "gdal[parquet]" --triplet x64-windows` y reconfigura (incluye GeoParquet) |
-| Un `.parquet` dice `Este GDAL no incluye el driver Parquet` | Falta la feature en el GDAL de vcpkg: `D:\VCPKG\vcpkg.exe install "gdal[parquet]" --triplet x64-windows --recurse`, configura y compila. Comprueba con `minigis --list-drivers` que aparece `Parquet` |
+| CMake no encuentra GDAL | `E:\vcpkg\vcpkg.exe install "gdal[parquet]" --triplet x64-windows` y reconfigura (incluye GeoParquet) |
+| Un `.parquet` dice `Este GDAL no incluye el driver Parquet` | Falta la feature en el GDAL de vcpkg: `E:\vcpkg\vcpkg.exe install "gdal[parquet]" --triplet x64-windows --recurse`, configura y compila. Comprueba con `minigis --list-drivers` que aparece `Parquet`; las DLLs de Arrow/Parquet se copian solas junto al `.exe` al recompilar |
 | Un GeoParquet escrito por GeoPandas se abre con «SRC desconocido» | GDAL 3.12.4 no lee el `crs` PROJJSON de esos archivos aunque sea válido; los escritos por GDAL/QGIS (como `09Man`/`09Mun`) sí. MiniGIS avisa y **no** asume EPSG:4326. Si las coordenadas no caen en su sitio, convierte el archivo con `ogr2ogr` o vuelve a exportarlo desde QGIS |
 | Un `.parquet` se rechaza con «no contiene ninguna columna de geometria» | Es una tabla Parquet, no un GeoParquet. Exporta la capa con geometría desde QGIS, DuckDB u `ogr2ogr` |
 | Una carpeta con `.parquet` no se abre | Las colecciones particionadas necesitan `arrow[dataset]` y no están soportadas: abre uno de los archivos |
@@ -599,7 +607,8 @@ ctest --preset windows-msvc-release -R minigis.rendimiento
   diagnóstico en `stderr`) con códigos de salida estables, y Qt Creator muestra esa salida en
   *Application Output*.
 * **Modo manifiesto de vcpkg desactivado por defecto**: en este equipo el árbol compartido
-  `D:\VCPKG\installed` ya tiene GDAL compilado (solo variante release). El modo manifiesto
+  `E:\vcpkg\installed` ya tiene GDAL compilado (variantes Release y Debug, con la feature
+  `parquet`). El modo manifiesto
   recompilaría la cadena completa y, apuntando al árbol compartido, **eliminaría** paquetes
   ajenos al manifiesto (`qtbase`, `qgis-o2`…). El manifiesto se conserva en `vcpkg/vcpkg.json`
   para documentar la dependencia y fijar el `baseline`.
@@ -611,14 +620,14 @@ ctest --preset windows-msvc-release -R minigis.rendimiento
 
 ## 11. Verificación realizada
 
-Todo lo siguiente se ejecutó sobre este equipo con Qt 6.10.3 y el preset `windows-msvc-release`
-(la única variante de GDAL instalada en vcpkg es la Release):
+Todo lo siguiente se ejecutó con Qt 6.10.3 y el preset `windows-msvc-release`
+(GDAL 3.12.4 con las variantes Release y Debug y la feature `parquet`):
 
 | Comprobación | Resultado |
 |---|---|
-| `scripts\configure.bat windows-msvc-release` | Qt 6.10.3, GDAL 3.12.4, vcpkg `D:\VCPKG` (modo clásico) |
+| `scripts\configure.bat windows-msvc-release` | Qt 6.10.3, GDAL 3.12.4, vcpkg `E:\vcpkg` (modo clásico) |
 | `scripts\build.bat windows-msvc-release` | Compila sin errores ni avisos; DLLs de vcpkg + Qt oficial + plugins desplegados |
-| `minigis --version` | Qt 6.10.3, GDAL 3.12.4, PROJ 9.9.0, `PROJ_DATA` y `GDAL_DATA` en `D:\VCPKG` |
+| `minigis --version` | Qt 6.10.3, GDAL 3.12.4, PROJ 9.8.1, `PROJ_DATA` y `GDAL_DATA` en `E:\vcpkg` |
 | `minigis --info --json -l cities.shp` | 12 elementos, `ESRI Shapefile`, `EPSG:4326 - WGS 84` |
 | `minigis --info -l parcels_utm30.shp` | 5 polígonos, extensión en UTM 30N |
 | `minigis --info --json -l ortho_rgb.tif` | `"type": "raster"`, 256×256, 3 bandas, `EPSG:4326` |
