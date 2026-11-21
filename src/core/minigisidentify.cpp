@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <memory>
 #include <vector>
 
@@ -291,6 +292,117 @@ void collectFromOgr(const VectorLayer &layer, const IdentifyRequest &request,
   OGR_L_ResetReading(handle);
 }
 
+/**
+ * Lee los atributos de los FID pedidos en una sola pasada secuencial.
+ *
+ * La tabla y el panel piden los valores de los elementos identificados; leerlos
+ * uno a uno con OGR_L_GetFeature sobre Parquet cuesta decenas de milisegundos
+ * por fila. Con el filtro espacial del clic, el driver recorre solo los
+ * elementos de la zona y se queda con los FID que hacen falta.
+ *
+ * Devuelve vacio si no se puede aplicar el filtro; el llamador cae entonces a
+ * las lecturas sueltas.
+ */
+std::map<qint64, QVector<QString>> readAttributeValues(
+  const VectorLayer &layer, const IdentifyRequest &request, const IdentifyOptions &options,
+  const QVector<qint64> &keys, bool keysAreRows)
+{
+  std::map<qint64, QVector<QString>> values;
+
+  OGRLayerH handle = layer.ogrLayerHandle();
+  if (!handle || keys.isEmpty() || request.destinationEpsg <= 0)
+    return values;
+
+  // En el camino del almacen la clave es la fila (indice del elemento en el
+  // archivo); en el camino OGR es ya el FID. Se normaliza a FID de OGR para
+  // comparar con OGR_F_GetFID y se devuelve con la clave original.
+  std::map<qint64, qint64> wanted; // fid de OGR -> clave pedida
+  for (const qint64 key : keys)
+  {
+    const qint64 fid = keysAreRows ? layer.fidForRow(key) : key;
+    if (fid >= 0)
+      wanted.emplace(fid, key);
+  }
+  if (wanted.empty())
+    return values;
+
+  std::unique_ptr<OGRSpatialReference> destination = traditionalSrs(request.destinationEpsg);
+  if (!destination)
+    return values;
+
+  std::unique_ptr<OGRSpatialReference> source;
+  if (const OGRSpatialReference *layerSrs = layer.spatialRef())
+  {
+    source.reset(layerSrs->Clone());
+    if (source)
+      source->SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
+  }
+
+  const double x = request.mapPoint.x();
+  const double y = request.mapPoint.y();
+  const double tolerance = options.tolerance;
+
+  SpatialFilterGuard filterGuard(handle);
+  if (!source || source->IsSame(destination.get()))
+  {
+    OGR_L_SetSpatialFilterRect(handle, x - tolerance, y - tolerance, x + tolerance, y + tolerance);
+  }
+  else
+  {
+    std::unique_ptr<OGRCoordinateTransformation> toSource(
+      OGRCreateCoordinateTransformation(destination.get(), source.get()));
+    if (!toSource)
+      return values;
+
+    // Caja de destino al SRC de la capa: cuatro esquinas y envolvente.
+    double xs[4] = {x - tolerance, x + tolerance, x - tolerance, x + tolerance};
+    double ys[4] = {y - tolerance, y - tolerance, y + tolerance, y + tolerance};
+    if (!toSource->Transform(4, xs, ys))
+      return values;
+
+    OGR_L_SetSpatialFilterRect(handle, std::min(std::min(xs[0], xs[1]), std::min(xs[2], xs[3])),
+                               std::min(std::min(ys[0], ys[1]), std::min(ys[2], ys[3])),
+                               std::max(std::max(xs[0], xs[1]), std::max(xs[2], xs[3])),
+                               std::max(std::max(ys[0], ys[1]), std::max(ys[2], ys[3])));
+  }
+
+  OGR_L_ResetReading(handle);
+  while (OGRFeatureH feature = OGR_L_GetNextFeature(handle))
+  {
+    const qint64 fid = static_cast<qint64>(OGR_F_GetFID(feature));
+    const auto wantedIt = wanted.find(fid);
+    if (wantedIt != wanted.end())
+    {
+      QVector<QString> row;
+      row.reserve(layer.fields().size());
+      for (int field = 0; field < layer.fields().size(); ++field)
+      {
+        QString value;
+        if (OGR_F_IsFieldSetAndNotNull(feature, field))
+        {
+          const char *raw = OGR_F_GetFieldAsString(feature, field);
+          if (raw)
+            value = QString::fromUtf8(raw);
+        }
+        row.append(value);
+      }
+
+      values[wantedIt->second] = row;
+      wanted.erase(wantedIt);
+      if (wanted.empty())
+      {
+        OGR_F_Destroy(feature);
+        break;
+      }
+    }
+
+    OGR_F_Destroy(feature);
+  }
+
+  OGR_L_ResetReading(handle);
+  return values;
+}
+
 } // namespace
 
 IdentifyResult identifyAtPoint(const IdentifyRequest &request)
@@ -349,28 +461,43 @@ IdentifyResult identifyAtPoint(const IdentifyRequest &request)
       return a.fid < b.fid;
     });
 
-    int taken = 0;
+    // Se eligen los elementos que se van a devolver y sus atributos se leen en
+    // una sola pasada (no una lectura aleatoria por elemento).
+    QVector<Candidate> selected;
     for (const Candidate &candidate : candidates)
     {
-      if (options.maximumPerLayer > 0 && taken >= options.maximumPerLayer)
+      if (options.maximumPerLayer > 0 && selected.size() >= options.maximumPerLayer)
       {
         result.truncated = true;
         break;
       }
-      if (options.maximumTotal > 0 && result.hits.size() >= options.maximumTotal)
+      if (options.maximumTotal > 0 && result.hits.size() + selected.size() >= options.maximumTotal)
       {
         result.truncated = true;
         break;
       }
+      selected.append(candidate);
+    }
 
+    QVector<qint64> fids;
+    fids.reserve(selected.size());
+    for (const Candidate &candidate : selected)
+      fids.append(candidate.fid);
+
+    const std::map<qint64, QVector<QString>> attributeValues =
+      readAttributeValues(*layer, request, options, fids, storeUsable);
+
+    for (const Candidate &candidate : selected)
+    {
       IdentifyHit hit;
       hit.layer = layer;
       hit.fid = candidate.fid;
       hit.inside = candidate.inside;
       hit.distance = candidate.distance;
-      hit.values = layer->fieldValues(candidate.fid);
+
+      const auto found = attributeValues.find(candidate.fid);
+      hit.values = found != attributeValues.end() ? found->second : layer->fieldValues(candidate.fid);
       result.hits.append(hit);
-      ++taken;
     }
   }
 

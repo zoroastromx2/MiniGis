@@ -180,6 +180,16 @@ public:
   QVector<QString> fieldValues(qint64 row) const;
 
   /**
+   * Valores de una pagina de filas consecutivas.
+   *
+   * Lee `count` elementos en orden desde `firstRow` (OGR_L_SetNextByIndex +
+   * GetNextFeature) en lugar de hacer N lecturas aleatorias por FID: en Parquet
+   * una lectura aleatoria cuesta milisegundos y una pagina secuencial, decimas.
+   * Devuelve tantas filas como haya podido leer.
+   */
+  QVector<QVector<QString>> fieldValuesPage(qint64 firstRow, int count) const;
+
+  /**
    * Numero de lecturas de atributos que se han hecho al origen. Existe para
    * poder comprobar sin ventana que la cache evita relecturas.
    */

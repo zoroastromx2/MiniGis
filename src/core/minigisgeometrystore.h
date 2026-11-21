@@ -23,6 +23,13 @@ namespace minigis
 class VectorLayer;
 
 /**
+ * Presupuesto de memoria por defecto del almacen: 1 GB, o el valor de
+ * `MINIGIS_STORE_BUDGET_MB` si esta definido (0 = sin limite). Se lee al crear
+ * las opciones, no en cada construccion.
+ */
+qint64 defaultStoreBudgetBytes();
+
+/**
  * Copia en memoria de las geometrias de una capa, con indice espacial
  * (R-tree STR empaquetado) y niveles de simplificacion (Douglas-Peucker)
  * calculados bajo demanda.
@@ -151,8 +158,17 @@ public:
 
   struct Options
   {
-    /** Vertices maximos que se aceptan en memoria (0 = sin limite). */
+    /**
+     * Suelo de vertices que se aceptan en memoria (0 = sin limite). El limite
+     * real sale de `budgetBytes`: se admite el mayor de los dos.
+     */
     qint64 vertexBudget = 8'000'000;
+    /**
+     * Memoria maxima del almacen completo (nivel 0 + niveles precalculados), en
+     * bytes. 1 GB por defecto; `MINIGIS_STORE_BUDGET_MB` lo baja para equipos con
+     * poca RAM. 0 = sin limite por memoria (solo manda `vertexBudget`).
+     */
+    qint64 budgetBytes = defaultStoreBudgetBytes();
     /** Niveles de simplificacion que se precalculan al construir (ademas del 0). */
     int precomputedLevels = 6;
     /** Memoria maxima de los niveles precalculados, en bytes. */

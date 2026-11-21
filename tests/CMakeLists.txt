@@ -311,6 +311,20 @@ if(MINIGIS_RASTER_BENCH_DATASET)
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endif()
 
+# Puerta opt-in de rendimiento con una capa GeoParquet grande real (la capa no
+# se versiona). Se registra siempre y se omite si no hay variable de entorno:
+#   set MINIGIS_GEOPARQUET_BENCH_DATASET=E:\datos\rios.parquet
+#   set MINIGIS_GEOPARQUET_BUDGET_MS=200
+#   ctest --preset windows-msvc-release -R minigis.rendimiento-geoparquet
+add_test(NAME minigis.rendimiento-geoparquet
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          -DMODE=rendimiento-geoparquet
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+set_tests_properties(minigis.rendimiento-geoparquet PROPERTIES
+  SKIP_REGULAR_EXPRESSION "OMITIDA"
+  TIMEOUT 900)
+
 # --- KML / KMZ ------------------------------------------------------------
 # Caso que fallaba: una MultiGeometry mixta acompanada de otro poligono se
 # dibujaba sin ella y nadie lo avisaba. --check-kml compara lo que entrega OGR

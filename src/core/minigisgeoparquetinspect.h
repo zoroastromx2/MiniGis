@@ -32,6 +32,9 @@ struct GeoParquetLayerReport
   qint64 storeFeatures = -1;   // -1 = no se pudo construir el almacen
   /** True si la segunda lectura de una misma fila no vuelve al origen. */
   bool attributeCache = true;
+  /** True si se comprobo que una pagina de la tabla coincide con las filas sueltas. */
+  bool attributePageChecked = false;
+  bool attributePage = true;
   int crsEpsg = 0;
   QString crsName;
   QString crsDescription;

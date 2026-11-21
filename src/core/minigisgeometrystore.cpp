@@ -20,6 +20,22 @@
 
 namespace minigis
 {
+
+qint64 defaultStoreBudgetBytes()
+{
+  constexpr qint64 kDefaultBytes = 1024LL * 1024 * 1024;
+  const QByteArray configured = qgetenv("MINIGIS_STORE_BUDGET_MB");
+  if (!configured.isEmpty())
+  {
+    bool ok = false;
+    const qint64 megabytes = configured.toLongLong(&ok);
+    // Tope razonable: por encima de 1 TB el calculo de vertices desbordaria.
+    if (ok && megabytes >= 0 && megabytes <= 1024LL * 1024)
+      return megabytes * 1024LL * 1024LL;
+  }
+  return kDefaultBytes;
+}
+
 namespace
 {
 
@@ -99,10 +115,16 @@ struct SimplifyScratch
  *     anillos densos (que es lo habitual en datos reales).
  *  2. Douglas-Peucker sobre los vertices que sobrevivieron al filtro.
  *
+ * `kind` decide cuantos vertices debe conservar como minimo: un poligono
+ * cerrado necesita 4 (si no se degrada a una linea o desaparece) y una
+ * polilinea 2 (sus dos extremos). Aplicar el minimo de poligono a las lineas
+ * dejaba los rios sin simplificar: cada linea reducida a 2 puntos se restauraba
+ * entera.
+ *
  * La salida se anade a `out` (x,y intercalados).
  */
-void simplifyRing(const double *source, int count, double tolerance, SimplifyScratch &scratch,
-                  std::vector<double> &out)
+void simplifyRing(const double *source, int count, double tolerance, uint8_t kind,
+                  SimplifyScratch &scratch, std::vector<double> &out)
 {
   if (count <= 4 || tolerance <= 0.0)
   {
@@ -194,9 +216,11 @@ void simplifyRing(const double *source, int count, double tolerance, SimplifyScr
 
   // Un anillo simplificado en exceso pierde la forma (o desaparece): en ese caso
   // se conserva el original, que es lo que hace cualquier visor a escala de
-  // pixel. El limite solo se aplica si el anillo era suficientemente grande.
+  // pixel. El minimo depende del tipo: 3 vertices para un poligono (con 2 seria
+  // una linea) y 2 para una polilinea (sus extremos).
+  const uint32_t minimumVertices = (kind == kKindPolygon) ? kMinimumRingVertices : 2;
   const size_t outputVertices = (out.size() - firstOutput) / 2;
-  if (count >= static_cast<int>(kMinimumRingVertices) && outputVertices < kMinimumRingVertices)
+  if (count >= static_cast<int>(minimumVertices) && outputVertices < minimumVertices)
   {
     out.resize(firstOutput);
     out.insert(out.end(), source, source + 2 * count);
@@ -603,6 +627,14 @@ std::shared_ptr<GeometryStore> GeometryStore::build(
   if (!notify(2, QStringLiteral("Preparando la lectura de la capa...")))
     return fail(QStringLiteral("Carga cancelada por el usuario."));
 
+  // Limite efectivo del almacen: 1 GB por defecto (budgetBytes), con el suelo
+  // historico de vertexBudget. El nivel 0 ocupa 16 B por vertice y se reserva
+  // una cuarta parte del presupuesto para los niveles precalculados, de ahi el
+  // 3/4. Con 1 GB salen ~48 M de vertices; esta capa necesita ~22 M.
+  const qint64 vertexLimit = options.budgetBytes > 0
+                               ? std::max(options.vertexBudget, (options.budgetBytes * 3 / 4) / 16)
+                               : options.vertexBudget;
+
   // --- Reproyeccion a la salida: se prepara una sola vez --------------------
   OGRSpatialReference destination;
   const bool hasDestination =
@@ -728,25 +760,26 @@ std::shared_ptr<GeometryStore> GeometryStore::build(
     OGRFeature::DestroyFeature(feature);
     ++read;
 
-    if (options.vertexBudget > 0 && builder.vertexCount > options.vertexBudget)
+    if (vertexLimit > 0 && builder.vertexCount > vertexLimit)
       return fail(QStringLiteral("La capa tiene mas de %1 vertices y no cabe en el almacen en memoria "
                                  "(se usara el indice de envolventes o la lectura directa).")
-                    .arg(options.vertexBudget));
+                    .arg(vertexLimit));
 
     // Estimacion temprana: si con los primeros cientos de elementos ya se ve que
     // el total no va a caber, se aborta ahora. Sin esto, una capa de 3,2 M de
     // edificios se leia entera (varios segundos) solo para descubrir al final que
     // no cabia, y luego habia que indexarla igualmente.
-    if (options.vertexBudget > 0 && read == 512 && total > 512)
+    if (vertexLimit > 0 && read == 512 && total > 512)
     {
       const double verticesPerFeature = static_cast<double>(builder.vertexCount) / static_cast<double>(read);
       const double projectedVertices = verticesPerFeature * static_cast<double>(total);
-      if (projectedVertices > static_cast<double>(options.vertexBudget))
+      if (projectedVertices > static_cast<double>(vertexLimit))
         return fail(QStringLiteral("La capa tiene unos %1 millones de vertices (estimados sobre los "
-                                   "primeros %2 elementos) y no cabe en el almacen en memoria "
-                                   "(se usara el indice de envolventes o la lectura directa).")
+                                   "primeros %2 elementos, limite %3) y no cabe en el almacen en "
+                                   "memoria (se usara el indice de envolventes o la lectura directa).")
                       .arg(QString::number(projectedVertices / 1e6, 'f', 1))
-                      .arg(read));
+                      .arg(read)
+                      .arg(vertexLimit));
     }
 
     // Progreso: 5 %..80 % cubre la lectura de la capa.
@@ -1288,7 +1321,7 @@ std::shared_ptr<const GeometryStore::Subset> GeometryStore::acquireSubset(
       else
       {
         ringBuffer.clear();
-        simplifyRing(xy, static_cast<int>(count), tolerance, simplifyScratch, ringBuffer);
+        simplifyRing(xy, static_cast<int>(count), tolerance, kind, simplifyScratch, ringBuffer);
         level->coords.insert(level->coords.end(), ringBuffer.begin(), ringBuffer.end());
         level->ringCount.push_back(static_cast<uint32_t>(ringBuffer.size() / 2));
       }
@@ -1473,7 +1506,7 @@ std::shared_ptr<GeometryStore::Level> GeometryStore::buildLevel(int index, const
     else
     {
       ringBuffer.clear();
-      simplifyRing(xy, static_cast<int>(count), level->tolerance, simplifyScratch, ringBuffer);
+      simplifyRing(xy, static_cast<int>(count), level->tolerance, kind, simplifyScratch, ringBuffer);
       level->coords.insert(level->coords.end(), ringBuffer.begin(), ringBuffer.end());
       level->ringCount[ring] = static_cast<uint32_t>(ringBuffer.size() / 2);
     }

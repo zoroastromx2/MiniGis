@@ -948,6 +948,9 @@ int runBenchmark(const BenchRequest &request)
   qint64 storeVertices = 0;
   qint64 storeBytes = 0;
   qint64 storeFeatures = 0;
+  qint64 storeReadMs = 0;
+  qint64 storeIndexMs = 0;
+  qint64 storeLevelsMs = 0;
 
   int opened = 0;
   int rasterLayers = 0;
@@ -1025,6 +1028,9 @@ int runBenchmark(const BenchRequest &request)
           storeFeatures += stats.features;
           storeVertices += stats.vertices;
           storeBytes += stats.bytes;
+          storeReadMs += stats.readMs;
+          storeIndexMs += stats.indexMs;
+          storeLevelsMs += stats.levelsMs;
           if (stats.mode == GeometryStore::Mode::Envelopes)
             envelopeMode = true;
           layer->setGeometryStore(store);
@@ -1147,6 +1153,9 @@ int runBenchmark(const BenchRequest &request)
 
     QJsonObject store;
     store.insert(QStringLiteral("build_ms"), static_cast<double>(storeBuildMs));
+    store.insert(QStringLiteral("read_ms"), static_cast<double>(storeReadMs));
+    store.insert(QStringLiteral("index_ms"), static_cast<double>(storeIndexMs));
+    store.insert(QStringLiteral("levels_ms"), static_cast<double>(storeLevelsMs));
     store.insert(QStringLiteral("features"), static_cast<double>(storeFeatures));
     store.insert(QStringLiteral("vertices"), static_cast<double>(storeVertices));
     store.insert(QStringLiteral("bytes"), static_cast<double>(storeBytes));

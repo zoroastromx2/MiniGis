@@ -343,6 +343,49 @@ void FastMapRenderer::paint(QPainter &painter, const std::vector<Layer> &layers,
     }
     else
     {
+      // En modo memoria tambien hay elementos sub-pixel: una capa de 711 000
+      // lineas vista entera deja cada rio en menos de dos pixeles. Dibujarlos
+      // como trazados cuesta cientos de milisegundos y no aporta nada; se
+      // dibujan como puntos (muestreados) y solo los que se ven se trazan.
+      mDots.clear();
+      std::vector<uint32_t> pathCandidates;
+      pathCandidates.reserve(mCandidates.size());
+
+      const double minimumSize =
+        (options.minimumGeometryPixels > 0.0) ? options.minimumGeometryPixels * unitsPerPixel : 0.0;
+      if (minimumSize > 0.0)
+      {
+        const std::vector<GeometryStore::Feature> &features = store.features();
+        const std::vector<uint8_t> &ringKinds = store.ringKinds();
+        for (const uint32_t fid : mCandidates)
+        {
+          if (fid >= features.size())
+            continue;
+
+          const GeometryStore::Feature &feature = features[fid];
+          const bool pointKind =
+            feature.firstRing < ringKinds.size() && ringKinds[feature.firstRing] == kKindPoint;
+          const bool subPixel = !pointKind && (feature.maxX - feature.minX) < minimumSize
+                                && (feature.maxY - feature.minY) < minimumSize;
+          if (!subPixel)
+          {
+            pathCandidates.push_back(fid);
+            continue;
+          }
+
+          double x = 0.0;
+          double y = 0.0;
+          transform.projectInline((feature.minX + feature.maxX) / 2.0,
+                                  (feature.minY + feature.maxY) / 2.0, x, y);
+          mDots.emplace_back(x, y);
+        }
+      }
+      else
+      {
+        pathCandidates = mCandidates;
+      }
+
+      const std::vector<uint16_t> &styleOf = store.featureStyles();
       for (int attempt = 0;; ++attempt)
       {
         const GeometryStore::Level *levelData = store.acquireLevel(level);
@@ -352,7 +395,9 @@ void FastMapRenderer::paint(QPainter &painter, const std::vector<Layer> &layers,
         batches.assign(styleCount, Batch());
 
         timer.restart();
-        buildBatch(batches, store, *levelData, transform, pointStride);
+        buildBatch(batches, *levelData, store.ringKinds(), store.entryFirstRing(),
+                   store.entryRingCount(), pathCandidates, transform, pointStride,
+                   styleOf.empty() ? nullptr : &styleOf);
         mStats.pathMs += timer.elapsed();
 
         mStats.level = level;
@@ -464,6 +509,33 @@ void FastMapRenderer::paint(QPainter &painter, const std::vector<Layer> &layers,
           painter.drawPoints(points, pointTotal);
         }
       }
+    }
+
+    // Nube de elementos sub-pixel del modo memoria (el modo envolventes ya la
+    // dibuja en su rama). Se muestrea si hay mas puntos que el presupuesto: a
+    // esta escala la densidad es lo unico que aporta informacion.
+    if (store.mode() == GeometryStore::Mode::InMemory && !mDots.empty())
+    {
+      if (options.dotBudget > 0 && static_cast<qint64>(mDots.size()) > options.dotBudget)
+      {
+        const qint64 stride = (static_cast<qint64>(mDots.size()) + options.dotBudget - 1) / options.dotBudget;
+        std::vector<QPointF> sampled;
+        sampled.reserve(static_cast<size_t>(options.dotBudget));
+        for (size_t i = 0; i < mDots.size(); i += static_cast<size_t>(stride))
+          sampled.push_back(mDots[i]);
+        mDots.swap(sampled);
+        mStats.viewDependent = true;
+      }
+
+      const bool antialiasingWasOn = painter.testRenderHint(QPainter::Antialiasing);
+      painter.setRenderHint(QPainter::Antialiasing, false);
+      painter.setBrush(Qt::NoBrush);
+      painter.setPen(QPen(style.strokeColor, 0.0));
+      painter.drawPoints(mDots.data(), static_cast<int>(mDots.size()));
+      painter.setRenderHint(QPainter::Antialiasing, antialiasingWasOn);
+
+      mStats.dotFeatures += static_cast<qint64>(mDots.size());
+      mStats.drawnFeatures += static_cast<qint64>(mDots.size());
     }
 
     painter.setOpacity(1.0);

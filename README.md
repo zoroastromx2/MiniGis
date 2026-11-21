@@ -458,6 +458,9 @@ ctest --preset windows-msvc-release --output-on-failure
 * `minigis.identificar-ventana` — captura de la interfaz con el panel de resultados lleno, el
   resalte del objeto y la tabla en su registro.
 * `minigis.rendimiento-raster` — puerta opcional de rendimiento con `MINIGIS_RASTER_BENCH_DATASET`.
+* `minigis.rendimiento-geoparquet` — puerta opcional de rendimiento con una capa GeoParquet real
+  (`MINIGIS_GEOPARQUET_BENCH_DATASET`, presupuesto `MINIGIS_GEOPARQUET_BUDGET_MS`); sin la
+  variable aparece como omitida.
 * `minigis.pg-catalogo` — piezas PostGIS sin servidor: URI `pg:`, catálogo `Connections.xml`,
   cadena de conexión, escapado, saneado de la contraseña y credenciales DPAPI.
 * `minigis.pg-sin-catalogo`, `minigis.pg-conexion-inexistente`, `minigis.pg-cli-uso` — códigos de
@@ -479,6 +482,18 @@ Las capas que **no caben en memoria** (millones de elementos) se indexan por env
 índice, responde en 13 ms por cuadro a escala de ciudad y se dibuja como mapa de densidad con el
 país entero en pantalla. A escalas muy lejanas la geometría se sustituye por puntos (envolventes),
 porque a esa escala no aporta y leerla costaría segundos de I/O por cuadro.
+
+Una capa GeoParquet de **711 574 líneas y 13,5 M de vértices** (226 MB) construye un almacén de
+**388 MB** en ~4,5 s y después responde en **~50 ms por cuadro** (antes: 21 s por cuadro y 8,8 min
+la ventana con tabla). El presupuesto de memoria del almacén es **1 GB duro**; se puede bajar en
+equipos con poca RAM:
+
+```bat
+set MINIGIS_STORE_BUDGET_MB=256
+```
+
+La medición completa, las causas y los límites están en
+[RENDIMIENTO.md §15](RENDIMIENTO.md).
 
 ```bat
 :: medir el paneo/zoom sin abrir ventana (40 cuadros, con desglose por fase)
@@ -579,6 +594,9 @@ ctest --preset windows-msvc-release -R minigis.rendimiento
 | Un GeoParquet escrito por GeoPandas se abre con «SRC desconocido» | GDAL 3.12.4 no lee el `crs` PROJJSON de esos archivos aunque sea válido; los escritos por GDAL/QGIS (como `09Man`/`09Mun`) sí. MiniGIS avisa y **no** asume EPSG:4326. Si las coordenadas no caen en su sitio, convierte el archivo con `ogr2ogr` o vuelve a exportarlo desde QGIS |
 | Un `.parquet` se rechaza con «no contiene ninguna columna de geometria» | Es una tabla Parquet, no un GeoParquet. Exporta la capa con geometría desde QGIS, DuckDB u `ogr2ogr` |
 | Una carpeta con `.parquet` no se abre | Las colecciones particionadas necesitan `arrow[dataset]` y no están soportadas: abre uno de los archivos |
+| Una capa vectorial grande tarda en abrir o la ventana parece colgada | El almacén en memoria se está construyendo en segundo plano (para 711 000 líneas, ~4,5 s con barra de progreso). Si no cabe en el presupuesto, se avisa y se usa la lectura directa; baja el consumo con `set MINIGIS_STORE_BUDGET_MB=256` o usa `--pg-no-index`/`--spatial-filter` en capas de millones de elementos |
+| A escala nacional una capa densa se ve como una mancha de puntos | Es el modo de densidad: los elementos de menos de 2 px se dibujan como puntos muestreados (`minimumGeometryPixels`/`dotBudget`). Al acercar el zoom se vuelven a trazar las líneas |
+| La tabla de atributos tarda en abrir con una capa enorme | La tabla lee páginas de 128 filas (no fila a fila); si la capa tiene más de 100 000 elementos se muestran los primeros 100 000 y el título lo indica |
 | El shapefile se abre sin SRC | Al `.shp` le falta el `.prj`; usa `ogr2ogr ... -a_srs EPSG:xxxx` (ver `scripts\make_sample_data.bat`) |
 
 ---
@@ -627,6 +645,16 @@ ctest --preset windows-msvc-release -R minigis.rendimiento
 * **Ráster por ventana y warp cacheado**: de un ráster solo se lee la parte visible, al tamaño
   del lienzo, y la reproyección se cachea por capa y SRC de destino. Es lo que permite mover un
   GeoTIFF de 4096² a 4 ms por cuadro sin copiarlo a memoria (ver RENDIMIENTO.md §13).
+* **Almacén con presupuesto de 1 GB**: el límite de vértices se deriva de `budgetBytes` (1 GB,
+  `MINIGIS_STORE_BUDGET_MB` para bajarlo), con el tope histórico de 8 M como suelo. Leer y
+  reproyectar una vez una capa de 13,5 M de vértices y dibujarla desde el R-tree es lo que
+  convierte 21 s por cuadro en ~50 ms; el coste es RAM (388 MB en el caso de los ríos de NZ).
+* **Simplificación y densidad por tipo**: las polilíneas conservan 2 vértices al simplificar (4
+  los polígonos) y los elementos de menos de 2 px se dibujan como puntos muestreados. A escala
+  nacional el resultado es un mapa de densidad; al acercarse, vuelven los trazados.
+* **La tabla lee páginas, no filas**: 128 filas contiguas por lectura y caché de 4 páginas. El
+  acceso aleatorio por FID en Parquet cuesta decenas de milisegundos por fila y hacía inviable
+  una tabla de 100 000 filas.
 
 ---
 
@@ -662,7 +690,16 @@ Todo lo siguiente se ejecutó con Qt 6.10.3 y el preset `windows-msvc-release`
 | `minigis --bench` de `areas_geoestadisticas_municipales` | p90 55 ms, `budget_ok: true`; `--pg-no-index` informa `store.mode: "none"` |
 | `minigis --snapshot-pg-dialog` | Diálogo con las 6 conexiones `PGIS` del catálogo real |
 | Ventana con dos tablas de `mgn_2025` | Carga en segundo plano, grupo `dataware_FDAC/mgn_2025` con 2 capas y ambas dibujadas |
-| `ctest --preset windows-msvc-release` | **39/39**: 36 en verde y 3 opt-in omitidas sin variables; con `MINIGIS_PG_TEST_*`, **8/8** también en verde |
+| `minigis --list-drivers` | incluye `Parquet` y `Arrow` (GDAL 3.12.4 con Arrow 25.0.0) |
+| `minigis --bench 24` con la capa de rios NZ (711 574 líneas) | mediana **47–52 ms** (antes 21,3 s); almacén de 13,49 M vértices y 388 MB construido en 4,45 s |
+| `minigis --snapshot` capa NZ 1600×900 | render **57–64 ms** (antes 20,2 s); con zoom, 29 ms |
+| `minigis --snapshot-window --with-attributes` capa NZ | **4,92 s** (antes 531,4 s) |
+| `minigis --identify-at` capa NZ | consulta **160–250 ms** (antes 576 ms) |
+| `minigis --dlls` | 48 DLLs cargadas desde la carpeta del ejecutable; `gdal.dll 3.12.4`, `arrow.dll 25.0.0`, `parquet.dll 25.0.0`, `Qt6Core.dll 6.10.3` |
+| `minigis --snapshot-about about.png` | Diálogo «Acerca de» con el resumen de versiones y la tabla de DLLs cargadas (la de Arrow/Parquet sale del puerto de vcpkg) |
+| `minigis --check-geoparquet --json -l parcels.parquet` | driver `Parquet`, 5 elementos, `EPSG:4326`, 4 campos, `ok: true` |
+| `minigis --info --json -l parcels_utm30.parquet` | driver `Parquet`, 5 elementos, `epsg: 25830` |
+| `ctest --preset windows-msvc-release` | **54/54**: 50 en verde (incluidas las 12 de GeoParquet, `minigis.dlls` y `minigis.acerca`), la puerta `minigis.rendimiento-geoparquet` y las 3 de PostGIS opt-in omitidas sin variables; con `MINIGIS_GEOPARQUET_BENCH_DATASET`, 51 en verde |
 
 El kit de Qt Creator también se compiló con el toolset **VS2026 (19.51)**:
 `build\Desktop_Qt_6_10_3_MSVC2022_64bit_Release` y **24/24** pruebas. Si Qt

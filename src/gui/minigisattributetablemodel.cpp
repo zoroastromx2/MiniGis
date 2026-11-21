@@ -22,8 +22,8 @@ void AttributeTableModel::setLayer(const std::shared_ptr<VectorLayer> &layer)
   mFields.clear();
   mRowCount = 0;
   mTotalRows = 0;
-  mCachedRow = -1;
-  mCachedValues.clear();
+  mPages.clear();
+  mPageOrder.clear();
 
   if (mLayer)
   {
@@ -62,16 +62,15 @@ QVariant AttributeTableModel::data(const QModelIndex &index, int role) const
   {
     case Qt::DisplayRole:
     {
-      if (mCachedRow != index.row())
-      {
-        mCachedValues = mLayer->fieldValues(index.row());
-        mCachedRow = index.row();
-      }
-
-      if (column >= mCachedValues.size())
+      const QVector<QVector<QString>> &page = pageFor(index.row());
+      const qint64 offset = index.row() % kPageRows;
+      if (offset < 0 || offset >= page.size())
+        return {};
+      const QVector<QString> &values = page.at(static_cast<int>(offset));
+      if (column >= values.size())
         return {};
 
-      const QString &value = mCachedValues.at(column);
+      const QString &value = values.at(column);
       // Los valores nulos se distinguen de las cadenas vacias.
       return value.isEmpty() ? QStringLiteral("(nulo)") : value;
     }
@@ -81,14 +80,17 @@ QVariant AttributeTableModel::data(const QModelIndex &index, int role) const
                                           : QVariant(int(Qt::AlignLeft | Qt::AlignVCenter));
 
     case Qt::ForegroundRole:
-      if (mCachedRow != index.row())
+    {
+      const QVector<QVector<QString>> &page = pageFor(index.row());
+      const qint64 offset = index.row() % kPageRows;
+      if (offset >= 0 && offset < page.size())
       {
-        mCachedValues = mLayer->fieldValues(index.row());
-        mCachedRow = index.row();
+        const QVector<QString> &values = page.at(static_cast<int>(offset));
+        if (column < values.size() && values.at(column).isEmpty())
+          return QBrush(QColor(150, 150, 150));
       }
-      if (column < mCachedValues.size() && mCachedValues.at(column).isEmpty())
-        return QBrush(QColor(150, 150, 150));
       return {};
+    }
 
     case Qt::ToolTipRole:
       return QStringLiteral("Fila %1, campo «%2»").arg(index.row()).arg(mFields.at(column).name);
@@ -96,6 +98,32 @@ QVariant AttributeTableModel::data(const QModelIndex &index, int role) const
     default:
       return {};
   }
+}
+
+const QVector<QVector<QString>> &AttributeTableModel::pageFor(qint64 row) const
+{
+  static const QVector<QVector<QString>> empty;
+  if (!mLayer || row < 0 || row >= mRowCount)
+    return empty;
+
+  const qint64 pageIndex = row / kPageRows;
+  const auto found = mPages.find(pageIndex);
+  if (found != mPages.end())
+    return found->second;
+
+  const qint64 first = pageIndex * kPageRows;
+  const int count = static_cast<int>(std::min<qint64>(kPageRows, mRowCount - first));
+  QVector<QVector<QString>> page = mLayer->fieldValuesPage(first, count);
+
+  // Cache FIFO de paginas: al desplazarse se descarta la mas antigua.
+  while (mPageOrder.size() >= static_cast<int>(kMaximumPages))
+  {
+    const qint64 victim = mPageOrder.takeFirst();
+    mPages.erase(victim);
+  }
+  mPageOrder.append(pageIndex);
+  const auto inserted = mPages.emplace(pageIndex, std::move(page));
+  return inserted.first->second;
 }
 
 QVariant AttributeTableModel::headerData(int section, Qt::Orientation orientation, int role) const

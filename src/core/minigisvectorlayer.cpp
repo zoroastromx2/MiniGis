@@ -678,6 +678,62 @@ QVector<QString> VectorLayer::fieldValues(qint64 row) const
   return values;
 }
 
+QVector<QVector<QString>> VectorLayer::fieldValuesPage(qint64 firstRow, int count) const
+{
+  QVector<QVector<QString>> rows;
+  if (!mLayerHandle || firstRow < 0 || count <= 0)
+    return rows;
+
+  const qint64 total = featureCount();
+  if (firstRow >= total)
+    return rows;
+
+  const qint64 wanted = std::min<qint64>(count, total - firstRow);
+
+  // Posicionarse por indice es lo barato; si el driver no lo soporta se recorre
+  // desde el principio, que sigue siendo una sola pasada secuencial.
+  if (OGR_L_SetNextByIndex(mLayerHandle, static_cast<GIntBig>(firstRow)) != OGRERR_NONE)
+  {
+    OGR_L_ResetReading(mLayerHandle);
+    for (qint64 skipped = 0; skipped < firstRow; ++skipped)
+    {
+      OGRFeatureH skip = OGR_L_GetNextFeature(mLayerHandle);
+      if (!skip)
+        return rows;
+      OGR_F_Destroy(skip);
+    }
+  }
+
+  rows.reserve(static_cast<int>(wanted));
+  for (qint64 i = 0; i < wanted; ++i)
+  {
+    OGRFeatureH feature = OGR_L_GetNextFeature(mLayerHandle);
+    if (!feature)
+      break;
+
+    ++mAttributeReads;
+
+    QVector<QString> values;
+    values.reserve(mFields.size());
+    for (int field = 0; field < mFields.size(); ++field)
+    {
+      QString value;
+      if (OGR_F_IsFieldSetAndNotNull(feature, field))
+      {
+        const char *raw = OGR_F_GetFieldAsString(feature, field);
+        if (raw)
+          value = QString::fromUtf8(raw);
+      }
+      values.append(value);
+    }
+
+    OGR_F_Destroy(feature);
+    rows.append(values);
+  }
+
+  return rows;
+}
+
 void VectorLayer::ensureRowToFid() const
 {
   if (mRowMapReady)

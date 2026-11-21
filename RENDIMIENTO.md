@@ -1323,3 +1323,115 @@ Pruebas nuevas: `minigis.geoparquet-info`, `-utm`, `-snapshot`, `-check`,
 `-mixto`, `-sin-geometria`, `-sin-crs`, `-vacio`, `-fid`, `-tabla`,
 `-carpeta` y `-sin-driver` (12). Total del proyecto: 51 pruebas (48 en verde,
 3 de PostGIS omitidas sin servidor).
+
+---
+
+## 15. Capas vectoriales grandes: el caso de los rios topograficos de LINZ (2026-11-21)
+
+Medicion sobre una capa real de **711 574 lineas** y **13,5 M de vertices** en
+GeoParquet (`nz-river-centrelines-topo-150k.parquet`, 226,5 MB, EPSG:2193), con
+una sola tabla de atributos (`t50_fid`). El archivo no se versiona: las pruebas
+que lo usan son *opt-in* por variable de entorno.
+
+### 15.1 Lo que pasaba
+
+| Sintoma medido (Release, 1200x800) | Antes |
+|---|---|
+| Cuadro de paneo/zoom (mediana) | **21,3 s** (0,05 fps) |
+| `--snapshot` a 1600x900 (render) | **20,2 s** |
+| `--snapshot` con zoom (render) | **11,7 s** |
+| `--snapshot-window` sin tabla | **34,3 s** |
+| `--snapshot-window --with-attributes` | **531,4 s** |
+| `--identify-at` (consulta) | 576 ms |
+| `--check-geoparquet` | 1,66 s, **almacen no construido** (`storeFeatures: -1`) |
+
+Causas, por orden de impacto:
+
+1. `GeometryStore` estimaba 22,1 M de vertices sobre los primeros 512 elementos y
+   se rendia ante el tope fijo de 8 M (`vertexBudget`). Sin almacen no hay
+   indice espacial ni niveles de detalle.
+2. El respaldo de indice de envolventes solo existe para shapefile, asi que un
+   Parquet grande caia al **camino clasico**: leer y reproyectar los 711 574
+   elementos **en cada cuadro**.
+3. El filtro espacial del render se desactiva cuando hay reproyeccion
+   (`mUseSpatialFilter && !transformation`), de modo que `--spatial-filter` no
+   ayudaba con una capa en EPSG:2193 sobre un lienzo en EPSG:4326.
+4. La simplificacion aplicaba a las lineas el minimo de 4 vertices de los
+   poligonos: cada rio reducido a 2 puntos se restauraba entero y los niveles de
+   detalle no reducian nada.
+5. La tabla de atributos pedia las filas de una en una con `OGR_L_GetFeature(fid)`
+   (hasta 100 000 filas): en Parquet una lectura aleatoria cuesta decenas de
+   milisegundos y el `--snapshot-window --with-attributes` se iba a 8,8 minutos.
+
+### 15.2 Lo que se cambio
+
+* **Presupuesto de 1 GB duro** (`GeometryStore::Options::budgetBytes`), con el
+  tope de 8 M de vertices como suelo y `MINIGIS_STORE_BUDGET_MB` para bajarlo.
+  El limite de vertices se deriva del presupuesto (1 GB -> ~48 M vertices).
+* **Simplificacion correcta por tipo**: 2 vertices minimos en polilineas y 4 en
+  poligonos. Los niveles de detalle vuelven a reducir (nivel 10: 1,49 M vertices
+  frente a 13,49 M del nivel 0).
+* **Elementos sub-pixel como puntos**: en modo memoria, una linea cuya envolvente
+  mide menos de `minimumGeometryPixels` (2 px) se dibuja como punto, muestreada
+  con `dotBudget` (150 000). Solo se trazan los elementos que ocupan pixeles. Es
+  la diferencia entre 900 ms y 50 ms con la capa entera en pantalla, y a esa
+  escala el resultado es indistinguible (el render anterior ya era una mancha de
+  densidad).
+* **Tabla por paginas**: `VectorLayer::fieldValuesPage` lee 128 filas contiguas
+  con `OGR_L_SetNextByIndex` + `GetNextFeature`; el modelo cachea 4 paginas. Se
+  acabo el acceso aleatorio por fila.
+* **Identificar**: los atributos de los elementos identificados se leen en una
+  sola pasada con el filtro espacial del clic, no con una lectura aleatoria por
+  resultado (de ~400 ms a ~160 ms).
+* **Diagnostico**: `--bench --json` publica `store.read_ms`, `index_ms` y
+  `levels_ms`, ademas de los campos que ya tenia.
+
+### 15.3 Despues
+
+| Medicion (Release, este equipo) | Antes | Despues | Objetivo |
+|---|---|---|---|
+| `--info --json` | 2,38 s (frio) | 0,10 s (caliente) | <= 2,5 s |
+| `--check-geoparquet --json` | 1,66 s sin almacen | **5,34 s con 711 574 en el almacen** | <= 10 s |
+| Cuadro de paneo/zoom, mediana / p90 (24 cuadros) | 21,3 s / 22,3 s | **47-52 ms / 50-54 ms** | <= 200 / 400 ms |
+| `--snapshot` 1600x900, render | 20,2 s | **57-64 ms** | <= 0,4 s |
+| `--snapshot` con zoom, render | 11,7 s | **29 ms** | <= 0,3 s |
+| `--snapshot-window` sin tabla | 34,3 s | **4,86 s** | <= 10 s |
+| `--snapshot-window --with-attributes` | 531,4 s | **4,92 s** | <= 12 s |
+| `--identify-at` (consulta) | 576 ms | **160-250 ms** | <= 300 ms |
+| Almacen: construccion / memoria | no se construia | **4,45 s / 388 MB** | <= 1 GB |
+| RAM maxima del proceso | — | **732 MB** | <= 1,5 GB |
+
+Desglose de la construccion del almacen (`--bench --json`): lectura 3 512 ms,
+indice 125 ms, niveles 783 ms. La carga de la ventana (4,86 s) es casi toda esa
+construccion; el primer cuadro despues es de decenas de milisegundos.
+
+### 15.4 Reproducir
+
+```bat
+set MINIGIS_GEOPARQUET_BENCH_DATASET=E:\Disco D\IRIS 4.0\2026\lds-new-zealand-2layers-SHP\lds-nz-river-centrelines-topo-150k-Parquet\nz-river-centrelines-topo-150k.parquet
+set MINIGIS_GEOPARQUET_BUDGET_MS=200
+ctest --preset windows-msvc-release -R minigis.rendimiento-geoparquet --output-on-failure
+
+:: a mano
+bin\minigis.exe --check-geoparquet --json -l "%MINIGIS_GEOPARQUET_BENCH_DATASET%"
+bin\minigis.exe --bench 24 --bench-scenario mixed --size 1200x800 --json -l "%MINIGIS_GEOPARQUET_BENCH_DATASET%"
+bin\minigis.exe --snapshot m.png -l "%MINIGIS_GEOPARQUET_BENCH_DATASET%" --size 1600x900
+bin\minigis.exe --identify-at 172.6,-41.3 --json -l "%MINIGIS_GEOPARQUET_BENCH_DATASET%"
+```
+
+Para bajar el presupuesto en equipos con poca RAM (p. ej. 256 MB):
+
+```bat
+set MINIGIS_STORE_BUDGET_MB=256
+```
+
+### 15.5 Limites
+
+* La memoria del almacen es **1 GB duro**; una capa que no quepa sigue cayendo al
+  camino clasico (se avisa en el panel). El indice de envolventes para Parquet
+  queda como trabajo posterior.
+* A escala nacional los rios se dibujan como nube de puntos muestreada (150 000
+  puntos de 711 574): es un mapa de densidad, no el trazado de cada rio. Al
+  acercarse, los elementos que ocupan pixeles vuelven a trazarse.
+* La construccion del almacen (4,5 s para esta capa) se paga la primera vez que
+  se abre; el resto de cuadros no vuelven a leer el archivo.

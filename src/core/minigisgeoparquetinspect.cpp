@@ -92,6 +92,8 @@ QJsonObject layerJson(const GeoParquetLayerReport &layer)
   json.insert(QStringLiteral("fields"), fields);
   json.insert(QStringLiteral("fidColumn"), layer.fidColumn);
   json.insert(QStringLiteral("attributeCache"), layer.attributeCache);
+  if (layer.attributePageChecked)
+    json.insert(QStringLiteral("attributePage"), layer.attributePage);
   return json;
 }
 
@@ -124,6 +126,8 @@ bool GeoParquetReport::ok() const
   for (const GeoParquetLayerReport &layer : layers)
   {
     if (layer.unsupportedParts > 0 || layer.missingInStore() || !layer.attributeCache)
+      return false;
+    if (layer.attributePageChecked && !layer.attributePage)
       return false;
   }
   return true;
@@ -274,6 +278,34 @@ bool inspectGeoParquet(const QString &path, GeoParquetReport *report, Error *err
       const QVector<QString> again = layer->fieldValues(0);
       layerReport.attributeCache =
         !first.isEmpty() && again == first && layer->attributeReads() == readsBefore;
+
+      // La tabla lee por paginas (128 filas) para no hacer una lectura aleatoria
+      // por fila. En los fixtures pequenos se compara cada fila de la pagina con
+      // su lectura suelta; con la capa real (711 000 filas) no se hace para no
+      // meter miles de lecturas aleatorias en el diagnostico.
+      const qint64 total = layer->featureCount();
+      if (total <= 1000)
+      {
+        bool pageOk = true;
+        const qint64 starts[] = {0, total / 2};
+        for (const qint64 start : starts)
+        {
+          const int count = static_cast<int>(std::min<qint64>(16, total - start));
+          const QVector<QVector<QString>> page = layer->fieldValuesPage(start, count);
+          if (page.size() != count)
+          {
+            pageOk = false;
+            continue;
+          }
+          for (int row = 0; row < count; ++row)
+          {
+            if (page.at(row) != layer->fieldValues(start + row))
+              pageOk = false;
+          }
+        }
+        layerReport.attributePageChecked = true;
+        layerReport.attributePage = pageOk;
+      }
     }
 
     countLayer(*layer, &layerReport);
