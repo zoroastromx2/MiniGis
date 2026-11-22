@@ -25,6 +25,12 @@ set(MINIGIS_CORE_SRCS
   minigisrasterstyle.h
   minigisrasterlayer.h
   minigisrasterlayer.cpp
+  minigismosaiclayer.h
+  minigismosaiclayer.cpp
+  minigismosaicreplica.h
+  minigismosaicreplica.cpp
+  minigismosaicloader.h
+  minigismosaicloader.cpp
   minigisrasterrenderer.h
   minigisrasterrenderer.cpp
   minigisvectorlayer.h

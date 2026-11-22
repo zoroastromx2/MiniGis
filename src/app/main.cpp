@@ -74,6 +74,10 @@ constexpr unsigned int kUtf8CodePage = 65001;
 #include "minigislayerpanel.h"
 #include "minigismainwindow.h"
 #include "minigismapcanvas.h"
+#include "minigisloadprogressdialog.h"
+#include "minigismosaiclayer.h"
+#include "minigismosaicloader.h"
+#include "minigismosaicreplica.h"
 #include "minigispgcatalog.h"
 #include "minigispgcheck.h"
 #include "minigispgsource.h"
@@ -599,6 +603,63 @@ QStringList collectProjectPaths(const QCommandLineParser &parser)
   return paths;
 }
 
+/**
+ * Rutas de un archivo de lista (--layer-list): una por linea, con # o ; para
+ * comentarios. Las relativas se resuelven contra la carpeta del archivo.
+ *
+ * Existe porque 508 opciones -l superan el limite de 32767 caracteres de la
+ * linea de comandos de Windows: sin esto, la puerta de rendimiento con la
+ * cobertura real no se puede ejecutar (el proceso ni arranca).
+ */
+QStringList readLayerList(const QString &listPath, QString *error)
+{
+  *error = QString();
+
+  QFile file(listPath);
+  if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+  {
+    *error = QStringLiteral("No se pudo abrir la lista de capas «%1». Comprueba la ruta.")
+               .arg(QDir::toNativeSeparators(listPath));
+    return {};
+  }
+
+  const QDir baseDir = QFileInfo(listPath).absoluteDir();
+  QStringList paths;
+  int lineNumber = 0;
+
+  while (!file.atEnd())
+  {
+    ++lineNumber;
+    QString line = QString::fromUtf8(file.readLine()).trimmed();
+    if (line.isEmpty() || line.startsWith(QLatin1Char('#')) || line.startsWith(QLatin1Char(';')))
+      continue;
+
+    if (line.size() >= 2 && line.startsWith(QLatin1Char('"')) && line.endsWith(QLatin1Char('"')))
+      line = line.mid(1, line.size() - 2).trimmed();
+
+    const bool pgSource = PgSource::looksLike(line);
+    QString resolved = line;
+    if (!pgSource && !QFileInfo(line).isAbsolute())
+      resolved = baseDir.absoluteFilePath(line);
+
+    // Una lista es una declaracion explicita: si una ruta no existe se dice cual
+    // y en que linea, antes de que un modo se limite a saltarsela.
+    if (!pgSource && !QFileInfo::exists(resolved))
+    {
+      *error = QStringLiteral("No existe el archivo de la linea %1 de la lista: %2")
+                 .arg(lineNumber)
+                 .arg(QDir::toNativeSeparators(resolved));
+      return {};
+    }
+
+    if (!paths.contains(resolved))
+      paths << resolved;
+  }
+
+  return paths;
+}
+
+/** Redondeo de las cifras del JSON, para que la salida sea estable. */
 double roundedForJson(double value)
 {
   return std::round(value * 10000.0) / 10000.0;
@@ -915,6 +976,8 @@ struct BenchRequest
   qint64 budgetMs = 0;
   bool spatialFilter = false;
   bool asJson = false;
+  /** Con --layer-list los raster se miden como UN mosaico (no como N capas). */
+  bool rasterMosaic = false;
   /** Con --pg-no-index: no construir almacen para fuentes pg: (tablas enormes). */
   bool pgNoIndex = false;
 };
@@ -954,6 +1017,7 @@ int runBenchmark(const BenchRequest &request)
 
   int opened = 0;
   int rasterLayers = 0;
+  std::shared_ptr<RasterMosaic> benchMosaic;
   for (const QString &path : request.layerPaths)
   {
     if (!sourceExists(path))
@@ -984,6 +1048,23 @@ int runBenchmark(const BenchRequest &request)
         return ExitOpenFailed;
       }
 
+      if (request.rasterMosaic)
+      {
+        if (!benchMosaic)
+          benchMosaic = RasterMosaic::create(request.destinationEpsg);
+
+        Error mosaicError;
+        if (!benchMosaic->addTile(raster, &mosaicError))
+        {
+          writeErr(mosaicError.toText());
+          return ExitOpenFailed;
+        }
+
+        layerNames << raster->name();
+        ++opened;
+        continue;
+      }
+
       canvas.addRasterLayer(raster, opened == 0);
       layerNames << raster->name();
       ++rasterLayers;
@@ -995,7 +1076,6 @@ int runBenchmark(const BenchRequest &request)
                    .arg(raster->bandCount()));
       continue;
     }
-
     for (int layerIndex = 0; layerIndex < names.size(); ++layerIndex)
     {
       Error layerError;
@@ -1065,6 +1145,14 @@ int runBenchmark(const BenchRequest &request)
   {
     writeErr(QStringLiteral("No hay capas que medir: indica una con --layer <archivo>."));
     return ExitNoLayers;
+  }
+
+  if (benchMosaic)
+  {
+    canvas.addMosaic(benchMosaic, true);
+    ++rasterLayers;
+    logVerbose(QStringLiteral("mosaico de medida: %1 hojas en un solo grupo")
+                 .arg(benchMosaic->tileCount()));
   }
 
   canvas.setExtent(request.extent.isValid() ? request.extent : canvas.layersExtent());
@@ -2864,6 +2952,857 @@ int checkRaster(const QStringList &layerPaths, const QSize &size, bool asJson)
   return ok ? ExitOk : ExitRenderFailed;
 }
 
+// ---------------------------------------------------------------------------
+// Mosaico: diagnostico sin ventana
+// ---------------------------------------------------------------------------
+
+/** Punto de mapa a pixel de una imagen ya renderizada (misma cuenta que MapCanvas). */
+QPointF mapPointToImagePixel(const Rectangle &extent, const QSize &size, double x, double y)
+{
+  const double scale = std::min(static_cast<double>(size.width()) / extent.width(),
+                                static_cast<double>(size.height()) / extent.height());
+  const double offsetX = (size.width() - extent.width() * scale) / 2.0;
+  const double offsetY = (size.height() - extent.height() * scale) / 2.0;
+  return QPointF(offsetX + (x - extent.xMin()) * scale, offsetY + (extent.yMax() - y) * scale);
+}
+
+QColor imageColorAt(const QImage &image, const QPointF &point)
+{
+  const int x = std::clamp(static_cast<int>(std::lround(point.x())), 0, image.width() - 1);
+  const int y = std::clamp(static_cast<int>(std::lround(point.y())), 0, image.height() - 1);
+  return image.pixelColor(x, y);
+}
+
+bool imageColorClose(const QColor &left, const QColor &right, int tolerance)
+{
+  return std::abs(left.red() - right.red()) <= tolerance
+         && std::abs(left.green() - right.green()) <= tolerance
+         && std::abs(left.blue() - right.blue()) <= tolerance;
+}
+
+/** Muestra del bloque central de una hoja, leida del archivo original. */
+struct TileCenterSample
+{
+  bool valid = false;
+  bool uniform = false;
+  QColor color;
+};
+
+TileCenterSample readTileCenterSample(RasterLayer &tile)
+{
+  TileCenterSample sample;
+  GDALDatasetH dataset = tile.datasetHandle();
+  if (!dataset || tile.bandCount() < 3)
+    return sample;
+
+  for (int band = 1; band <= 3; ++band)
+  {
+    if (GDALGetRasterDataType(GDALGetRasterBand(dataset, band)) != GDT_Byte)
+      return sample;
+  }
+
+  const int block = std::min({4, tile.width(), tile.height()});
+  if (block <= 0)
+    return sample;
+
+  const int x = tile.width() / 2 - block / 2;
+  const int y = tile.height() / 2 - block / 2;
+
+  int bands[3] = {1, 2, 3};
+  std::vector<unsigned char> buffer(static_cast<size_t>(block) * static_cast<size_t>(block) * 3);
+  if (GDALDatasetRasterIO(dataset, GF_Read, x, y, block, block, buffer.data(), block, block, GDT_Byte, 3,
+                          bands, 0, 0, 0)
+      != CE_None)
+    return sample;
+
+  qint64 sum[3] = {0, 0, 0};
+  int minimum[3] = {255, 255, 255};
+  int maximum[3] = {0, 0, 0};
+  const int count = block * block;
+  // GDALDatasetRasterIO entrega las bandas APILADAS (plano 0 completo, plano 1,
+  // plano 2), no entrelazadas por pixel.
+  for (int pixel = 0; pixel < count; ++pixel)
+  {
+    for (int channel = 0; channel < 3; ++channel)
+    {
+      const int value = buffer[static_cast<size_t>(channel) * static_cast<size_t>(count)
+                               + static_cast<size_t>(pixel)];
+      sum[channel] += value;
+      minimum[channel] = std::min(minimum[channel], value);
+      maximum[channel] = std::max(maximum[channel], value);
+    }
+  }
+
+  sample.color = QColor(static_cast<int>(sum[0] / count), static_cast<int>(sum[1] / count),
+                        static_cast<int>(sum[2] / count));
+  sample.uniform = (maximum[0] - minimum[0] <= 2) && (maximum[1] - minimum[1] <= 2)
+                   && (maximum[2] - minimum[2] <= 2);
+  sample.valid = true;
+  return sample;
+}
+
+/**
+ * Diagnostico del mosaico (sin ventana).
+ *
+ * Comprueba lo que una medida de rendimiento no ve: que estan todas las hojas,
+ * que la union de extensiones es la que dicta GDAL, que cada hoja se dibuja en
+ * su sitio y que dos hojas contiguas no dejan costura.
+ */
+int checkMosaic(const QStringList &layerPaths, const QSize &size, bool asJson,
+                const MosaicReplicaOptions &replicaOptions)
+{
+  if (layerPaths.isEmpty())
+  {
+    writeErr(QStringLiteral("Se necesita al menos una hoja, por ejemplo:"));
+    writeErr(QStringLiteral("  minigis --check-mosaic -l data/sample/mosaico/hoja_1_1.tif -l "
+                            "data/sample/mosaico/hoja_1_2.tif"));
+    return ExitUsage;
+  }
+
+  std::vector<std::shared_ptr<RasterLayer>> tiles;
+  tiles.reserve(static_cast<size_t>(layerPaths.size()));
+  for (const QString &path : layerPaths)
+  {
+    if (!QFileInfo::exists(path))
+    {
+      writeErr(QStringLiteral("No existe el archivo: %1").arg(QDir::toNativeSeparators(path)));
+      return ExitFileNotFound;
+    }
+
+    Error error;
+    const std::shared_ptr<RasterLayer> tile = RasterLayer::open(path, &error);
+    if (!tile)
+    {
+      writeErr(error.toText());
+      return ExitOpenFailed;
+    }
+    tiles.push_back(tile);
+  }
+
+  const std::shared_ptr<RasterMosaic> mosaic = RasterMosaic::create(4326);
+  for (const std::shared_ptr<RasterLayer> &tile : tiles)
+  {
+    Error error;
+    if (!mosaic->addTile(tile, &error))
+    {
+      writeErr(error.toText());
+      return ExitOpenFailed;
+    }
+  }
+
+  bool ok = true;
+  QJsonArray jsonChecks;
+  const auto check = [&ok, &jsonChecks, asJson](const QString &name, bool passed, const QString &detail,
+                                                const QJsonObject &values = QJsonObject()) {
+    writeOut(QStringLiteral("%1 %2%3")
+               .arg(passed ? QStringLiteral("OK  ") : QStringLiteral("FALLO"))
+               .arg(name, detail.isEmpty() ? QString() : QStringLiteral(" — ") + detail));
+    if (!passed)
+      ok = false;
+
+    if (asJson)
+    {
+      QJsonObject entry;
+      entry.insert(QStringLiteral("name"), name);
+      entry.insert(QStringLiteral("ok"), passed);
+      entry.insert(QStringLiteral("detail"), detail);
+      if (!values.isEmpty())
+        entry.insert(QStringLiteral("values"), values);
+      jsonChecks.append(entry);
+    }
+  };
+
+  const QColor background(248, 248, 244);
+
+  /** Deja en -V lo que hizo cada cuadro: es la unica forma de ver el descarte. */
+  const auto logFrame = [](const MapCanvas &frameCanvas, const char *label) {
+    const RasterRenderer::FrameStats &stats = frameCanvas.rasterFrameStats();
+    logVerbose(QStringLiteral("cuadro %1: %2 ms, %3 hojas leidas de %4 visibles, %5 warps, %6 MB, %7 px")
+                 .arg(QString::fromLatin1(label))
+                 .arg(frameCanvas.lastRenderMilliseconds())
+                 .arg(stats.tilesRead)
+                 .arg(stats.tilesVisible)
+                 .arg(stats.warpsCreated)
+                 .arg(QString::number(static_cast<double>(stats.bytesRead) / (1024.0 * 1024.0), 'f', 2))
+                 .arg(stats.pixelsDrawn));
+  };
+
+  // 1) Todas las hojas estan registradas.
+  check(QStringLiteral("todas las hojas estan en el mosaico"), mosaic->tileCount() == tiles.size(),
+        QStringLiteral("%1 de %2 hojas").arg(mosaic->tileCount()).arg(tiles.size()));
+
+  // 2) La extension union es la que dicta GDAL (una hoja por una), con tolerancia
+  //    de un pixel del lienzo.
+  Rectangle expectedExtent;
+  for (const std::shared_ptr<RasterLayer> &tile : tiles)
+    expectedExtent.combine(tile->extentInEpsg(4326));
+
+  const Rectangle mosaicExtent = mosaic->extentInEpsg(4326);
+  const double pixelSize = std::max(mosaicExtent.width() / std::max(1, size.width()),
+                                    mosaicExtent.height() / std::max(1, size.height()));
+  const double extentError =
+    std::max({std::abs(mosaicExtent.xMin() - expectedExtent.xMin()),
+              std::abs(mosaicExtent.yMin() - expectedExtent.yMin()),
+              std::abs(mosaicExtent.xMax() - expectedExtent.xMax()),
+              std::abs(mosaicExtent.yMax() - expectedExtent.yMax())})
+    / pixelSize;
+  check(QStringLiteral("la extension union coincide con GDAL"), extentError <= 1.0,
+        QStringLiteral("error %1 px").arg(QString::number(extentError, 'f', 2)),
+        QJsonObject {{QStringLiteral("extent_error_px"), roundedForJson(extentError)}});
+
+  // La replica se prepara ANTES de dibujar la union: es el camino que usa la
+  // aplicacion para la vista de pais, y evita dibujar cientos de hojas por el
+  // camino de detalle (que solo se usa con pocas hojas en pantalla).
+  MosaicReplicaState replicaState;
+  if (replicaOptions.enabled)
+  {
+    const auto progressSink = [](int percent, const QString &message) {
+      logVerbose(QStringLiteral("replica %1 %: %2").arg(percent).arg(message));
+      return true;
+    };
+
+    replicaState = MosaicReplica::prepare(*mosaic, 4326, replicaOptions, progressSink);
+    if (replicaState.available)
+      mosaic->setReplica(replicaState.path, replicaState.pixelSize, replicaState.pixels);
+  }
+  else
+  {
+    replicaState.message = QStringLiteral("Replica desactivada (--no-mosaic-replica).");
+  }
+  // 3) Cada hoja se dibuja en su sitio: se lee el bloque central de la hoja y se
+  //    compara con el pixel del lienzo en ese punto del mapa.
+  MapCanvas canvas;
+  canvas.setDestinationEpsg(4326);
+  canvas.resize(size);
+  canvas.addMosaic(mosaic, false);
+  canvas.setExtent(mosaicExtent);
+  logVerbose(QStringLiteral("mosaico: %1 hojas, visible=%2, extension=%3; lienzo=%4")
+               .arg(mosaic->tileCount())
+               .arg(mosaic->isVisible() ? QStringLiteral("si") : QStringLiteral("no"))
+               .arg(mosaic->extentInEpsg(4326).toString(), canvas.extent().toString()));
+  const QImage image = canvas.renderToImage(size);
+  if (g_verbose)
+    image.save(QStringLiteral("build/debug_union.png"));
+  const Rectangle view = canvas.extent();
+  logFrame(canvas, "union");
+
+  const RasterRenderer::FrameStats unionStats = canvas.rasterFrameStats();
+
+  const int step = std::max(1, mosaic->tileCount() / 8);
+  const auto countPlacedTiles = [&](const QImage &frame, const Rectangle &frameView, int *placed,
+                                    int *checked, double *worstDelta) {
+    *placed = 0;
+    *checked = 0;
+    *worstDelta = 0.0;
+
+    for (int index = 0; index < mosaic->tileCount(); index += step)
+    {
+      const std::shared_ptr<RasterLayer> tile = mosaic->tile(index);
+      if (!tile)
+        continue;
+
+      const TileCenterSample sample = readTileCenterSample(*tile);
+      if (!sample.valid)
+        continue;
+
+      const double *geoTransform = tile->geoTransform();
+      const double mapX = geoTransform[0] + (tile->width() / 2.0) * geoTransform[1]
+                          + (tile->height() / 2.0) * geoTransform[2];
+      const double mapY = geoTransform[3] + (tile->width() / 2.0) * geoTransform[4]
+                          + (tile->height() / 2.0) * geoTransform[5];
+
+      double longitude = 0.0;
+      double latitude = 0.0;
+      if (!transformRasterPointTo4326(*tile, mapX, mapY, &longitude, &latitude))
+        continue;
+
+      const QPointF pixel = mapPointToImagePixel(frameView, size, longitude, latitude);
+      if (!QRectF(0.0, 0.0, size.width(), size.height()).contains(pixel))
+        continue;
+
+      const QColor drawn = imageColorAt(frame, pixel);
+      ++(*checked);
+
+      if (sample.uniform)
+      {
+        // Bloque de color plano (fixture): el color tiene que ser ese.
+        const int delta = std::max({std::abs(drawn.red() - sample.color.red()),
+                                    std::abs(drawn.green() - sample.color.green()),
+                                    std::abs(drawn.blue() - sample.color.blue())});
+        *worstDelta = std::max(*worstDelta, static_cast<double>(delta));
+        if (delta <= 2)
+          ++(*placed);
+      }
+      else if (!imageColorClose(drawn, background, 3))
+      {
+        // Imagen real: se comprueba que ahi hay imagen y no el fondo del lienzo.
+        ++(*placed);
+      }
+    }
+  };
+
+  int placed = 0;
+  int placedChecked = 0;
+  double worstDelta = 0.0;
+  countPlacedTiles(image, view, &placed, &placedChecked, &worstDelta);
+  check(QStringLiteral("cada hoja se dibuja en su sitio"),
+        placedChecked > 0 && placed == placedChecked,
+        QStringLiteral("%1 de %2 muestras, peor diferencia %3")
+          .arg(placed)
+          .arg(placedChecked)
+          .arg(worstDelta, 0, 'f', 0),
+        QJsonObject {{QStringLiteral("tiles_placed"), placed},
+                     {QStringLiteral("tiles_checked"), placedChecked},
+                     {QStringLiteral("worst_delta"), roundedForJson(worstDelta)}});
+
+  // 4) Sin costuras: se encuadra una franja a caballo entre dos hojas contiguas
+  //    y no puede aparecer ni un pixel del fondo del lienzo (un hueco en la
+  //    union se ve exactamente asi).
+  //
+  //    La contigüidad se busca en la rejilla ORIGINAL de las hojas: en el SRC del
+  //    lienzo estan giradas y sus envolventes ya no comparten borde exacto, asi
+  //    que comparar extensiones reproyectadas no encontraria ninguna pareja.
+  Rectangle seamStrip;
+  int seamA = -1;
+  int seamB = -1;
+  bool sideBySide = false;
+  double seamLongitude = 0.0;
+  double seamLatitude = 0.0;
+  const std::vector<Rectangle> &extents4326 = mosaic->tileExtents(4326);
+
+  for (int a = 0; a < static_cast<int>(tiles.size()) && !seamStrip.isValid(); ++a)
+  {
+    for (int b = a + 1; b < static_cast<int>(tiles.size()); ++b)
+    {
+      const Rectangle first = tiles[static_cast<size_t>(a)]->extent();
+      const Rectangle second = tiles[static_cast<size_t>(b)]->extent();
+      if (!first.isValid() || !second.isValid())
+        continue;
+
+      const double tolerance = 1e-6 * std::max(first.width(), first.height());
+      const double verticalOverlap =
+        std::min(first.yMax(), second.yMax()) - std::max(first.yMin(), second.yMin());
+      const double horizontalOverlap =
+        std::min(first.xMax(), second.xMax()) - std::max(first.xMin(), second.xMin());
+
+      double seamX = 0.0;
+      double seamY = 0.0;
+      bool found = false;
+
+      // Lado a lado (cualquiera de los dos ordenes).
+      if (verticalOverlap >= 0.5 * std::min(first.height(), second.height())
+          && std::abs(first.xMax() - second.xMin()) <= tolerance)
+      {
+        seamX = first.xMax();
+        seamY = (std::max(first.yMin(), second.yMin()) + std::min(first.yMax(), second.yMax())) / 2.0;
+        found = true;
+        sideBySide = true;
+      }
+      else if (verticalOverlap >= 0.5 * std::min(first.height(), second.height())
+               && std::abs(second.xMax() - first.xMin()) <= tolerance)
+      {
+        seamX = second.xMax();
+        seamY = (std::max(first.yMin(), second.yMin()) + std::min(first.yMax(), second.yMax())) / 2.0;
+        found = true;
+        sideBySide = true;
+      }
+      // Apiladas (una encima de la otra).
+      else if (horizontalOverlap >= 0.5 * std::min(first.width(), second.width())
+               && std::abs(first.yMin() - second.yMax()) <= tolerance)
+      {
+        seamY = first.yMin();
+        seamX = (std::max(first.xMin(), second.xMin()) + std::min(first.xMax(), second.xMax())) / 2.0;
+        found = true;
+        sideBySide = false;
+      }
+      else if (horizontalOverlap >= 0.5 * std::min(first.width(), second.width())
+               && std::abs(second.yMin() - first.yMax()) <= tolerance)
+      {
+        seamY = second.yMin();
+        seamX = (std::max(first.xMin(), second.xMin()) + std::min(first.xMax(), second.xMax())) / 2.0;
+        found = true;
+        sideBySide = false;
+      }
+
+      if (!found)
+        continue;
+
+      double longitude = 0.0;
+      double latitude = 0.0;
+      if (!transformRasterPointTo4326(*tiles[static_cast<size_t>(a)], seamX, seamY, &longitude, &latitude))
+        continue;
+
+      // Franja pequena alrededor del punto medio de la costura: honda dentro de
+      // las dos hojas, para que no entre el borde exterior de la union.
+      const Rectangle &first4326 = extents4326[static_cast<size_t>(a)];
+      const double halfWidth = 0.05 * first4326.width();
+      const double halfHeight = 0.05 * first4326.height();
+      if (halfWidth <= 0.0 || halfHeight <= 0.0)
+        continue;
+
+      seamStrip = Rectangle(longitude - halfWidth, latitude - halfHeight, longitude + halfWidth,
+                            latitude + halfHeight);
+      seamLongitude = longitude;
+      seamLatitude = latitude;
+      seamA = a;
+      seamB = b;
+      break;
+    }
+  }
+
+  if (!seamStrip.isValid() || seamA < 0)
+  {
+    check(QStringLiteral("sin costuras entre hojas contiguas"), true,
+          QStringLiteral("OMITIDA: no hay hojas contiguas"));
+  }
+  else
+  {
+    MapCanvas seamCanvas;
+    seamCanvas.setDestinationEpsg(4326);
+    seamCanvas.resize(size);
+    seamCanvas.addMosaic(mosaic, false);
+    seamCanvas.setExtent(seamStrip);
+    const QImage seamImage = seamCanvas.renderToImage(size);
+    logFrame(seamCanvas, "costura");
+
+    qint64 backgroundPixels = 0;
+    const QPointF seamPixel = mapPointToImagePixel(seamImage.isNull() ? seamStrip : seamCanvas.extent(),
+                                                   size, seamLongitude, seamLatitude);
+    const int seamCenterX = std::clamp(static_cast<int>(std::lround(seamPixel.x())), 0, size.width() - 1);
+    const int seamCenterY = std::clamp(static_cast<int>(std::lround(seamPixel.y())), 0, size.height() - 1);
+
+    // Se cuenta solo una banda de +-2 px sobre la linea de union: es donde un
+    // hueco se ve; el resto de la franja es imagen de las dos hojas.
+    for (int y = 2; y < seamImage.height() - 2; ++y)
+    {
+      for (int x = 2; x < seamImage.width() - 2; ++x)
+      {
+        if (sideBySide)
+        {
+          if (std::abs(x - seamCenterX) > 2)
+            continue;
+        }
+        else if (std::abs(y - seamCenterY) > 2)
+        {
+          continue;
+        }
+
+        if (imageColorClose(seamImage.pixelColor(x, y), background, 2))
+          ++backgroundPixels;
+      }
+    }
+
+    QJsonArray seamTiles;
+    seamTiles.append(mosaic->tile(seamA)->name());
+    seamTiles.append(mosaic->tile(seamB)->name());
+
+    check(QStringLiteral("sin costuras entre hojas contiguas"), backgroundPixels == 0,
+          QStringLiteral("%1 pixeles de fondo entre las hojas %2 y %3 (%4)")
+            .arg(backgroundPixels)
+            .arg(seamA + 1)
+            .arg(seamB + 1)
+            .arg(sideBySide ? QStringLiteral("lado a lado") : QStringLiteral("apiladas")),
+          QJsonObject {{QStringLiteral("seam_background_pixels"), backgroundPixels},
+                       {QStringLiteral("seam_tiles"), seamTiles}});
+  }
+
+  // 5) Replica piramidal: se construye (o se reutiliza) y reproduce el mosaico.
+
+  check(QStringLiteral("la replica del mosaico esta disponible"), replicaState.available,
+        replicaState.available
+          ? QStringLiteral("%1x%2, %3 MB, %4 niveles, %5")
+              .arg(replicaState.pixels.width())
+              .arg(replicaState.pixels.height())
+              .arg(QString::number(replicaState.bytes / (1024.0 * 1024.0), 'f', 1))
+              .arg(replicaState.levels)
+              .arg(replicaState.rebuilt ? QStringLiteral("construida") : QStringLiteral("reutilizada"))
+          : replicaState.message,
+        QJsonObject {{QStringLiteral("replica_reused"), replicaState.reused},
+                     {QStringLiteral("replica_rebuilt"), replicaState.rebuilt},
+                     {QStringLiteral("replica_pixels_x"), replicaState.pixels.width()},
+                     {QStringLiteral("replica_pixels_y"), replicaState.pixels.height()},
+                     {QStringLiteral("replica_bytes"), static_cast<double>(replicaState.bytes)},
+                     {QStringLiteral("replica_pixel_size"), roundedForJson(replicaState.pixelSize)}});
+
+  if (replicaState.available)
+  {
+    // La replica se dibuja como un raster mas: se comprueba que cada hoja sigue
+    // en su sitio leyendola a ella.
+    MapCanvas replicaCanvas;
+    replicaCanvas.setDestinationEpsg(4326);
+    replicaCanvas.resize(size);
+    replicaCanvas.addMosaic(mosaic, false);
+    replicaCanvas.setExtent(mosaicExtent);
+    const QImage replicaImage = replicaCanvas.renderToImage(size);
+    logFrame(replicaCanvas, "replica");
+
+    int replicaMatches = 0;
+    int replicaChecked = 0;
+    double replicaWorstDelta = 0.0;
+    countPlacedTiles(replicaImage, replicaCanvas.extent(), &replicaMatches, &replicaChecked, &replicaWorstDelta);
+    check(QStringLiteral("la replica reproduce las hojas"),
+          replicaChecked > 0 && replicaMatches == replicaChecked,
+          QStringLiteral("%1 de %2 muestras, peor diferencia %3")
+            .arg(replicaMatches)
+            .arg(replicaChecked)
+            .arg(replicaWorstDelta, 0, 'f', 0),
+          QJsonObject {{QStringLiteral("replica_matches"), replicaMatches},
+                       {QStringLiteral("replica_checked"), replicaChecked}});
+
+    // 6) Transicion replica/hojas: la comparacion se hace en la escala en la que
+    //    el renderizador cambia de modo (pixel de lienzo del orden del de la
+    //    replica). Comparando la vista de pais entera, la replica estaria
+    //    ampliada decenas de veces y se mediria su desenfoque, no su encaje.
+    const QSize compareSize(400, 300);
+    Rectangle compareExtent = mosaicExtent;
+    if (replicaState.pixelSize > 0.0)
+    {
+      const double width = std::min(mosaicExtent.width(), replicaState.pixelSize * compareSize.width() * 1.2);
+      const double height = width * compareSize.height() / compareSize.width();
+      if (width > 0.0 && height > 0.0)
+      {
+        compareExtent = Rectangle(mosaicExtent.centerX() - width / 2.0, mosaicExtent.centerY() - height / 2.0,
+                                  mosaicExtent.centerX() + width / 2.0, mosaicExtent.centerY() + height / 2.0);
+      }
+    }
+
+    MapCanvas replicaFrameCanvas;
+    replicaFrameCanvas.setDestinationEpsg(4326);
+    replicaFrameCanvas.resize(compareSize);
+    replicaFrameCanvas.addMosaic(mosaic, false);
+    replicaFrameCanvas.setExtent(compareExtent);
+    const QImage replicaFrame = replicaFrameCanvas.renderToImage(compareSize);
+    logFrame(replicaFrameCanvas, "replica transicion");
+
+    const QString replicaPath = replicaState.path;
+    const double replicaPixelSize = replicaState.pixelSize;
+    const QSize replicaPixels = replicaState.pixels;
+    mosaic->clearReplica();
+
+    MapCanvas tilesFrameCanvas;
+    tilesFrameCanvas.setDestinationEpsg(4326);
+    tilesFrameCanvas.resize(compareSize);
+    tilesFrameCanvas.addMosaic(mosaic, false);
+    tilesFrameCanvas.setExtent(compareExtent);
+    const QImage tilesFrame = tilesFrameCanvas.renderToImage(compareSize);
+    logFrame(tilesFrameCanvas, "hojas transicion");
+
+    mosaic->setReplica(replicaPath, replicaPixelSize, replicaPixels);
+
+    qint64 changedPixels = 0;
+    double differenceSum = 0.0;
+    for (int y = 0; y < compareSize.height(); ++y)
+    {
+      for (int x = 0; x < compareSize.width(); ++x)
+      {
+        const QColor left = replicaFrame.pixelColor(x, y);
+        const QColor right = tilesFrame.pixelColor(x, y);
+        const int delta = std::max({std::abs(left.red() - right.red()), std::abs(left.green() - right.green()),
+                                    std::abs(left.blue() - right.blue())});
+        differenceSum += std::abs(left.red() - right.red()) + std::abs(left.green() - right.green())
+                         + std::abs(left.blue() - right.blue());
+        if (delta > 8)
+          ++changedPixels;
+      }
+    }
+
+    const qint64 comparePixels = static_cast<qint64>(compareSize.width()) * compareSize.height();
+    const double changedRatio = static_cast<double>(changedPixels) / comparePixels;
+    const double meanDifference = differenceSum / (comparePixels * 3.0);
+    // La replica es una reduccion a 1/8 con JPEG y muestreo medio, y las hojas se
+    // leen a resolucion completa: en una imagen real hay pixeles que cambian de
+    // tono, no de sitio. La diferencia MEDIA es la senal de calidad; el porcentaje
+    // solo tiene que detectar una replica mal encajada (que daria ~100 %).
+    check(QStringLiteral("la replica y las hojas dan el mismo mapa"),
+          changedRatio <= 0.20 && meanDifference <= 8.0,
+          QStringLiteral("%1 % de pixeles distintos, diferencia media %2")
+            .arg(QString::number(changedRatio * 100.0, 'f', 2), QString::number(meanDifference, 'f', 2)),
+          QJsonObject {{QStringLiteral("replica_changed_ratio"), roundedForJson(changedRatio)},
+                       {QStringLiteral("replica_mean_difference"), roundedForJson(meanDifference)}});
+
+    // 12) Cache reutilizada: la segunda preparacion no reconstruye nada.
+    const MosaicReplicaState second = MosaicReplica::prepare(*mosaic, 4326, replicaOptions, {});
+    check(QStringLiteral("la segunda vez se reutiliza la cache de la replica"),
+          second.available && second.reused && !second.rebuilt && second.path == replicaState.path,
+          QStringLiteral("reutilizada=%1, construida=%2")
+            .arg(second.reused ? QStringLiteral("si") : QStringLiteral("no"),
+                 second.rebuilt ? QStringLiteral("si") : QStringLiteral("no")),
+          QJsonObject {{QStringLiteral("second_reused"), second.reused},
+                       {QStringLiteral("second_rebuilt"), second.rebuilt}});
+  }
+
+  // 7) Descarte: con la vista encima de una sola hoja solo se lee esa hoja. Si el
+  //    renderizador pidiera la vista de las demas, el coste volveria a ser el de
+  //    N capas sueltas.
+  {
+    MapCanvas oneTileCanvas;
+    oneTileCanvas.setDestinationEpsg(4326);
+    oneTileCanvas.resize(size);
+    oneTileCanvas.addMosaic(mosaic, false);
+
+    const std::vector<Rectangle> &extents4326 = mosaic->tileExtents(4326);
+    int picked = -1;
+    double bestArea = 0.0;
+    for (int index = 0; index < static_cast<int>(extents4326.size()); ++index)
+    {
+      const Rectangle &candidate = extents4326[static_cast<size_t>(index)];
+      const double area = candidate.width() * candidate.height();
+      if (candidate.isValid() && area > bestArea)
+      {
+        bestArea = area;
+        picked = index;
+      }
+    }
+
+    if (picked >= 0)
+    {
+      // La vista se encuadra en el centro de la hoja y no en su extension
+      // completa: el lienzo ajusta la escala al aspecto de la imagen, asi que
+      // encuadrar la hoja entera dejaria ver tambien a la vecina.
+      const Rectangle &tileExtent = extents4326[static_cast<size_t>(picked)];
+      const double halfWidth = tileExtent.width() * 0.25;
+      const double halfHeight = tileExtent.height() * 0.25;
+      oneTileCanvas.setExtent(Rectangle(tileExtent.centerX() - halfWidth, tileExtent.centerY() - halfHeight,
+                                        tileExtent.centerX() + halfWidth, tileExtent.centerY() + halfHeight));
+      const QImage oneTileImage = oneTileCanvas.renderToImage(size);
+      logFrame(oneTileCanvas, "una hoja");
+      const RasterRenderer::FrameStats &oneTileStats = oneTileCanvas.rasterFrameStats();
+      check(QStringLiteral("se descarta lo que no esta en la vista"),
+            !oneTileImage.isNull() && oneTileStats.tilesRead == 1,
+            QStringLiteral("%1 hojas leidas de %2 visibles")
+              .arg(oneTileStats.tilesRead)
+              .arg(oneTileStats.tilesVisible),
+            QJsonObject {{QStringLiteral("tiles_read"), oneTileStats.tilesRead},
+                         {QStringLiteral("tiles_visible"), oneTileStats.tilesVisible}});
+    }
+  }
+
+  // 8) Nivel de detalle: un zoom pequeno (misma potencia de 2 de pixel) no
+  //    rehace el warp de ninguna hoja. Es lo que hace fluido el gesto de zoom.
+  {
+    MapCanvas lodCanvas;
+    lodCanvas.setDestinationEpsg(4326);
+    lodCanvas.resize(size);
+    lodCanvas.addMosaic(mosaic, false);
+
+    lodCanvas.setExtent(mosaicExtent);
+    const QImage firstFrame = lodCanvas.renderToImage(size);
+    logFrame(lodCanvas, "lod 1");
+    const int warpsFirst = lodCanvas.rasterFrameStats().warpsCreated;
+
+    const Rectangle zoomed(mosaicExtent.centerX() - mosaicExtent.width() * 0.495,
+                           mosaicExtent.centerY() - mosaicExtent.height() * 0.495,
+                           mosaicExtent.centerX() + mosaicExtent.width() * 0.495,
+                           mosaicExtent.centerY() + mosaicExtent.height() * 0.495);
+    lodCanvas.setExtent(zoomed);
+    const QImage secondFrame = lodCanvas.renderToImage(size);
+    logFrame(lodCanvas, "lod 2");
+    const int warpsSecond = lodCanvas.rasterFrameStats().warpsCreated;
+
+    check(QStringLiteral("el zoom reutiliza los warps del nivel"),
+          !firstFrame.isNull() && !secondFrame.isNull() && warpsSecond == 0,
+          warpsFirst == 0 ? QStringLiteral("OMITIDA: el mosaico ya esta en el SRS del lienzo (no hay warps)")
+                          : QStringLiteral("%1 warps en el primer cuadro, %2 en el zoom del 1 %")
+                              .arg(warpsFirst)
+                              .arg(warpsSecond),
+          QJsonObject {{QStringLiteral("warps_first"), warpsFirst},
+                       {QStringLiteral("warps_second"), warpsSecond}});
+  }
+
+  // 9) Lectura acotada: un cuadro no puede leer mas que su propio lienzo.
+  {
+    const qint64 byteLimit = static_cast<qint64>(size.width()) * size.height() * 3 * 4;
+    check(QStringLiteral("lectura acotada al lienzo"), unionStats.bytesRead <= byteLimit,
+          QStringLiteral("%1 MB por cuadro (limite %2 MB)")
+            .arg(QString::number(unionStats.bytesRead / (1024.0 * 1024.0), 'f', 1),
+                 QString::number(byteLimit / (1024.0 * 1024.0), 'f', 1)),
+          QJsonObject {{QStringLiteral("bytes_read"), static_cast<double>(unionStats.bytesRead)},
+                       {QStringLiteral("bytes_limit"), static_cast<double>(byteLimit)}});
+  }
+
+  // Una vista de detalle comun para las comprobaciones de cache: el centro de la
+  // hoja mas grande. Se hace en vez de la union para que no cueste un cuadro de
+  // pais por comprobacion.
+  Rectangle detailExtent;
+  double bestDetailArea = 0.0;
+  for (const Rectangle &candidate : extents4326)
+  {
+    const double area = candidate.width() * candidate.height();
+    if (candidate.isValid() && area > bestDetailArea)
+    {
+      bestDetailArea = area;
+      detailExtent = candidate;
+    }
+  }
+  if (detailExtent.isValid())
+  {
+    const double centerX = detailExtent.centerX();
+    const double centerY = detailExtent.centerY();
+    const double halfWidth = detailExtent.width() * 0.25;
+    const double halfHeight = detailExtent.height() * 0.25;
+    detailExtent = Rectangle(centerX - halfWidth, centerY - halfHeight, centerX + halfWidth, centerY + halfHeight);
+  }
+
+  const auto countDifferences = [](const QImage &left, const QImage &right, int tolerance) {
+    return countVisibleDifferences(left, right, tolerance);
+  };
+
+  if (detailExtent.isValid())
+  {
+    // 10) Redibujado: cambiar la opacidad del mosaico cambia el cuadro sin mover
+    //     la vista (la revision del mosaico es la llave de la cache de cuadro).
+    MapCanvas restyleCanvas;
+    restyleCanvas.setDestinationEpsg(4326);
+    restyleCanvas.resize(size);
+    restyleCanvas.addMosaic(mosaic, false);
+    restyleCanvas.setExtent(detailExtent);
+    const QImage beforeStyle = restyleCanvas.renderToImage(size);
+
+    const RasterStyle originalStyle = mosaic->style();
+    RasterStyle fadedStyle = originalStyle;
+    fadedStyle.opacity = 40;
+    mosaic->setStyle(fadedStyle);
+    restyleCanvas.refreshMap();
+    const QImage afterStyle = restyleCanvas.renderToImage(size);
+    const qint64 restyledPixels = countDifferences(beforeStyle, afterStyle, 8);
+    mosaic->setStyle(originalStyle);
+
+    check(QStringLiteral("cambiar el estilo redibuja el mosaico"),
+          restyledPixels > 0 && restyledPixels <= static_cast<qint64>(size.width()) * size.height(),
+          QStringLiteral("%1 pixeles distintos").arg(restyledPixels),
+          QJsonObject {{QStringLiteral("restyled_pixels"), restyledPixels}});
+
+    // 11) Paneo reutilizado: desplazar el mapa sin cambiar de escala reutiliza el
+    //     cuadro anterior y el resultado coincide con redibujar desde cero. La
+    //     tolerancia cubre el remuestreo: al desplazar, la ventana de origen de
+    //     cada hoja cambia de fase y un borde de alto contraste puede caer en un
+    //     pixel distinto (con el fixture, de colores planos, el resultado es exacto).
+    const QSize panSize(640, 640);
+    MapCanvas panCanvas;
+    panCanvas.setDestinationEpsg(4326);
+    panCanvas.resize(panSize);
+    panCanvas.addMosaic(mosaic, false);
+    panCanvas.setExtent(detailExtent);
+    const QImage beforePan = panCanvas.renderToImage(panSize);
+
+    // El desplazamiento se calcula sobre la extension YA ajustada a la rejilla
+    // de pixeles (`panCanvas.extent()`), no sobre la pedida: si no, el arrastre
+    // cae en una fraccion de pixel y la franja copiada queda desalineada.
+    const Rectangle currentExtent = panCanvas.extent();
+    const double unitsPerPixel = panCanvas.mapUnitsPerPixel();
+    const Rectangle panned(currentExtent.xMin() + 4.0 * unitsPerPixel,
+                           currentExtent.yMin() + 3.0 * unitsPerPixel,
+                           currentExtent.xMax() + 4.0 * unitsPerPixel,
+                           currentExtent.yMax() + 3.0 * unitsPerPixel);
+    panCanvas.setExtent(panned);
+    const QImage reusedFrame = panCanvas.renderToImage(panSize);
+    const bool reused = panCanvas.lastFrameReused();
+    const Rectangle firstExtent = panCanvas.extent();
+
+    // Mismo encuadre, dibujado entero: la cache se descarta a proposito.
+    panCanvas.refreshMap();
+    const QImage redrawnFrame = panCanvas.renderToImage(panSize);
+    const Rectangle secondExtent = panCanvas.extent();
+    if (firstExtent != secondExtent)
+      logVerbose(QStringLiteral("paneo: la extension cambio entre cuadros: %1 -> %2")
+                   .arg(firstExtent.toString(), secondExtent.toString()));
+
+    const qint64 panDifferences = countDifferences(reusedFrame, redrawnFrame, 8);
+    const qint64 panLimit =
+      std::max<qint64>(1, static_cast<qint64>(panSize.width()) * panSize.height() / 1000);
+    if (g_verbose)
+    {
+      logVerbose(QStringLiteral("paneo: %1 -> %2, reutilizado en %3 ms, %4 pixeles distintos (limite %5)")
+                   .arg(currentExtent.toString(), panCanvas.extent().toString())
+                   .arg(panCanvas.lastReuseMilliseconds())
+                   .arg(panDifferences)
+                   .arg(panLimit));
+    }
+
+    check(QStringLiteral("el paneo reutilizado coincide con el redibujado"),
+          reused && !beforePan.isNull() && panDifferences >= 0 && panDifferences <= panLimit,
+          QStringLiteral("reutilizado=%1, %2 pixeles distintos de %3")
+            .arg(reused ? QStringLiteral("si") : QStringLiteral("no"))
+            .arg(panDifferences)
+            .arg(panSize.width() * panSize.height()),
+          QJsonObject {{QStringLiteral("frame_reused"), reused},
+                       {QStringLiteral("pan_differences"), panDifferences}});
+  }
+
+  // 14) Presupuesto de cuadro en cuatro escalas (de pais a detalle). Con la
+  //     replica lista, ninguna vista debe superar el presupuesto: es la puerta
+  //     de rendimiento que se puede ejecutar con el conjunto real.
+  {
+    int budgetMs = qEnvironmentVariableIntValue("MINIGIS_MOSAIC_BUDGET_MS");
+    if (budgetMs <= 0)
+      budgetMs = 250;
+
+    const QSize viewSize(1200, 800);
+    qint64 worstMs = 0;
+    int worstLevel = 0;
+    for (int level = 0; level < 4; ++level)
+    {
+      const double factor = std::pow(4.0, level);
+      const double width = mosaicExtent.width() / factor;
+      const double height = mosaicExtent.height() / factor;
+      const Rectangle view(mosaicExtent.centerX() - width / 2.0, mosaicExtent.centerY() - height / 2.0,
+                           mosaicExtent.centerX() + width / 2.0, mosaicExtent.centerY() + height / 2.0);
+
+      MapCanvas budgetCanvas;
+      budgetCanvas.setDestinationEpsg(4326);
+      budgetCanvas.resize(viewSize);
+      budgetCanvas.addMosaic(mosaic, false);
+      budgetCanvas.setExtent(view);
+      budgetCanvas.renderToImage(viewSize);
+
+      // El primer cuadro de una escala crea los warps; lo que se mide es moverse
+      // a esa escala (que es lo que hace el usuario), no el primer cuadro.
+      qint64 ms = 0;
+      for (int panStep = 1; panStep <= 2; ++panStep)
+      {
+        const double offset = 0.01 * width * (panStep == 1 ? 1.0 : -1.0);
+        budgetCanvas.setExtent(Rectangle(view.xMin() + offset, view.yMin(), view.xMax() + offset, view.yMax()));
+        budgetCanvas.renderToImage(viewSize);
+        ms = std::max(ms, budgetCanvas.lastRenderMilliseconds());
+      }
+
+      if (ms > worstMs)
+      {
+        worstMs = ms;
+        worstLevel = level;
+      }
+    }
+
+    check(QStringLiteral("el cuadro cabe en el presupuesto de rendimiento"), worstMs <= budgetMs,
+          QStringLiteral("peor cuadro %1 ms en la escala 1/%2 (limite %3)")
+            .arg(worstMs)
+            .arg(std::pow(4.0, worstLevel), 0, 'f', 0)
+            .arg(budgetMs),
+          QJsonObject {{QStringLiteral("worst_frame_ms"), static_cast<double>(worstMs)},
+                       {QStringLiteral("budget_ms"), budgetMs}});
+  }
+
+  if (asJson)
+  {
+    QJsonObject mosaicJson;
+    mosaicJson.insert(QStringLiteral("name"), mosaic->name());
+    mosaicJson.insert(QStringLiteral("tiles"), mosaic->tileCount());
+    QJsonArray extentArray;
+    for (double value : {mosaicExtent.xMin(), mosaicExtent.yMin(), mosaicExtent.xMax(), mosaicExtent.yMax()})
+      extentArray.append(roundedForJson(value));
+    mosaicJson.insert(QStringLiteral("extent"), extentArray);
+    mosaicJson.insert(QStringLiteral("crs"), 4326);
+
+    QJsonObject root;
+    root.insert(QStringLiteral("ok"), ok);
+    root.insert(QStringLiteral("mosaic"), mosaicJson);
+    root.insert(QStringLiteral("checks"), jsonChecks);
+    writeOut(QString::fromUtf8(QJsonDocument(root).toJson(QJsonDocument::Indented)).trimmed());
+  }
+
+  return ok ? ExitOk : ExitRenderFailed;
+}
+
 /** Construye el almacen indexado de una capa para los modos sin ventana. */
 void attachGeometryStore(const std::shared_ptr<VectorLayer> &layer, int destinationEpsg, bool enabled){
   if (!enabled || !layer)
@@ -4101,6 +5040,8 @@ int main(int argc, char *argv[])
              || argument == QStringLiteral("--index-shp")
              || argument == QStringLiteral("--check-refresh")
              || argument == QStringLiteral("--check-raster")
+             || argument == QStringLiteral("--check-mosaic")
+             || argument == QStringLiteral("--snapshot-progress")
              || argument == QStringLiteral("--check-layers")
              || argument == QStringLiteral("--check-identify")
              || argument == QStringLiteral("--project-info")
@@ -4159,6 +5100,11 @@ int main(int argc, char *argv[])
   const QCommandLineOption layerOption({QStringLiteral("l"), QStringLiteral("layer")},
                                        QStringLiteral("Capa a cargar; se puede repetir"),
                                        QStringLiteral("archivo"));
+  const QCommandLineOption layerListOption(
+    QStringLiteral("layer-list"),
+    QStringLiteral("Carga las rutas de <archivo.txt>, una por linea (las relativas se resuelven contra "
+                   "la carpeta del archivo); necesario con cientos de capas"),
+    QStringLiteral("archivo.txt"));
   const QCommandLineOption connectionsOption(
     QStringLiteral("connections"),
     QStringLiteral("Catalogo de conexiones PostGIS (Connections.xml de Mapa Digital)"),
@@ -4228,6 +5174,21 @@ int main(int argc, char *argv[])
     QStringLiteral("check-raster"),
     QStringLiteral("Comprueba el dibujado raster: cuadrantes, extension, reproyeccion, NoData, contraste, "
                    "paleta, redibujado, paneo y lectura acotada"));
+  const QCommandLineOption checkMosaicOption(
+    QStringLiteral("check-mosaic"),
+    QStringLiteral("Comprueba el mosaico de varias hojas raster: registro, extension union, colocacion "
+                   "de cada hoja, costuras y lectura"));
+  const QCommandLineOption mosaicCacheOption(
+    QStringLiteral("mosaic-cache"),
+    QStringLiteral("Carpeta de cache de las replicas de mosaico (por defecto, la del usuario)"),
+    QStringLiteral("dir"));
+  const QCommandLineOption noMosaicReplicaOption(
+    QStringLiteral("no-mosaic-replica"),
+    QStringLiteral("Dibuja los mosaicos siempre desde las hojas (diagnostico y medida del respaldo)"));
+  const QCommandLineOption snapshotProgressOption(
+    QStringLiteral("snapshot-progress"),
+    QStringLiteral("Captura la ventana de progreso de la carga de un mosaico a <archivo.png> y sale"),
+    QStringLiteral("archivo.png"));
   const QCommandLineOption checkKmlOption(
     QStringLiteral("check-kml"),
     QStringLiteral("Comprueba que un KML/KMZ se lee completo: capas, elementos, tipos y estilos"));
@@ -4288,12 +5249,15 @@ int main(int argc, char *argv[])
 
   parser.addOptions({infoOption, jsonOption, driversOption, dllsOption, snapshotOption, snapshotWindowOption,
                      snapshotAboutOption,
-                     layerOption, extentOption, sizeOption, crsOption, maxFeaturesOption, verboseOption,
+                     layerOption, layerListOption, extentOption, sizeOption, crsOption, maxFeaturesOption,
+                     verboseOption,
                      benchOption, benchScenarioOption, benchBudgetOption, rendererOption, vertexBudgetOption,
                      spatialFilterOption, readBudgetOption, indexShpOption, withAttributesOption,
                      pgNoIndexOption,
                      checkRefreshOption, checkLabelsOption, checkLayersOption, snapshotDialogOption,
-                     snapshotRasterDialogOption, checkRasterOption, labelFieldOption, labelSizeOption,
+                     snapshotRasterDialogOption, checkRasterOption, checkMosaicOption, labelFieldOption,
+                     labelSizeOption,
+                     mosaicCacheOption, noMosaicReplicaOption, snapshotProgressOption,
                      labelMapSizeOption, noLabelsOption, rasterStretchOption, rasterBandsOption,
                      rasterOpacityOption, identifyAtOption, identifyRadiusOption, identifyLayerOption,
                      checkIdentifyOption, projectInfoOption, saveProjectOption, checkProjectOption,
@@ -4483,7 +5447,25 @@ int main(int argc, char *argv[])
     rasterOptions.opacitySet = true;
   }
 
-  const QStringList layerPaths = collectLayerPaths(parser);
+  QStringList layerPaths = collectLayerPaths(parser);
+  if (parser.isSet(layerListOption))
+  {
+    QString listError;
+    const QStringList listed = readLayerList(parser.value(layerListOption), &listError);
+    if (!listError.isEmpty())
+    {
+      writeErr(listError);
+      return ExitFileNotFound;
+    }
+    for (const QString &path : listed)
+    {
+      if (!layerPaths.contains(path))
+        layerPaths << path;
+    }
+    logVerbose(QStringLiteral("lista de capas: %1 rutas de %2")
+                 .arg(layerPaths.size())
+                 .arg(QDir::toNativeSeparators(parser.value(layerListOption))));
+  }
   const QStringList projectPaths = collectProjectPaths(parser);
 
   // Un proyecto no es una capa: --info no lo abre y avisa de la opcion correcta.
@@ -4698,6 +5680,54 @@ int main(int argc, char *argv[])
     return ExitOk;
   }
 
+  // Captura de la ventana de progreso de un mosaico: carga de verdad las hojas
+  // indicadas (para que el avance sea real) y captura el dialogo al terminar.
+  if (parser.isSet(snapshotProgressOption))
+  {
+    if (layerPaths.isEmpty())
+    {
+      writeErr(QStringLiteral("Se necesita al menos una hoja:"));
+      writeErr(QStringLiteral("  minigis --snapshot-progress progreso.png -l hoja_1.tif -l hoja_2.tif"));
+      return ExitUsage;
+    }
+
+    LoadProgressDialog dialog;
+    dialog.setPhase(QStringLiteral("Cargando imagenes"));
+    dialog.setProgress(0, QStringLiteral("Abriendo %1 hojas...").arg(layerPaths.size()));
+    dialog.show();
+
+    MosaicLoader loader;
+    QObject::connect(&loader, &MosaicLoader::progressChanged, &dialog,
+                     [&dialog](int percent, const QString &message, const QString &currentPath) {
+                       dialog.setProgress(percent, message);
+                       dialog.setDetail(QFileInfo(currentPath).fileName());
+                     });
+    QObject::connect(&loader, &MosaicLoader::finished, &dialog,
+                     [&dialog](int loaded, int, bool) {
+                       dialog.setProgress(100, QStringLiteral("%1 hojas cargadas").arg(loaded));
+                       dialog.setDetail(QStringLiteral("Preparando la replica..."));
+                     });
+
+    QEventLoop loop;
+    QObject::connect(&loader, &MosaicLoader::finished, &loop, &QEventLoop::quit);
+    loader.start(layerPaths);
+    loop.exec();
+    QCoreApplication::processEvents();
+
+    const QString dialogPath = parser.value(snapshotProgressOption);
+    if (!dialog.grab().save(dialogPath))
+    {
+      writeErr(QStringLiteral("No se pudo escribir la imagen: %1").arg(QDir::toNativeSeparators(dialogPath)));
+      return ExitRenderFailed;
+    }
+
+    writeOut(QStringLiteral("Imagen escrita: %1 (progreso %2 %: %3)")
+               .arg(QDir::toNativeSeparators(dialogPath))
+               .arg(dialog.percent())
+               .arg(dialog.message()));
+    return ExitOk;
+  }
+
   // Diagnostico del dibujado raster (sin ventana).
   if (parser.isSet(checkRasterOption))
   {
@@ -4709,6 +5739,23 @@ int main(int argc, char *argv[])
     }
 
     return checkRaster(layerPaths, checkSize, parser.isSet(jsonOption));
+  }
+
+  // Diagnostico del mosaico (sin ventana).
+  if (parser.isSet(checkMosaicOption))
+  {
+    QSize checkSize(900, 600);
+    if (parser.isSet(sizeOption) && !parseSize(parser.value(sizeOption), &checkSize))
+    {
+      writeErr(QStringLiteral("Tamano no valido: «%1». Ejemplo: --size 1200x800").arg(parser.value(sizeOption)));
+      return ExitUsage;
+    }
+
+    MosaicReplicaOptions replicaOptions;
+    replicaOptions.cacheDir = parser.value(mosaicCacheOption).trimmed();
+    replicaOptions.enabled = !parser.isSet(noMosaicReplicaOption);
+
+    return checkMosaic(layerPaths, checkSize, parser.isSet(jsonOption), replicaOptions);
   }
 
   if (parser.isSet(checkLayersOption))
@@ -4769,6 +5816,9 @@ int main(int argc, char *argv[])
 
     BenchRequest request;
     request.layerPaths = layerPaths;
+    // Con una lista de capas, los raster se miden como el mosaico que vera el
+    // usuario, no como N capas sueltas.
+    request.rasterMosaic = parser.isSet(layerListOption);
     request.frames = parser.value(benchOption).toInt();
     request.scenario = parser.value(benchScenarioOption).toLower();
     request.renderer = parser.value(rendererOption).toLower();
@@ -4992,6 +6042,67 @@ int main(int argc, char *argv[])
     }
 
     QJsonArray jsonLayers;
+
+    // Con --layer-list la seleccion se declara como UNA cobertura: se informa
+    // del mosaico, no de una capa por hoja. Con -l no cambia nada (cada archivo
+    // sigue siendo una capa suelta, como siempre).
+    if (parser.isSet(layerListOption))
+    {
+      const std::shared_ptr<RasterMosaic> mosaic = RasterMosaic::create(4326);
+      for (const QString &path : layerPaths)
+      {
+        Error error;
+        const std::shared_ptr<RasterLayer> raster = RasterLayer::open(path, &error);
+        if (!raster)
+        {
+          writeErr(error.toText());
+          return ExitOpenFailed;
+        }
+
+        if (!mosaic->addTile(raster, &error))
+        {
+          writeErr(error.toText());
+          return ExitOpenFailed;
+        }
+      }
+
+      const Rectangle extent = mosaic->extentInEpsg(4326);
+      if (parser.isSet(jsonOption))
+      {
+        QJsonObject entry;
+        entry.insert(QStringLiteral("type"), QStringLiteral("mosaic"));
+        entry.insert(QStringLiteral("name"), mosaic->name());
+        entry.insert(QStringLiteral("tiles"), mosaic->tileCount());
+        entry.insert(QStringLiteral("width"), 0);
+        entry.insert(QStringLiteral("height"), 0);
+        entry.insert(QStringLiteral("epsg"), 4326);
+        QJsonObject crs;
+        crs.insert(QStringLiteral("description"), QStringLiteral("EPSG:4326 - WGS 84"));
+        crs.insert(QStringLiteral("epsg"), 4326);
+        entry.insert(QStringLiteral("crs"), crs);
+        QJsonArray extentArray;
+        for (double value : {extent.xMin(), extent.yMin(), extent.xMax(), extent.yMax()})
+          extentArray.append(roundedForJson(value));
+        entry.insert(QStringLiteral("extent"), extentArray);
+        jsonLayers.append(entry);
+      }
+      else
+      {
+        writeOut(QStringLiteral("Mosaico     : %1").arg(mosaic->name()));
+        writeOut(QStringLiteral("Hojas       : %1").arg(mosaic->tileCount()));
+        writeOut(QStringLiteral("Extension   : %1").arg(extent.toString()));
+        writeOut(QStringLiteral("SRC         : EPSG:4326"));
+      }
+
+      if (parser.isSet(jsonOption))
+      {
+        QJsonObject root;
+        root.insert(QStringLiteral("layers"), jsonLayers);
+        writeOut(QString::fromUtf8(QJsonDocument(root).toJson(QJsonDocument::Indented)));
+      }
+      return ExitOk;
+    }
+
     for (const QString &path : layerPaths)
     {
       if (!sourceExists(path))
@@ -5180,7 +6291,8 @@ int main(int argc, char *argv[])
       }
 
       const int opened = static_cast<int>(window.canvas()->layers().size()
-                                          + window.canvas()->rasterLayers().size());
+                                          + window.canvas()->rasterLayers().size()
+                                          + window.canvas()->mosaics().size());
       if (opened == 0)
       {
         writeErr(QStringLiteral("No hay capas que capturar: indica una con --layer <archivo> o como argumento."));

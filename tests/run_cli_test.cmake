@@ -339,6 +339,132 @@ elseif(MODE STREQUAL "check-raster")
     message(STATUS "minigis --check-raster OK")
   endif()
 
+elseif(MODE STREQUAL "check-mosaic")
+  # Contrato del mosaico con las 6 hojas del fixture (incluida la replica).
+  execute_process(
+    COMMAND "${MINIGIS_EXE}" --check-mosaic
+            --layer "${SAMPLE}" --layer "${SAMPLE2}" --layer "${SAMPLE3}"
+            --layer "${SAMPLE4}" --layer "${SAMPLE5}" --layer "${SAMPLE6}"
+            --size 900x600 --mosaic-cache "${MOSAIC_CACHE}"
+    RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+  if(NOT _rc EQUAL EXPECT_EXIT)
+    message(FATAL_ERROR "minigis --check-mosaic fallo (codigo ${_rc}, esperado ${EXPECT_EXIT})\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")
+  endif()
+
+  if(EXPECT_EXIT EQUAL 0)
+    if(_out MATCHES "FALLO")
+      message(FATAL_ERROR "El mosaico no cumple su contrato:\n${_out}")
+    endif()
+    foreach(_key IN ITEMS "todas las hojas estan en el mosaico" "la extension union coincide con GDAL"
+                          "cada hoja se dibuja en su sitio" "sin costuras entre hojas contiguas"
+                          "la replica del mosaico esta disponible" "la replica reproduce las hojas"
+                          "la replica y las hojas dan el mismo mapa" "la segunda vez se reutiliza la cache"
+                          "se descarta lo que no esta en la vista" "lectura acotada al lienzo"
+                          "cambiar el estilo redibuja el mosaico" "el paneo reutilizado coincide"
+                          "el cuadro cabe en el presupuesto")
+      if(NOT _out MATCHES "${_key}")
+        message(FATAL_ERROR "La comprobacion «${_key}» no se ejecuto:\n${_out}")
+      endif()
+    endforeach()
+    message(STATUS "minigis --check-mosaic OK")
+  endif()
+elseif(MODE STREQUAL "mosaic-info")
+  # El mosaico se describe como UN objeto (type=mosaic) cuando se declara con lista.
+  execute_process(
+    COMMAND "${MINIGIS_EXE}" --info --json --layer-list "${MOSAIC_LIST}"
+    RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+  if(NOT _rc EQUAL 0)
+    message(FATAL_ERROR "minigis --info del mosaico fallo (codigo ${_rc})\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")
+  endif()
+  if(NOT _out MATCHES "\"type\": \"mosaic\"")
+    message(FATAL_ERROR "El mosaico no se describe como tal:\n${_out}")
+  endif()
+  if(NOT _out MATCHES "\"tiles\": 6")
+    message(FATAL_ERROR "El mosaico no informa de sus 6 hojas:\n${_out}")
+  endif()
+  message(STATUS "minigis --info del mosaico OK")
+elseif(MODE STREQUAL "mosaic-window")
+  # Captura de la interfaz con el mosaico cargado y su fila en el panel.
+  get_filename_component(_outdir "${OUT}" DIRECTORY)
+  file(MAKE_DIRECTORY "${_outdir}")
+  if(EXISTS "${OUT}")
+    file(REMOVE "${OUT}")
+  endif()
+  execute_process(
+    COMMAND "${MINIGIS_EXE}" --snapshot-window "${OUT}"
+            --layer "${SAMPLE}" --layer "${SAMPLE2}" --layer "${SAMPLE3}"
+            --layer "${SAMPLE4}" --layer "${SAMPLE5}" --layer "${SAMPLE6}"
+    RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+  if(NOT _rc EQUAL 0)
+    message(FATAL_ERROR "minigis --snapshot-window del mosaico fallo (codigo ${_rc})\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")
+  endif()
+  if(NOT EXISTS "${OUT}")
+    message(FATAL_ERROR "No se genero la captura: ${OUT}")
+  endif()
+  file(SIZE "${OUT}" _size)
+  if(_size LESS 8000)
+    message(FATAL_ERROR "La captura del mosaico parece vacia (${_size} bytes)")
+  endif()
+  message(STATUS "minigis --snapshot-window del mosaico OK: ${_size} bytes")
+elseif(MODE STREQUAL "mosaic-progress")
+  # Captura de la ventana de progreso durante una carga real de hojas.
+  get_filename_component(_outdir "${OUT}" DIRECTORY)
+  file(MAKE_DIRECTORY "${_outdir}")
+  if(EXISTS "${OUT}")
+    file(REMOVE "${OUT}")
+  endif()
+  execute_process(
+    COMMAND "${MINIGIS_EXE}" --snapshot-progress "${OUT}"
+            --layer "${SAMPLE}" --layer "${SAMPLE2}" --layer "${SAMPLE3}"
+            --layer "${SAMPLE4}" --layer "${SAMPLE5}" --layer "${SAMPLE6}"
+    RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+  if(NOT _rc EQUAL 0)
+    message(FATAL_ERROR "minigis --snapshot-progress fallo (codigo ${_rc})\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")
+  endif()
+  if(NOT EXISTS "${OUT}")
+    message(FATAL_ERROR "No se genero la captura del progreso: ${OUT}")
+  endif()
+  if(NOT _out MATCHES "progreso 100")
+    message(FATAL_ERROR "La ventana de progreso no llego al 100 %:\n${_out}")
+  endif()
+  message(STATUS "minigis --snapshot-progress OK")
+elseif(MODE STREQUAL "rendimiento-mosaico")
+  # Puerta opt-in con el conjunto real: se omite si no hay MINIGIS_MOSAIC_DATASET.
+  set(_dataset "$ENV{MINIGIS_MOSAIC_DATASET}")
+  if(NOT _dataset)
+    message(STATUS "PUERTA-OMITIDA: define MINIGIS_MOSAIC_DATASET con la carpeta o la lista de hojas")
+    return()
+  endif()
+
+  set(_list "${MOSAIC_LIST}")
+  if(IS_DIRECTORY "${_dataset}")
+    file(GLOB _tiles "${_dataset}/*.tif" "${_dataset}/*.TIF" "${_dataset}/*.jpg" "${_dataset}/*.JPG"
+                    "${_dataset}/*.jpeg" "${_dataset}/*.jp2")
+    list(LENGTH _tiles _count)
+    if(_count EQUAL 0)
+      message(STATUS "PUERTA-OMITIDA: no hay imagenes en ${_dataset}")
+      return()
+    endif()
+    file(WRITE "${_list}" "")
+    foreach(_tile IN LISTS _tiles)
+      file(APPEND "${_list}" "${_tile}\n")
+    endforeach()
+  else()
+    set(_list "${_dataset}")
+  endif()
+
+  set(_start_time "$ENV{MINIGIS_MOSAIC_TIMEOUT}")
+  execute_process(
+    COMMAND "${MINIGIS_EXE}" --check-mosaic --layer-list "${_list}" --size 1200x800
+            --mosaic-cache "${MOSAIC_CACHE}"
+    RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+  if(NOT _rc EQUAL 0)
+    message(FATAL_ERROR "La puerta de rendimiento del mosaico fallo (codigo ${_rc})\nSTDOUT:\n${_out}\nSTDERR:\n${_err}")
+  endif()
+  if(NOT _out MATCHES "el cuadro cabe en el presupuesto")
+    message(FATAL_ERROR "No se midio el presupuesto de cuadro:\n${_out}")
+  endif()
+  message(STATUS "minigis --check-mosaic con el conjunto real OK")
 elseif(MODE STREQUAL "raster-dialog")
   # Captura del dialogo de estilo raster (se comprueba que se escribe y no esta vacio).
   get_filename_component(_outdir "${OUT}" DIRECTORY)

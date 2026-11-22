@@ -1,5 +1,6 @@
 #include "minigisrasterrenderer.h"
 
+#include "minigismosaiclayer.h"
 #include "minigisrasterlayer.h"
 #include "minigisrasterstyle.h"
 #include "minigismaprenderer.h"
@@ -211,11 +212,29 @@ bool paletteFor(GDALRasterBandH band, std::array<QRgb, 256> *colors, std::array<
 
 } // namespace
 
+void RasterRenderer::resetStats()
+{
+  mStats = FrameStats();
+}
+
 void RasterRenderer::paint(QPainter &painter, const std::vector<std::shared_ptr<RasterLayer>> &layers,
                            const Rectangle &extent, const QSize &size, const Options &options, int destinationEpsg)
 {
-  mStats = FrameStats();
-  if (layers.empty() || !extent.isValid() || size.isEmpty())
+  resetStats();
+
+  for (const std::shared_ptr<RasterLayer> &layer : layers)
+  {
+    if (!layer)
+      continue;
+    paintLayer(painter, *layer, extent, size, options, destinationEpsg);
+  }
+}
+
+void RasterRenderer::paintLayer(QPainter &painter, const RasterLayer &layer, const Rectangle &extent,
+                                const QSize &size, const Options &options, int destinationEpsg,
+                                const RasterStyle *styleOverride)
+{
+  if (!layer.isVisible() || !layer.extent().isValid() || !extent.isValid() || size.isEmpty())
     return;
 
   const MapToPixel transform(extent, size);
@@ -225,84 +244,173 @@ void RasterRenderer::paint(QPainter &painter, const std::vector<std::shared_ptr<
   // Tamano de pixel del lienzo: fija la rejilla de los VRT reproyectados para
   // que todas las hojas de un mosaico compartan reticula (ver RasterLayer). En
   // borrador se reutiliza la rejilla que ya tengan: el gesto no recrea warps.
-  const double pixelSize = options.draft ? 0.0 : 1.0 / transform.pixelsPerMapUnit();
-
-  for (const std::shared_ptr<RasterLayer> &layer : layers)
+  double warpPixelSize = 0.0;
+  if (!options.draft)
   {
-    if (!layer || !layer->isVisible() || !layer->extent().isValid())
-      continue;
-
-    const RasterLayer::View *view = layer->viewForEpsg(destinationEpsg, pixelSize);
-    if (!view || view->width <= 0 || view->height <= 0)
-      continue;
-
-    // Extension de la vista (ya en el SRC del lienzo) a pixeles de pantalla.
-    double minX = std::numeric_limits<double>::max();
-    double minY = std::numeric_limits<double>::max();
-    double maxX = std::numeric_limits<double>::lowest();
-    double maxY = std::numeric_limits<double>::lowest();
-    const double pixelCorners[4][2] = {{0.0, 0.0},
-                                       {static_cast<double>(view->width), 0.0},
-                                       {0.0, static_cast<double>(view->height)},
-                                       {static_cast<double>(view->width), static_cast<double>(view->height)}};
-    for (const auto &pixel : pixelCorners)
-    {
-      const double x = view->geoTransform[0] + pixel[0] * view->geoTransform[1] + pixel[1] * view->geoTransform[2];
-      const double y = view->geoTransform[3] + pixel[0] * view->geoTransform[4] + pixel[1] * view->geoTransform[5];
-      minX = std::min(minX, x);
-      maxX = std::max(maxX, x);
-      minY = std::min(minY, y);
-      maxY = std::max(maxY, y);
-    }
-
-    const QPointF topLeft = transform.transform(minX, maxY);
-    const QPointF bottomRight = transform.transform(maxX, minY);
-
-    QRectF target(topLeft, bottomRight);
-    target = target.normalized();
-    target = target.intersected(QRectF(0.0, 0.0, size.width(), size.height()));
-    if (target.isEmpty())
-      continue;
-
-    QRectF destination;
-    const QImage image =
-      compose(*layer, target, transform, destinationEpsg, options.draft, mStats, &destination);
-    if (image.isNull() || destination.isEmpty())
-      continue;
-
-    const RasterStyle &style = layer->style();
-    painter.save();
-    painter.setOpacity(std::clamp(style.opacity, 0, 100) / 100.0);
-    painter.setRenderHint(QPainter::SmoothPixmapTransform,
-                          style.resampling == RasterStyle::Resampling::Bilinear);
-
-    // Recorte a la huella real de la hoja: el VRT reproyectado es un
-    // rectangulo que la contiene y sus margenes (negros o NoData) taparian las
-    // hojas vecinas. Dos hojas contiguas comparten el borde, asi que el recorte
-    // reparte los pixeles de la union sin dejar hueco ni solape.
-    if (view->footprint.size() >= 3)
-    {
-      QPainterPath clip;
-      clip.moveTo(transform.transform(view->footprint.front().x(), view->footprint.front().y()));
-      for (size_t i = 1; i < view->footprint.size(); ++i)
-        clip.lineTo(transform.transform(view->footprint[i].x(), view->footprint[i].y()));
-      clip.closeSubpath();
-      painter.setClipPath(clip, Qt::IntersectClip);
-    }
-
-    painter.drawImage(destination, image);
-    painter.restore();
-
-    ++mStats.layersDrawn;
-    mStats.pixelsDrawn += static_cast<qint64>(image.width()) * image.height();
+    warpPixelSize = options.warpPixelSize > 0.0 ? options.warpPixelSize : 1.0 / transform.pixelsPerMapUnit();
   }
+
+  bool created = false;
+  const RasterLayer::View *view = layer.viewForEpsg(destinationEpsg, warpPixelSize, &created);
+  if (!view || view->width <= 0 || view->height <= 0)
+    return;
+  if (created)
+    ++mStats.warpsCreated;
+
+  // Extension de la vista (ya en el SRC del lienzo) a pixeles de pantalla.
+  double minX = std::numeric_limits<double>::max();
+  double minY = std::numeric_limits<double>::max();
+  double maxX = std::numeric_limits<double>::lowest();
+  double maxY = std::numeric_limits<double>::lowest();
+  const double pixelCorners[4][2] = {{0.0, 0.0},
+                                     {static_cast<double>(view->width), 0.0},
+                                     {0.0, static_cast<double>(view->height)},
+                                     {static_cast<double>(view->width), static_cast<double>(view->height)}};
+  for (const auto &pixel : pixelCorners)
+  {
+    const double x = view->geoTransform[0] + pixel[0] * view->geoTransform[1] + pixel[1] * view->geoTransform[2];
+    const double y = view->geoTransform[3] + pixel[0] * view->geoTransform[4] + pixel[1] * view->geoTransform[5];
+    minX = std::min(minX, x);
+    maxX = std::max(maxX, x);
+    minY = std::min(minY, y);
+    maxY = std::max(maxY, y);
+  }
+
+  const QPointF topLeft = transform.transform(minX, maxY);
+  const QPointF bottomRight = transform.transform(maxX, minY);
+
+  QRectF target(topLeft, bottomRight);
+  target = target.normalized();
+  target = target.intersected(QRectF(0.0, 0.0, size.width(), size.height()));
+  if (target.isEmpty())
+    return;
+
+  QRectF destination;
+  const RasterStyle &style = styleOverride ? *styleOverride : layer.style();
+  const QImage image =
+    compose(layer, style, target, transform, destinationEpsg, warpPixelSize, options.draft, mStats, &destination);
+  if (image.isNull() || destination.isEmpty())
+    return;
+
+  painter.save();
+  painter.setOpacity(std::clamp(style.opacity, 0, 100) / 100.0);
+  painter.setRenderHint(QPainter::SmoothPixmapTransform,
+                        style.resampling == RasterStyle::Resampling::Bilinear);
+
+  // Recorte a la huella real de la hoja: el VRT reproyectado es un
+  // rectangulo que la contiene y sus margenes (negros o NoData) taparian las
+  // hojas vecinas. Dos hojas contiguas comparten el borde, asi que el recorte
+  // reparte los pixeles de la union sin dejar hueco ni solape.
+  if (view->footprint.size() >= 3)
+  {
+    QPainterPath clip;
+    clip.moveTo(transform.transform(view->footprint.front().x(), view->footprint.front().y()));
+    for (size_t i = 1; i < view->footprint.size(); ++i)
+      clip.lineTo(transform.transform(view->footprint[i].x(), view->footprint[i].y()));
+    clip.closeSubpath();
+
+    // La huella se engorda un pixel: dos hojas contiguas recortan dos poligonos
+    // que comparten borde y, con el recorte exacto, la union de ambos puede
+    // dejar una linea de un pixel del fondo del lienzo en la costura (medido).
+    // Con el engorde una tapa a la otra; a opacidad 100 no se nota.
+    QPainterPathStroker stroker;
+    stroker.setWidth(1.5);
+    clip = clip.united(stroker.createStroke(clip));
+
+    painter.setClipPath(clip, Qt::IntersectClip);
+  }
+
+  painter.drawImage(destination, image);
+  painter.restore();
+
+  ++mStats.layersDrawn;
+  ++mStats.tilesRead;
+  mStats.pixelsDrawn += static_cast<qint64>(image.width()) * image.height();
 }
 
-QImage RasterRenderer::compose(const RasterLayer &layer, const QRectF &target, const MapToPixel &transform,
-                               int destinationEpsg, bool draft, FrameStats &stats, QRectF *destination) const
+void RasterRenderer::paintMosaic(QPainter &painter, const RasterMosaic &mosaic, const Rectangle &extent,
+                                 const QSize &size, const Options &options, int destinationEpsg)
 {
-  const RasterLayer::View *view =
-    layer.viewForEpsg(destinationEpsg, draft ? 0.0 : 1.0 / transform.pixelsPerMapUnit());
+  if (!mosaic.isVisible() || mosaic.tileCount() == 0 || !extent.isValid() || size.isEmpty())
+    return;
+
+  const MapToPixel transform(extent, size);
+  if (!transform.isValid())
+    return;
+
+  // La replica es un raster mas, ya en el SRC del lienzo: se dibuja sin warp y
+  // GDAL elige el nivel de overview. Se usa mientras no haya que ampliarla mas
+  // de 2x; por debajo de eso compensa leer las hojas (mas nitidas).
+  const RasterStyle &style = mosaic.style();
+  const double canvasPixel = 1.0 / transform.pixelsPerMapUnit();
+  if (const std::shared_ptr<RasterLayer> replica = mosaic.replicaLayer())
+  {
+    const double replicaPixel = mosaic.replicaPixelSize();
+    if (replicaPixel > 0.0 && replicaPixel <= 2.0 * canvasPixel)
+    {
+      RasterStyle replicaStyle = style;
+      // El mosaico no tiene banda alfa; la replica si (los huecos de la
+      // cobertura quedan transparentes en vez de negros).
+      if (replica->bandCount() >= 4 && replicaStyle.alphaBand == 0)
+        replicaStyle.alphaBand = 4;
+
+      paintLayer(painter, *replica, extent, size, options, destinationEpsg, &replicaStyle);
+      return;
+    }
+  }
+
+  // Rejilla compartida por todas las hojas y cuantizada a potencias de 2: un
+  // paso de zoom deja de rehacer el warp de cada hoja. La rejilla sigue siendo
+  // la misma para todas, asi que las hojas contiguas siguen encajando.
+  Options tileOptions = options;
+  if (!options.draft)
+  {
+    const double exact = 1.0 / transform.pixelsPerMapUnit();
+    tileOptions.warpPixelSize = std::exp2(std::round(std::log2(exact)));
+  }
+
+  const std::vector<Rectangle> &tileExtents = mosaic.tileExtents(destinationEpsg);
+  const int budget = std::max(0, options.tileBudget);
+
+  int visible = 0;
+  int read = 0;
+
+  for (int index = 0; index < mosaic.tileCount(); ++index)
+  {
+    // Descarte ANTES de pedir la vista: crear un warp por hoja fuera de la vista
+    // fue el coste medido de cargar 508 imagenes como capas sueltas.
+    if (index < static_cast<int>(tileExtents.size()))
+    {
+      const Rectangle &tileExtent = tileExtents[static_cast<size_t>(index)];
+      if (!tileExtent.isValid() || !tileExtent.intersects(extent))
+        continue;
+    }
+
+    ++visible;
+
+    // Presupuesto de la fase de carga: el cuadro no puede esperar a las 508.
+    if (budget > 0 && read >= budget)
+      continue;
+
+    const std::shared_ptr<RasterLayer> tile = mosaic.tile(index);
+    if (!tile)
+      continue;
+
+    paintLayer(painter, *tile, extent, size, tileOptions, destinationEpsg, &style);
+    ++read;
+  }
+
+  mStats.tilesVisible += visible;
+}
+
+QImage RasterRenderer::compose(const RasterLayer &layer, const RasterStyle &style, const QRectF &target,
+                               const MapToPixel &transform, int destinationEpsg, double warpPixelSize,
+                               bool draft, FrameStats &stats, QRectF *destination) const
+{
+  bool created = false;
+  const RasterLayer::View *view = layer.viewForEpsg(destinationEpsg, draft ? 0.0 : warpPixelSize, &created);
+  if (created)
+    ++stats.warpsCreated;
   if (!view || !view->dataset)
     return {};
 
@@ -367,7 +475,6 @@ QImage RasterRenderer::compose(const RasterLayer &layer, const QRectF &target, c
           : QSize(std::max(1, static_cast<int>(std::lround(destination->width()))),
                   std::max(1, static_cast<int>(std::lround(destination->height()))));
 
-  const RasterStyle &style = layer.style();
   const bool grayscale = style.bandMode == RasterStyle::BandMode::Grayscale;
   const int channelCount = grayscale ? 1 : 3;
   const int bandNumbers[3] = {style.redBand, style.greenBand, style.blueBand};
@@ -376,6 +483,14 @@ QImage RasterRenderer::compose(const RasterLayer &layer, const QRectF &target, c
     if (bandNumbers[i] < 1 || bandNumbers[i] > layer.bandCount())
       return {};
   }
+
+  // Lectura de las bandas de color, una llamada por banda. Se probo a leer las
+  // tres de una vez con GDALDatasetRasterIO y no compensa: en un VRT reproyectado
+  // GDAL hace un warp por banda igualmente, y en la vista nativa el ahorro no
+  // paga el riesgo de un camino distinto por driver. Lo que si se explota es el
+  // descarte y el warp por nivel (ver paintMosaic).
+  const int readWidth = sourceRight - sourceX;
+  const int readHeight = sourceBottom - sourceY;
 
   std::vector<std::vector<unsigned char>> buffers;
   std::vector<GDALDataType> types;
@@ -395,8 +510,8 @@ QImage RasterRenderer::compose(const RasterLayer &layer, const QRectF &target, c
     const qint64 bufferSize = static_cast<qint64>(targetSize.width()) * targetSize.height() * bytesPerSample;
     buffers.emplace_back(static_cast<size_t>(bufferSize));
 
-    if (GDALRasterIO(band, GF_Read, sourceX, sourceY, sourceRight - sourceX, sourceBottom - sourceY,
-                     buffers.back().data(), targetSize.width(), targetSize.height(), type, 0, 0)
+    if (GDALRasterIO(band, GF_Read, sourceX, sourceY, readWidth, readHeight, buffers.back().data(),
+                     targetSize.width(), targetSize.height(), type, 0, 0)
         != CE_None)
       return {};
 
@@ -414,9 +529,8 @@ QImage RasterRenderer::compose(const RasterLayer &layer, const QRectF &target, c
   if (hasAlpha)
   {
     alphaBuffer.resize(static_cast<size_t>(targetSize.width()) * targetSize.height());
-    if (GDALRasterIO(GDALGetRasterBand(view->dataset, style.alphaBand), GF_Read, sourceX, sourceY,
-                     sourceRight - sourceX, sourceBottom - sourceY, alphaBuffer.data(), targetSize.width(),
-                     targetSize.height(), GDT_Byte, 0, 0)
+    if (GDALRasterIO(GDALGetRasterBand(view->dataset, style.alphaBand), GF_Read, sourceX, sourceY, readWidth,
+                     readHeight, alphaBuffer.data(), targetSize.width(), targetSize.height(), GDT_Byte, 0, 0)
         != CE_None)
       alphaBuffer.clear();
     stats.bytesRead += static_cast<qint64>(alphaBuffer.size());
@@ -448,8 +562,8 @@ QImage RasterRenderer::compose(const RasterLayer &layer, const QRectF &target, c
       for (int x = 0; x < width; ++x)
       {
         const qint64 index = static_cast<qint64>(y) * width + x;
-        const int r0 = buffers[0][index];
-        int a = hasAlpha && !alphaBuffer.empty() ? alphaBuffer[index] : 255;
+        const int r0 = static_cast<int>(buffers[0][static_cast<size_t>(index)]);
+        int a = hasAlpha && !alphaBuffer.empty() ? alphaBuffer[static_cast<size_t>(index)] : 255;
         QRgb color = 0;
 
         if (usePalette)
@@ -461,8 +575,8 @@ QImage RasterRenderer::compose(const RasterLayer &layer, const QRectF &target, c
         else
         {
           const int r = luts[0][static_cast<size_t>(r0)];
-          const int g = grayscale ? r : luts[1][static_cast<size_t>(buffers[1][index])];
-          const int b = grayscale ? r : luts[2][static_cast<size_t>(buffers[2][index])];
+          const int g = grayscale ? r : luts[1][static_cast<size_t>(buffers[1][static_cast<size_t>(index)])];
+          const int b = grayscale ? r : luts[2][static_cast<size_t>(buffers[2][static_cast<size_t>(index)])];
           color = qRgba(r, g, b, 255);
         }
 

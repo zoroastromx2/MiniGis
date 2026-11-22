@@ -1,9 +1,11 @@
 #include "minigismapcanvas.h"
 
 #include "minigisgeometrystore.h"
+#include "minigismosaiclayer.h"
 #include "minigisrasterlayer.h"
 #include "minigisvectorlayer.h"
 
+#include <QDebug>
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QRegion>
@@ -138,6 +140,16 @@ void MapCanvas::invalidateFrameCache()
 
 void MapCanvas::refreshMap()
 {
+  invalidateFrameCache();
+  update();
+}
+
+void MapCanvas::setRasterTileBudget(int budget)
+{
+  if (mRasterTileBudget == budget)
+    return;
+
+  mRasterTileBudget = std::max(0, budget);
   invalidateFrameCache();
   update();
 }
@@ -410,6 +422,12 @@ quint64 MapCanvas::contentRevision() const
       continue;
     revision ^= layer->revision() + 0x9E3779B97F4A7C15ULL + (revision << 6) + (revision >> 2);
   }
+  for (const std::shared_ptr<RasterMosaic> &mosaic : mMosaics)
+  {
+    if (!mosaic)
+      continue;
+    revision ^= mosaic->revision() + 0x9E3779B97F4A7C15ULL + (revision << 6) + (revision >> 2);
+  }
   return revision;
 }
 
@@ -420,7 +438,9 @@ bool MapCanvas::reusePreviousFrame(QImage &image, const QSize &size, bool draft,
   FrameCache &cache = mFrameCaches[draft ? 1 : 0];
 
   if (!cache.valid || cache.image.isNull())
-    return false;
+  {
+      return false;
+  }
 
   if (cache.size != size || cache.epsg != mDestinationEpsg)
     return false;
@@ -428,14 +448,18 @@ bool MapCanvas::reusePreviousFrame(QImage &image, const QSize &size, bool draft,
   // Un cuadro dibujado con muestreo dependiente de la vista no se puede reutilizar
   // desplazandolo (ver FrameCache::viewDependent): se redibuja entero.
   if (cache.viewDependent)
-    return false;
+  {
+      return false;
+  }
 
   // Si ha cambiado algo que afecta al dibujado (simbologia, visibilidad, opciones
   // del motor), el cuadro guardado ya no representa el estado actual: se
   // redibuja entero. Sin esta comprobacion, cambiar el estilo de una capa no se
   // reflejaba en el mapa hasta mover o redimensionar la vista.
   if (cache.revision != contentRevision())
-    return false;
+  {
+      return false;
+  }
 
   if (!cache.extent.isValid() || !mExtent.isValid())
     return false;
@@ -570,12 +594,14 @@ bool MapCanvas::removeLayer(const std::shared_ptr<VectorLayer> &layer)
 
 void MapCanvas::clearLayers()
 {
-  if (mLayers.empty() && mRasterLayers.empty())
+  if (mLayers.empty() && mRasterLayers.empty() && mMosaics.empty())
     return;
 
   invalidateFrameCache();
   mLayers.clear();
   mRasterLayers.clear();
+  mMosaics.clear();
+  mRasterStack.clear();
   mCurrentLayer.reset();
   mExtent.setNull();
   clearSelectedFeature();
@@ -612,6 +638,7 @@ std::shared_ptr<RasterLayer> MapCanvas::addRasterLayer(const std::shared_ptr<Ras
 
   invalidateFrameCache();
   mRasterLayers.push_back(layer);
+  mRasterStack.push_back(RasterStackEntry {layer, nullptr});
 
   emit layersChanged();
 
@@ -631,6 +658,11 @@ bool MapCanvas::removeRasterLayer(const std::shared_ptr<RasterLayer> &layer)
 
   invalidateFrameCache();
   mRasterLayers.erase(it);
+  mRasterStack.erase(std::remove_if(mRasterStack.begin(), mRasterStack.end(),
+                                    [&layer](const RasterStackEntry &entry) {
+                                      return entry.mosaic == nullptr && entry.layer == layer;
+                                    }),
+                     mRasterStack.end());
 
   emit layersChanged();
   update();
@@ -644,6 +676,10 @@ void MapCanvas::clearRasterLayers()
 
   invalidateFrameCache();
   mRasterLayers.clear();
+  // Los mosaicos no son capas sueltas: `clearRasterLayers` no los quita.
+  mRasterStack.erase(std::remove_if(mRasterStack.begin(), mRasterStack.end(),
+                                    [](const RasterStackEntry &entry) { return entry.mosaic == nullptr; }),
+                     mRasterStack.end());
 
   emit layersChanged();
   update();
@@ -652,6 +688,65 @@ void MapCanvas::clearRasterLayers()
 bool MapCanvas::containsRaster(const std::shared_ptr<RasterLayer> &layer) const
 {
   return std::find(mRasterLayers.begin(), mRasterLayers.end(), layer) != mRasterLayers.end();
+}
+
+std::shared_ptr<RasterMosaic> MapCanvas::addMosaic(const std::shared_ptr<RasterMosaic> &mosaic,
+                                                   bool zoomToExtent)
+{
+  if (!mosaic)
+    return {};
+
+  invalidateFrameCache();
+  if (!containsMosaic(mosaic))
+  {
+    mMosaics.push_back(mosaic);
+    mRasterStack.push_back(RasterStackEntry {nullptr, mosaic});
+  }
+
+  emit layersChanged();
+
+  if (zoomToExtent || !mExtent.isValid())
+    zoomToLayer(mosaic);
+  else
+    update();
+
+  return mosaic;
+}
+
+bool MapCanvas::removeMosaic(const std::shared_ptr<RasterMosaic> &mosaic)
+{
+  const auto it = std::find(mMosaics.begin(), mMosaics.end(), mosaic);
+  if (it == mMosaics.end())
+    return false;
+
+  invalidateFrameCache();
+  mMosaics.erase(it);
+  mRasterStack.erase(std::remove_if(mRasterStack.begin(), mRasterStack.end(),
+                                    [&mosaic](const RasterStackEntry &entry) {
+                                      return entry.layer == nullptr && entry.mosaic == mosaic;
+                                    }),
+                     mRasterStack.end());
+
+  emit layersChanged();
+  update();
+  return true;
+}
+
+bool MapCanvas::containsMosaic(const std::shared_ptr<RasterMosaic> &mosaic) const
+{
+  return std::find(mMosaics.begin(), mMosaics.end(), mosaic) != mMosaics.end();
+}
+
+void MapCanvas::mosaicChanged(const std::shared_ptr<RasterMosaic> &mosaic)
+{
+  if (!mosaic || !containsMosaic(mosaic))
+    return;
+
+  // La revision del mosaico ya cambio con la hoja: basta con tirar el cuadro
+  // cacheado y pedir uno nuevo. No se encuadra: durante la carga el lienzo se
+  // queda donde esta y el encuadre se hace al terminar la tanda.
+  invalidateFrameCache();
+  update();
 }
 
 void MapCanvas::setCurrentLayer(const std::shared_ptr<VectorLayer> &layer)
@@ -705,6 +800,12 @@ Rectangle MapCanvas::layersExtent() const
     if (!layer || !layer->isVisible())
       continue;
     result.combine(layer->extentInEpsg(mDestinationEpsg));
+  }
+  for (const std::shared_ptr<RasterMosaic> &mosaic : mMosaics)
+  {
+    if (!mosaic || !mosaic->isVisible() || mosaic->tileCount() == 0)
+      continue;
+    result.combine(mosaic->extentInEpsg(mDestinationEpsg));
   }
   return result;
 }
@@ -772,6 +873,22 @@ void MapCanvas::zoomToLayer(const std::shared_ptr<RasterLayer> &layer)
   }
 
   setExtent(adjustedExtent(layerExtent));
+}
+
+void MapCanvas::zoomToLayer(const std::shared_ptr<RasterMosaic> &mosaic)
+{
+  if (!mosaic || mosaic->tileCount() == 0)
+    return;
+
+  const Rectangle mosaicExtent = mosaic->extentInEpsg(mDestinationEpsg);
+  if (!mosaicExtent.isValid())
+  {
+    emit statusMessage(QStringLiteral("El mosaico «%1» no informa de su extension.").arg(mosaic->name()),
+                       kStatusTimeoutMs);
+    return;
+  }
+
+  setExtent(adjustedExtent(mosaicExtent));
 }
 
 void MapCanvas::zoomIn()
@@ -901,7 +1018,34 @@ QImage MapCanvas::renderToImage(const QSize &size, bool draft)
   }
 
   // Raster debajo del vectorial y con el mismo recorte que la franja a repintar.
-  mRasterRenderer.paint(painter, mRasterLayers, extent, size, rasterOptions, mDestinationEpsg);
+  // El apilado de la banda raster lo fija `mRasterStack`: capas sueltas y
+  // mosaicos en el orden en que se cargaron. Las capas sueltas se dibujan con el
+  // camino de siempre (`paint`), agrupadas en tramos consecutivos; los mosaicos,
+  // con su camino propio.
+  mRasterRenderer.resetStats();
+  {
+    std::vector<std::shared_ptr<RasterLayer>> consecutiveLayers;
+    const auto flushLayers = [&]() {
+      if (consecutiveLayers.empty())
+        return;
+      mRasterRenderer.paint(painter, consecutiveLayers, extent, size, rasterOptions, mDestinationEpsg);
+      consecutiveLayers.clear();
+    };
+
+    for (const RasterStackEntry &entry : mRasterStack)
+    {
+      if (entry.mosaic)
+      {
+        flushLayers();
+        mRasterRenderer.paintMosaic(painter, *entry.mosaic, extent, size, rasterOptions, mDestinationEpsg);
+        continue;
+      }
+      if (entry.layer)
+        consecutiveLayers.push_back(entry.layer);
+    }
+
+    flushLayers();
+  }
 
   // Las capas se recorren en orden de apilado. Las que tienen almacen se agrupan
   // para dibujarlas de una vez; cuando aparece una capa sin almacen (todavia

@@ -233,6 +233,78 @@ def build_landcover(out_dir):
     )
 
 
+# Fixture del mosaico: rejilla de 3 filas x 2 columnas de hojas de 64x64 px.
+# Cada hoja lleva un color de fondo propio, un borde de 1 px y un bloque central
+# de 8x8 con un color unico: es lo que permite comprobar, pixel a pixel, que cada
+# hoja se dibuja en su sitio y que la union no deja costuras.
+MOSAIC_TILE_SIZE = 64
+MOSAIC_TILE_DEGREES = 0.01
+MOSAIC_ORIGIN = (0.0, 0.03)  # esquina superior izquierda del mosaico (lon, lat)
+MOSAIC_MARKERS = [
+    (255, 0, 0),      # rojo
+    (0, 255, 0),      # verde
+    (0, 0, 255),      # azul
+    (255, 255, 0),    # amarillo
+    (255, 0, 255),    # magenta
+    (0, 255, 255),    # cian
+]
+MOSAIC_BORDERS = (230, 230, 230)
+
+
+def mosaic_tile_name(row, col):
+    """Nombre de archivo de una hoja de la rejilla (fila y columna empiezan en 1)."""
+    return f"hoja_{row + 1}_{col + 1}.tif"
+
+
+def mosaic_tile_extent(row, col):
+    """Extension (xmin, ymin, xmax, ymax) de una hoja de la rejilla."""
+    size = MOSAIC_TILE_DEGREES
+    xmin = MOSAIC_ORIGIN[0] + col * size
+    ymax = MOSAIC_ORIGIN[1] - row * size
+    return (xmin, ymax - size, xmin + size, ymax)
+
+
+def build_mosaic(out_dir, rows=3, cols=2):
+    """Mosaico pequeno y determinista para las pruebas del mosaico.
+
+    Cada hoja: fondo oscuro propio, borde de 1 px y bloque central de 8x8 con el
+    color marcador de esa hoja. Sin solapes y sin huecos: dos hojas contiguas
+    comparten exactamente el borde.
+    """
+    out_dir = Path(out_dir)
+    size = MOSAIC_TILE_SIZE
+    half = size // 2
+    margin = 4
+
+    for row in range(rows):
+        for col in range(cols):
+            index = row * cols + col
+            marker = MOSAIC_MARKERS[index % len(MOSAIC_MARKERS)]
+
+            rgb = np.empty((3, size, size), dtype=np.uint8)
+            # Fondo propio de la hoja: oscuro y distinto del fondo del lienzo.
+            rgb[0, :, :] = 30 + 12 * row
+            rgb[1, :, :] = 40 + 10 * col
+            rgb[2, :, :] = 70 + 6 * (row + col)
+            # Borde de 1 px.
+            rgb[:, 0, :] = np.array(MOSAIC_BORDERS, dtype=np.uint8)[:, None]
+            rgb[:, -1, :] = np.array(MOSAIC_BORDERS, dtype=np.uint8)[:, None]
+            rgb[:, :, 0] = np.array(MOSAIC_BORDERS, dtype=np.uint8)[:, None]
+            rgb[:, :, -1] = np.array(MOSAIC_BORDERS, dtype=np.uint8)[:, None]
+            # Bloque marcador en el centro.
+            for band, value in enumerate(marker):
+                rgb[band, half - margin:half + margin, half - margin:half + margin] = value
+
+            write_geotiff(
+                out_dir / mosaic_tile_name(row, col),
+                rgb,
+                4326,
+                mosaic_tile_extent(row, col),
+                gdal.GDT_Byte,
+                color_interp=[gdal.GCI_RedBand, gdal.GCI_GreenBand, gdal.GCI_BlueBand],
+            )
+
+
 def build_big(big_dir):
     """Raster grande 4096x4096 con patron fijo y overviews 2, 4, 8 y 16."""
     size = 4096
@@ -267,15 +339,24 @@ def main(argv=None):
     parser.add_argument(
         "--big", metavar="DIR",
         help="directorio donde crear terrain_big.tif (4096x4096, con overviews)")
+    parser.add_argument(
+        "--mosaico", metavar="DIR",
+        help="directorio de las 6 hojas del mosaico de pruebas "
+             "(por defecto data/sample/mosaico)")
     args = parser.parse_args(argv)
 
     root = Path(__file__).resolve().parents[1]
     out_dir = Path(args.out) if args.out else root / "data" / "sample" / "rasters"
+    mosaic_dir = (Path(args.mosaico) if args.mosaico
+                  else root / "data" / "sample" / "mosaico")
 
     print(f"[minigis] Generando GeoTIFF de ejemplo en {out_dir}...")
     build_ortho(out_dir)
     build_dem(out_dir)
     build_landcover(out_dir)
+
+    print(f"[minigis] Generando el mosaico de pruebas en {mosaic_dir}...")
+    build_mosaic(mosaic_dir)
 
     if args.big:
         print(f"[minigis] Generando terrain_big.tif en {args.big}...")

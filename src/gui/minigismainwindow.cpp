@@ -13,6 +13,9 @@
 #include "minigispostgisdialog.h"
 #include "minigispgsource.h"
 #include "minigisqgisproject.h"
+#include "minigisloadprogressdialog.h"
+#include "minigismosaiclayer.h"
+#include "minigismosaicloader.h"
 #include "minigisrasterlayer.h"
 #include "minigisrasterstyledialog.h"
 #include "minigisstyledialog.h"
@@ -115,6 +118,46 @@ MainWindow::MainWindow(QWidget *parent, bool restoreSettings)
   connect(mLoader, &VectorLayerLoader::requestReady, this, &MainWindow::onProjectLayerReady);
   connect(mLoader, &VectorLayerLoader::requestFailed, this, &MainWindow::onProjectLayerFailed);
   connect(mLoader, &VectorLayerLoader::finished, this, &MainWindow::onLoadFinished);
+
+  // Mosaicos: apertura de las hojas en paralelo y replica en segundo plano. El
+  // panel se reconstruye como mucho cuatro veces por segundo mientras carga.
+  mMosaicLoader = new MosaicLoader(this);
+  connect(mMosaicLoader, &MosaicLoader::progressChanged, this,
+          [this](int percent, const QString &message, const QString &currentPath) {
+            if (!mLoadDialog)
+              return;
+            mLoadDialog->setProgress(percent, message);
+            mLoadDialog->setDetail(QFileInfo(currentPath).fileName());
+          });
+  connect(mMosaicLoader, &MosaicLoader::tilesReady, this,
+          [this](const QVector<std::shared_ptr<RasterLayer>> &tiles, int loaded, int total) {
+            onMosaicTilesReady(tiles, loaded, total);
+          });
+  connect(mMosaicLoader, &MosaicLoader::tileFailed, this,
+          [this](const QString &path, const QString &message, const QString &) {
+            mLoadFailures << QStringLiteral("%1: %2").arg(QFileInfo(path).fileName(), message);
+          });
+  connect(mMosaicLoader, &MosaicLoader::finished, this,
+          [this](int loaded, int failed, bool cancelled) { onMosaicLoadFinished(loaded, failed, cancelled); });
+
+  mReplicaJob = new MosaicReplicaJob(this);
+  connect(mReplicaJob, &MosaicReplicaJob::progressChanged, this,
+          [this](int percent, const QString &message) { onReplicaProgress(percent, message); });
+  connect(mReplicaJob, &MosaicReplicaJob::finished, this,
+          [this](const MosaicReplicaState &state) { onReplicaFinished(state); });
+
+  mPanelTimer = new QTimer(this);
+  mPanelTimer->setSingleShot(true);
+  mPanelTimer->setInterval(250);
+  connect(mPanelTimer, &QTimer::timeout, this, [this]() {
+    if (!mPanelDirty)
+      return;
+    mPanelDirty = false;
+    if (mLoadingMosaic)
+      mCanvas->mosaicChanged(mLoadingMosaic);
+    syncLayerPanel();
+    updateWindowTitle();
+  });
 
   readSettings();
   updateRecentFilesMenu();
@@ -450,7 +493,8 @@ void MainWindow::setLoadIndicatorVisible(bool visible)
 
 bool MainWindow::isLoading() const
 {
-  return mLoader && mLoader->isRunning();
+  return (mLoader && mLoader->isRunning()) || (mMosaicLoader && mMosaicLoader->isRunning())
+         || (mReplicaJob && mReplicaJob->isRunning());
 }
 
 bool MainWindow::waitForLoading(int timeoutMs)
@@ -460,17 +504,22 @@ bool MainWindow::waitForLoading(int timeoutMs)
 
   // Bucle de eventos anidado: la carga sigue en su hilo y sus senales se
   // entregan aqui, de modo que la incorporacion de capas al lienzo se hace
-  // igual que en la aplicacion interactiva.
+  // igual que en la aplicacion interactiva. Se sondea `isLoading` porque la
+  // carga de un mosaico tiene dos fases (hojas y replica).
   QEventLoop loop;
-  QTimer timeout;
-  timeout.setSingleShot(true);
+  QTimer poll;
+  poll.setInterval(50);
+  QTimer limit;
+  limit.setSingleShot(true);
 
-  const QMetaObject::Connection finishedConnection =
-    connect(mLoader, &VectorLayerLoader::finished, &loop, &QEventLoop::quit);
-  connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
-  timeout.start(timeoutMs);
+  connect(&poll, &QTimer::timeout, &loop, [this, &loop]() {
+    if (!isLoading())
+      loop.quit();
+  });
+  connect(&limit, &QTimer::timeout, &loop, &QEventLoop::quit);
+  poll.start();
+  limit.start(timeoutMs);
   loop.exec();
-  disconnect(finishedConnection);
 
   return !isLoading();
 }
@@ -580,6 +629,12 @@ void MainWindow::frameLoadedBatch()
   {
     if (rasters[index])
       extent.combine(rasters[index]->extentInEpsg(mCanvas->destinationEpsg()));
+  }
+
+  for (const std::shared_ptr<RasterMosaic> &mosaic : mCanvas->mosaics())
+  {
+    if (mosaic && mosaic->isVisible())
+      extent.combine(mosaic->extentInEpsg(mCanvas->destinationEpsg()));
   }
 
   if (extent.isValid())
@@ -706,6 +761,179 @@ bool MainWindow::openRasterLayer(const QString &path, bool zoomToExtent)
   return true;
 }
 
+void MainWindow::startMosaicLoad(const QStringList &paths)
+{
+  mLoadFailures.clear();
+  mLoadingRasterPaths = paths;
+
+  const std::shared_ptr<RasterMosaic> mosaic = RasterMosaic::create(mCanvas->destinationEpsg());
+  mLoadingMosaic = mosaic;
+  mCurrentMosaic = mosaic;
+  mCurrentRaster.reset();
+  mCanvas->setCurrentLayer(nullptr);
+  mCanvas->addMosaic(mosaic, false);
+
+  if (!mLoadDialog)
+  {
+    mLoadDialog = new LoadProgressDialog(this);
+    connect(mLoadDialog, &LoadProgressDialog::cancelled, this, [this]() {
+      if (mMosaicLoader && mMosaicLoader->isRunning())
+        mMosaicLoader->cancel();
+      if (mReplicaJob && mReplicaJob->isRunning())
+        mReplicaJob->cancel();
+    });
+  }
+
+  mLoadDialog->setPhase(QStringLiteral("Cargando imagenes"));
+  mLoadDialog->setProgress(0, QStringLiteral("Abriendo %1 hojas...").arg(paths.size()));
+  mLoadDialog->setDetail(QString());
+  mLoadDialog->show();
+
+  // Mientras carga se dibuja un subconjunto de hojas por cuadro: el cuadro de pais
+  // con 508 hojas tardaria decenas de segundos.
+  mCanvas->setRasterTileBudget(12);
+
+  setLoadIndicatorVisible(true);
+  mMosaicLoader->start(paths);
+}
+
+void MainWindow::onMosaicTilesReady(const QVector<std::shared_ptr<RasterLayer>> &tiles, int loaded, int total)
+{
+  if (!mLoadingMosaic)
+    return;
+
+  for (const std::shared_ptr<RasterLayer> &tile : tiles)
+  {
+    if (tile)
+      mLoadingMosaic->addTile(tile);
+  }
+
+  // Las hojas aparecen en el mapa conforme se abren, sin esperar al final, pero
+  // con un refresco acotado (el temporizador del panel): repintar por cada hoja
+  // haria mas trabajo que la propia carga.
+  scheduleLayerPanelRefresh();
+
+  if (mLoadDialog)
+  {
+    mLoadDialog->setProgress(total > 0 ? loaded * 100 / total : 100,
+                             QStringLiteral("%1 de %2 hojas cargadas").arg(loaded).arg(total));
+  }
+}
+
+void MainWindow::onMosaicLoadFinished(int loaded, int failed, bool cancelled)
+{
+  Q_UNUSED(failed)
+
+  if (!mLoadingMosaic)
+    return;
+
+  if (mLoadingMosaic->tileCount() == 0)
+  {
+    mCanvas->removeMosaic(mLoadingMosaic);
+    mLoadingMosaic.reset();
+    mCurrentMosaic.reset();
+    finishMosaicLoad();
+    return;
+  }
+
+  if (cancelled)
+  {
+    mLoadFailures << QStringLiteral("Carga cancelada tras %1 hojas.").arg(loaded);
+    finishMosaicLoad();
+    return;
+  }
+
+  startReplicaPhase();
+}
+
+void MainWindow::startReplicaPhase()
+{
+  if (!mLoadingMosaic)
+    return;
+
+  QStringList paths;
+  paths.reserve(mLoadingMosaic->tileCount());
+  for (const std::shared_ptr<RasterLayer> &tile : mLoadingMosaic->tiles())
+  {
+    if (tile)
+      paths << tile->sourcePath();
+  }
+
+  if (mLoadDialog)
+  {
+    mLoadDialog->setPhase(QStringLiteral("Preparando el mosaico"));
+    mLoadDialog->setProgress(0, QStringLiteral("Preparando %1 hojas...").arg(paths.size()));
+    mLoadDialog->setDetail(QStringLiteral("Se construye una replica piramidal para que moverse y hacer zoom sea "
+                                          "fluido; la proxima vez se reutiliza."));
+  }
+
+  mReplicaJob->start(paths, mCanvas->destinationEpsg());
+}
+
+void MainWindow::onReplicaProgress(int percent, const QString &message)
+{
+  if (!mLoadDialog)
+    return;
+
+  mLoadDialog->setProgress(percent, message);
+  mLoadDialog->setDetail(QString());
+}
+
+void MainWindow::onReplicaFinished(const MosaicReplicaState &state)
+{
+  if (mLoadingMosaic && state.available && !state.path.isEmpty())
+    mLoadingMosaic->setReplica(state.path, state.pixelSize, state.pixels);
+
+  if (!state.available && !state.message.isEmpty())
+    mLoadFailures << QStringLiteral("Sin replica: %1").arg(state.message);
+
+  finishMosaicLoad();
+}
+
+void MainWindow::finishMosaicLoad()
+{
+  const std::shared_ptr<RasterMosaic> mosaic = mLoadingMosaic;
+  mLoadingMosaic.reset();
+  mCurrentMosaic = mosaic;
+
+  if (mLoadDialog)
+    mLoadDialog->hide();
+
+  setLoadIndicatorVisible(false);
+  mCanvas->setRasterTileBudget(0);
+
+  frameLoadedBatch();
+  syncLayerPanel();
+  updateWindowTitle();
+  updateCrsLabel();
+
+  if (!mosaic)
+    return;
+
+  QString summary = QStringLiteral("Mosaico «%1»: %2 hojas").arg(mosaic->name()).arg(mosaic->tileCount());
+  if (mosaic->hasReplica())
+    summary += QStringLiteral(", replica lista");
+
+  const QStringList failures = mLoadFailures;
+  mLoadFailures.clear();
+
+  if (failures.isEmpty())
+  {
+    statusBar()->showMessage(summary, kStatusTimeoutMs);
+    return;
+  }
+
+  statusBar()->showMessage(summary + QStringLiteral("; %1 aviso(s).").arg(failures.size()), kStatusTimeoutMs);
+  QMessageBox::warning(this, QStringLiteral("Carga del mosaico"), summary + QStringLiteral(".\n\n")
+                                                                   + failures.join(QLatin1Char('\n')));
+}
+
+void MainWindow::scheduleLayerPanelRefresh()
+{
+  mPanelDirty = true;
+  if (mPanelTimer && !mPanelTimer->isActive())
+    mPanelTimer->start();
+}
 int MainWindow::loadPaths(const QStringList &paths)
 {
   if (paths.isEmpty())
@@ -722,6 +950,7 @@ int MainWindow::loadPaths(const QStringList &paths)
   }
 
   QStringList vectorPaths;
+  QStringList rasterPaths;
   int queued = 0;
 
   // Se anota donde empieza la tanda para encuadrar al final la union de todo lo
@@ -738,8 +967,7 @@ int MainWindow::loadPaths(const QStringList &paths)
 
     if (kind == LayerKind::Raster)
     {
-      if (openRasterLayer(path, mCanvas->layers().empty() && mCanvas->rasterLayers().empty()))
-        ++queued;
+      rasterPaths << path;
       continue;
     }
 
@@ -750,6 +978,20 @@ int MainWindow::loadPaths(const QStringList &paths)
     }
 
     showError(QStringLiteral("No se pudo abrir «%1»").arg(QFileInfo(path).fileName()), error);
+  }
+
+  // Dos o mas raster de la misma seleccion son UNA cobertura: se cargan como
+  // mosaico, con ventana de progreso y replica. Un solo raster conserva el camino
+  // de siempre.
+  if (rasterPaths.size() >= 2)
+  {
+    startMosaicLoad(rasterPaths);
+    ++queued;
+  }
+  else if (rasterPaths.size() == 1)
+  {
+    if (openRasterLayer(rasterPaths.first(), mCanvas->layers().empty() && mCanvas->rasterLayers().empty()))
+      ++queued;
   }
 
   if (!vectorPaths.isEmpty())
@@ -1356,9 +1598,21 @@ void MainWindow::openRecentLayer()
 
 void MainWindow::loadSampleData()
 {
-  const QString sampleDir = QString::fromUtf8(MINIGIS_SAMPLE_DATA_DIR) + QStringLiteral("/shapefiles");
-  const QStringList candidates = {sampleDir + QStringLiteral("/cities.shp"),
-                                  sampleDir + QStringLiteral("/parcels.shp")};
+  const QString sampleRoot = QString::fromUtf8(MINIGIS_SAMPLE_DATA_DIR);
+  const QString sampleDir = sampleRoot + QStringLiteral("/shapefiles");
+  QStringList candidates = {sampleDir + QStringLiteral("/cities.shp"),
+                            sampleDir + QStringLiteral("/parcels.shp")};
+
+  // El mosaico pequeno de pruebas: 6 hojas contiguas con marcador de color.
+  const QString mosaicDir = sampleRoot + QStringLiteral("/mosaico");
+  for (const QString &name : {QStringLiteral("hoja_1_1.tif"), QStringLiteral("hoja_1_2.tif"),
+                              QStringLiteral("hoja_2_1.tif"), QStringLiteral("hoja_2_2.tif"),
+                              QStringLiteral("hoja_3_1.tif"), QStringLiteral("hoja_3_2.tif")})
+  {
+    const QString candidate = mosaicDir + QLatin1Char('/') + name;
+    if (QFileInfo::exists(candidate))
+      candidates << candidate;
+  }
 
   QStringList found;
   for (const QString &candidate : candidates)
@@ -1382,6 +1636,13 @@ void MainWindow::loadSampleData()
 
 void MainWindow::closeCurrentLayer()
 {
+  if (mCurrentMosaic)
+  {
+    mCanvas->removeMosaic(mCurrentMosaic);
+    mCurrentMosaic.reset();
+    return;
+  }
+
   if (mCurrentRaster)
   {
     mCanvas->removeRasterLayer(mCurrentRaster);
@@ -1399,6 +1660,7 @@ void MainWindow::closeAllLayers()
     return;
 
   mCurrentRaster.reset();
+  mCurrentMosaic.reset();
   mCanvas->clearLayers();
   mCanvas->clearRasterLayers();
 
@@ -1417,6 +1679,12 @@ void MainWindow::closeAllLayers()
 
 void MainWindow::zoomToCurrentLayer()
 {
+  if (mCurrentMosaic)
+  {
+    mCanvas->zoomToLayer(mCurrentMosaic);
+    return;
+  }
+
   if (mCurrentRaster)
   {
     mCanvas->zoomToLayer(mCurrentRaster);
@@ -1431,6 +1699,22 @@ void MainWindow::zoomToCurrentLayer()
 
 void MainWindow::editCurrentLayerStyle()
 {
+  if (mCurrentMosaic)
+  {
+    const std::shared_ptr<RasterLayer> firstTile = mCurrentMosaic->tile(0);
+    RasterStyleDialog dialog(mCurrentMosaic->name(), firstTile ? firstTile->bandLabels() : QStringList(),
+                             mCurrentMosaic->style(), this);
+    if (dialog.exec() == QDialog::Accepted)
+    {
+      mCurrentMosaic->setStyle(dialog.style());
+      mCanvas->refreshMap();
+      updateWindowTitle();
+      statusBar()->showMessage(QStringLiteral("Estilo del mosaico «%1» actualizado.").arg(mCurrentMosaic->name()),
+                               kStatusTimeoutMs);
+    }
+    return;
+  }
+
   if (mCurrentRaster)
   {
     editCurrentRasterStyle();
@@ -1571,11 +1855,29 @@ void MainWindow::onLayerPanelCurrentChanged(const LayerEntry &entry)
   if (mUpdatingUi)
     return;
 
+  if (entry.kind == LayerEntry::Kind::Mosaic && entry.mosaic)
+  {
+    if (mCurrentMosaic == entry.mosaic)
+      return;
+
+    mCurrentMosaic = entry.mosaic;
+    mCurrentRaster.reset();
+    if (mCanvas->currentLayer())
+      mCanvas->setCurrentLayer(nullptr);
+
+    syncLayerPanel();
+    replaceAttributeModel();
+    updateWindowTitle();
+    updateCrsLabel();
+    return;
+  }
+
   if (entry.kind == LayerEntry::Kind::Raster)
   {
     if (!entry.raster || mCurrentRaster == entry.raster)
       return;
 
+    mCurrentMosaic.reset();
     mCurrentRaster = entry.raster;
     if (mCanvas->currentLayer())
       mCanvas->setCurrentLayer(nullptr);
@@ -1591,6 +1893,7 @@ void MainWindow::onLayerPanelCurrentChanged(const LayerEntry &entry)
     return;
 
   mCurrentRaster.reset();
+  mCurrentMosaic.reset();
   if (mCanvas->currentLayer() != entry.vector)
   {
     mCanvas->setCurrentLayer(entry.vector);
@@ -1607,7 +1910,12 @@ void MainWindow::onLayerVisibilityChanged(const LayerEntry &entry, bool visible)
 {
   QString name;
 
-  if (entry.kind == LayerEntry::Kind::Raster && entry.raster)
+  if (entry.kind == LayerEntry::Kind::Mosaic && entry.mosaic)
+  {
+    entry.mosaic->setVisible(visible);
+    name = entry.mosaic->name();
+  }
+  else if (entry.kind == LayerEntry::Kind::Raster && entry.raster)
   {
     entry.raster->setVisible(visible);
     name = entry.raster->name();
@@ -1901,8 +2209,37 @@ void MainWindow::syncLayerPanel()
   std::vector<LayerEntry> entries;
   entries.reserve(mCanvas->rasterLayers().size() + mCanvas->layers().size());
 
-  for (const std::shared_ptr<RasterLayer> &raster : mCanvas->rasterLayers())
+  // Banda raster en orden de apilado: mosaicos y capas sueltas mezclados, para
+  // que el panel muestre el mismo orden que el mapa.
+  for (const MapCanvas::RasterStackEntry &item : mCanvas->rasterStack())
   {
+    if (false && item.mosaic)
+    {
+      LayerEntry entry;
+      entry.kind = LayerEntry::Kind::Mosaic;
+      entry.mosaic = item.mosaic;
+      entry.name = item.mosaic->name();
+      const std::shared_ptr<RasterLayer> firstTile = item.mosaic->tile(0);
+      entry.sourcePath = firstTile ? firstTile->sourcePath() : QString();
+      entry.kindText = QStringLiteral("Mosaico (%1 hojas)%2")
+                         .arg(item.mosaic->tileCount())
+                         .arg(item.mosaic->hasReplica() ? QStringLiteral(" · replica") : QString());
+      if (item.mosaic->hasReplica())
+      {
+        entry.countText = QStringLiteral("%1x%2").arg(item.mosaic->replicaPixels().width())
+                                               .arg(item.mosaic->replicaPixels().height());
+      }
+      else
+      {
+        entry.countText = QStringLiteral("%1 hojas").arg(item.mosaic->tileCount());
+      }
+      entry.crsText = firstTile ? firstTile->crsDescription() : QString();
+      entry.visible = item.mosaic->isVisible();
+      entries.push_back(entry);
+      continue;
+    }
+
+    const std::shared_ptr<RasterLayer> &raster = item.layer;
     if (!raster)
       continue;
 

@@ -476,8 +476,11 @@ const RasterLayer::BandStats &RasterLayer::bandStats(int band) const
   return mBandStats.at(index);
 }
 
-const RasterLayer::View *RasterLayer::viewForEpsg(int destinationEpsg, double pixelSize) const
+const RasterLayer::View *RasterLayer::viewForEpsg(int destinationEpsg, double pixelSize, bool *created) const
 {
+  if (created)
+    *created = false;
+
   if (!mDatasetHandle || !mHasGeoTransform)
     return nullptr;
 
@@ -666,6 +669,8 @@ const RasterLayer::View *RasterLayer::viewForEpsg(int destinationEpsg, double pi
   }
 
   mWarpedViews[destinationEpsg] = view;
+  if (created)
+    *created = true;
   return view.get();
 }
 

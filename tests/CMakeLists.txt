@@ -195,6 +195,85 @@ add_test(NAME minigis.raster-ventana
 set_tests_properties(minigis.raster-info minigis.raster-dibujo minigis.raster-dialogo minigis.raster-ventana
   PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+# --- Mosaico --------------------------------------------------------------
+# Fixture versionado de 6 hojas (64x64, EPSG:4326) con un marcador de color por
+# hoja: registro, extension union, colocacion, costuras, replica y presupuesto.
+set(MINIGIS_MOSAIC_DIR "${MINIGIS_ROOT_DIR}/data/sample/mosaico")
+set(MINIGIS_MOSAIC_TILE1 "${MINIGIS_MOSAIC_DIR}/hoja_1_1.tif")
+set(MINIGIS_MOSAIC_TILE2 "${MINIGIS_MOSAIC_DIR}/hoja_1_2.tif")
+set(MINIGIS_MOSAIC_TILE3 "${MINIGIS_MOSAIC_DIR}/hoja_2_1.tif")
+set(MINIGIS_MOSAIC_TILE4 "${MINIGIS_MOSAIC_DIR}/hoja_2_2.tif")
+set(MINIGIS_MOSAIC_TILE5 "${MINIGIS_MOSAIC_DIR}/hoja_3_1.tif")
+set(MINIGIS_MOSAIC_TILE6 "${MINIGIS_MOSAIC_DIR}/hoja_3_2.tif")
+set(MINIGIS_MOSAIC_CACHE "${CMAKE_BINARY_DIR}/test-output/mosaic-cache")
+set(MINIGIS_MOSAIC_LIST "${CMAKE_BINARY_DIR}/test-output/mosaic-list.txt")
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/test-output")
+file(WRITE "${MINIGIS_MOSAIC_LIST}"
+     "${MINIGIS_MOSAIC_TILE1}\n${MINIGIS_MOSAIC_TILE2}\n${MINIGIS_MOSAIC_TILE3}\n"
+     "${MINIGIS_MOSAIC_TILE4}\n${MINIGIS_MOSAIC_TILE5}\n${MINIGIS_MOSAIC_TILE6}\n")
+
+add_test(NAME minigis.mosaico-info
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DMOSAIC_LIST=${MINIGIS_MOSAIC_LIST}"
+          -DMODE=mosaic-info
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
+add_test(NAME minigis.mosaico-dibujo
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DSAMPLE=${MINIGIS_MOSAIC_TILE1}"
+          "-DSAMPLE2=${MINIGIS_MOSAIC_TILE2}"
+          "-DSAMPLE3=${MINIGIS_MOSAIC_TILE3}"
+          "-DSAMPLE4=${MINIGIS_MOSAIC_TILE4}"
+          "-DSAMPLE5=${MINIGIS_MOSAIC_TILE5}"
+          "-DSAMPLE6=${MINIGIS_MOSAIC_TILE6}"
+          "-DMOSAIC_CACHE=${MINIGIS_MOSAIC_CACHE}"
+          -DMODE=check-mosaic
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
+add_test(NAME minigis.mosaico-progreso
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DSAMPLE=${MINIGIS_MOSAIC_TILE1}"
+          "-DSAMPLE2=${MINIGIS_MOSAIC_TILE2}"
+          "-DSAMPLE3=${MINIGIS_MOSAIC_TILE3}"
+          "-DSAMPLE4=${MINIGIS_MOSAIC_TILE4}"
+          "-DSAMPLE5=${MINIGIS_MOSAIC_TILE5}"
+          "-DSAMPLE6=${MINIGIS_MOSAIC_TILE6}"
+          "-DOUT=${CMAKE_BINARY_DIR}/test-output/mosaic-progress.png"
+          -DMODE=mosaic-progress
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
+add_test(NAME minigis.mosaico-ventana
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DSAMPLE=${MINIGIS_MOSAIC_TILE1}"
+          "-DSAMPLE2=${MINIGIS_MOSAIC_TILE2}"
+          "-DSAMPLE3=${MINIGIS_MOSAIC_TILE3}"
+          "-DSAMPLE4=${MINIGIS_MOSAIC_TILE4}"
+          "-DSAMPLE5=${MINIGIS_MOSAIC_TILE5}"
+          "-DSAMPLE6=${MINIGIS_MOSAIC_TILE6}"
+          "-DOUT=${CMAKE_BINARY_DIR}/test-output/mosaic-window.png"
+          -DMODE=mosaic-window
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+
+set_tests_properties(minigis.mosaico-info minigis.mosaico-dibujo minigis.mosaico-progreso minigis.mosaico-ventana
+  PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# Puerta opt-in de rendimiento con el conjunto real de hojas (no se versiona):
+#   set MINIGIS_MOSAIC_DATASET=E:\datos\nz-imagery
+#   set MINIGIS_MOSAIC_BUDGET_MS=250
+add_test(NAME minigis.rendimiento-mosaico
+  COMMAND ${CMAKE_COMMAND}
+          "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
+          "-DMOSAIC_CACHE=${MINIGIS_MOSAIC_CACHE}"
+          "-DMOSAIC_LIST=${CMAKE_BINARY_DIR}/test-output/mosaic-dataset-list.txt"
+          -DMODE=rendimiento-mosaico
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
+set_tests_properties(minigis.rendimiento-mosaico PROPERTIES
+  SKIP_REGULAR_EXPRESSION "PUERTA-OMITIDA"
+  TIMEOUT 1800)
 # --- Identificar ----------------------------------------------------------
 # Contrato del clic: geometria exacta (huecos incluidos), radio en pixeles,
 # alcance del arbol, panel, marcador y cache; consulta puntual por CLI y captura
@@ -322,7 +401,7 @@ add_test(NAME minigis.rendimiento-geoparquet
           -DMODE=rendimiento-geoparquet
           -P "${CMAKE_CURRENT_SOURCE_DIR}/run_cli_test.cmake")
 set_tests_properties(minigis.rendimiento-geoparquet PROPERTIES
-  SKIP_REGULAR_EXPRESSION "OMITIDA"
+  SKIP_REGULAR_EXPRESSION "PUERTA-OMITIDA"
   TIMEOUT 900)
 
 # --- KML / KMZ ------------------------------------------------------------
@@ -600,7 +679,7 @@ add_test(NAME minigis.pg
           "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
           -DMODE=check
           -P "${CMAKE_CURRENT_SOURCE_DIR}/run_pg_test.cmake")
-set_tests_properties(minigis.pg PROPERTIES SKIP_REGULAR_EXPRESSION "OMITIDA")
+set_tests_properties(minigis.pg PROPERTIES SKIP_REGULAR_EXPRESSION "PUERTA-OMITIDA")
 
 add_test(NAME minigis.pg-window
   COMMAND ${CMAKE_COMMAND}
@@ -609,7 +688,7 @@ add_test(NAME minigis.pg-window
           -DMODE=window
           -P "${CMAKE_CURRENT_SOURCE_DIR}/run_pg_test.cmake")
 set_tests_properties(minigis.pg-window PROPERTIES
-  SKIP_REGULAR_EXPRESSION "OMITIDA"
+  SKIP_REGULAR_EXPRESSION "PUERTA-OMITIDA"
   ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 add_test(NAME minigis.pg-bench
@@ -617,4 +696,4 @@ add_test(NAME minigis.pg-bench
           "-DMINIGIS_EXE=$<TARGET_FILE:minigis>"
           -DMODE=bench
           -P "${CMAKE_CURRENT_SOURCE_DIR}/run_pg_test.cmake")
-set_tests_properties(minigis.pg-bench PROPERTIES SKIP_REGULAR_EXPRESSION "OMITIDA")
+set_tests_properties(minigis.pg-bench PROPERTIES SKIP_REGULAR_EXPRESSION "PUERTA-OMITIDA")

@@ -19,6 +19,7 @@ class QLabel;
 class QMenu;
 class QProgressBar;
 class QTableView;
+class QTimer;
 class QToolButton;
 
 namespace minigis
@@ -26,12 +27,17 @@ namespace minigis
 
 struct Error;
 struct LayerEntry;
+struct MosaicReplicaState;
 class AttributeTableModel;
 class IdentifyPanel;
 class LayerPanel;
+class LoadProgressDialog;
 class MapCanvas;
+class MosaicLoader;
+class MosaicReplicaJob;
 class QgisProject;
 class RasterLayer;
+class RasterMosaic;
 class Rectangle;
 class VectorLayer;
 class VectorLayerLoader;
@@ -96,7 +102,7 @@ public:
    * anidado, no una espera bloqueante): los modos de captura lo usan para
    * trabajar con el mismo camino asincrono que la aplicacion real.
    */
-  bool waitForLoading(int timeoutMs = 120000);
+  bool waitForLoading(int timeoutMs = 600000);
 
   void showAttributeTable(bool visible);
 
@@ -256,6 +262,31 @@ private:
   /** Abre un raster ya detectado y lo añade al lienzo. */
   bool openRasterLayer(const QString &path, bool zoomToExtent);
 
+  /**
+   * Carga 2..N raster de una seleccion como UN mosaico: abre las hojas en
+   * paralelo con la ventana de progreso, las anade conforme llegan y, al
+   * terminar, prepara la replica piramidal (tambien con progreso).
+   */
+  void startMosaicLoad(const QStringList &paths);
+
+  /** Lote de hojas abiertas: se anade al mosaico y se repinta. */
+  void onMosaicTilesReady(const QVector<std::shared_ptr<RasterLayer>> &tiles, int loaded, int total);
+
+  /** Fin de la apertura de hojas: pasa a la replica o cierra la carga. */
+  void onMosaicLoadFinished(int loaded, int failed, bool cancelled);
+
+  /** Fase 2: replica piramidal del mosaico en segundo plano. */
+  void startReplicaPhase();
+
+  void onReplicaProgress(int percent, const QString &message);
+  void onReplicaFinished(const MosaicReplicaState &state);
+
+  /** Cierra la ventana de progreso, encuadra y resume (errores incluidos). */
+  void finishMosaicLoad();
+
+  /** Pide reconstruir el panel como mucho una vez cada 250 ms. */
+  void scheduleLayerPanelRefresh();
+
   /** Muestra u oculta el indicador de carga de la barra de estado. */
   void setLoadIndicatorVisible(bool visible);
 
@@ -277,6 +308,18 @@ private:
   IdentifyPanel *mIdentifyPanel = nullptr;
   VectorLayerLoader *mLoader = nullptr;
   std::shared_ptr<RasterLayer> mCurrentRaster;
+
+  // Mosaicos: apertura de hojas en paralelo, replica en segundo plano y ventana
+  // de progreso de las dos fases.
+  MosaicLoader *mMosaicLoader = nullptr;
+  MosaicReplicaJob *mReplicaJob = nullptr;
+  LoadProgressDialog *mLoadDialog = nullptr;
+  std::shared_ptr<RasterMosaic> mCurrentMosaic;
+  std::shared_ptr<RasterMosaic> mLoadingMosaic;
+  QStringList mLoadingRasterPaths;
+  QStringList mLoadFailures;
+  QTimer *mPanelTimer = nullptr;
+  bool mPanelDirty = false;
 
   /** Proyecto QGIS abierto (nulo si se esta viendo solo capas sueltas). */
   std::unique_ptr<QgisProject> mProject;

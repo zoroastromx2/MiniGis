@@ -7,6 +7,8 @@ set(MINIGIS_GUI_SRCS
   minigismapcanvas.cpp
   minigisattributetablemodel.h
   minigisattributetablemodel.cpp
+  minigisloadprogressdialog.h
+  minigisloadprogressdialog.cpp
   minigislayerpanel.h
   minigislayerpanel.cpp
   minigisidentifypanel.h

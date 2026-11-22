@@ -15,11 +15,12 @@ namespace minigis
 {
 
 class RasterLayer;
+class RasterMosaic;
 class VectorLayer;
 
 /**
- * Una fila del panel de capas: vectorial o raster, con los textos ya
- * preparados para mostrar. Las dos clases comparten tabla porque el usuario ve
+ * Una fila del panel de capas: vectorial, raster o mosaico, con los textos ya
+ * preparados para mostrar. Las tres clases comparten tabla porque el usuario ve
  * un solo mapa; el orden de las filas es el de apilado (primera fila = fondo).
  */
 struct LayerEntry
@@ -27,12 +28,15 @@ struct LayerEntry
   enum class Kind
   {
     Vector,
-    Raster
+    Raster,
+    Mosaic
   };
 
   Kind kind = Kind::Vector;
   std::shared_ptr<VectorLayer> vector;
   std::shared_ptr<RasterLayer> raster;
+  /** Mosaico de hojas raster (una sola fila en el panel y en el mapa). */
+  std::shared_ptr<RasterMosaic> mosaic;
   QString name;
   QString sourcePath;
   /**

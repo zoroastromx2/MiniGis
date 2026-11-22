@@ -18,6 +18,7 @@ namespace minigis
 {
 
 class RasterLayer;
+class RasterMosaic;
 class VectorLayer;
 
 /**
@@ -51,6 +52,16 @@ public:
     Fast
   };
 
+  /**
+   * Entrada de la banda raster: una capa suelta o un mosaico. El orden del
+   * vector es el de apilado (primera entrada, fondo del mapa).
+   */
+  struct RasterStackEntry
+  {
+    std::shared_ptr<RasterLayer> layer;
+    std::shared_ptr<RasterMosaic> mosaic;
+  };
+
   explicit MapCanvas(QWidget *parent = nullptr);
   ~MapCanvas() override;
 
@@ -73,6 +84,34 @@ public:
   const std::vector<std::shared_ptr<RasterLayer>> &rasterLayers() const { return mRasterLayers; }
   bool containsRaster(const std::shared_ptr<RasterLayer> &layer) const;
 
+  /**
+   * Mosaicos raster. Comparten la banda de dibujado con las capas sueltas (van
+   * debajo de las vectoriales) y se apilan en el orden en que se cargaron, unos
+   * respecto de otros y respecto de los rasters sueltos.
+   */
+  std::shared_ptr<RasterMosaic> addMosaic(const std::shared_ptr<RasterMosaic> &mosaic,
+                                          bool zoomToExtent = false);
+  bool removeMosaic(const std::shared_ptr<RasterMosaic> &mosaic);
+  const std::vector<std::shared_ptr<RasterMosaic>> &mosaics() const { return mMosaics; }
+  bool containsMosaic(const std::shared_ptr<RasterMosaic> &mosaic) const;
+
+  /** Banda raster completa (capas sueltas y mosaicos) en orden de apilado. */
+  const std::vector<RasterStackEntry> &rasterStack() const { return mRasterStack; }
+
+  /**
+   * Maximo de hojas de mosaico que se leen por cuadro (0 = sin limite). Mientras
+   * se carga una cobertura se dibuja un subconjunto: un cuadro de pais con 508
+   * hojas tardaria decenas de segundos y congelaria la ventana.
+   */
+  void setRasterTileBudget(int budget);
+  int rasterTileBudget() const { return mRasterTileBudget; }
+
+  /**
+   * Una hoja entro o salio del mosaico (o cambio su estado): el cuadro cacheado
+   * ya no vale. No encuadra: durante una carga el encuadre se hace al final.
+   */
+  void mosaicChanged(const std::shared_ptr<RasterMosaic> &mosaic);
+
   /** Estadisticas del ultimo cuadro raster (bytes leidos, pixeles pintados). */
   const RasterRenderer::FrameStats &rasterFrameStats() const { return mRasterRenderer.lastStats(); }
 
@@ -85,6 +124,7 @@ public:
   void zoomToFullExtent();
   void zoomToLayer(const std::shared_ptr<VectorLayer> &layer);
   void zoomToLayer(const std::shared_ptr<RasterLayer> &layer);
+  void zoomToLayer(const std::shared_ptr<RasterMosaic> &mosaic);
 
   /**
    * Encuadra una extension concreta con el mismo ajuste (aspecto, tamano minimo y
@@ -289,6 +329,9 @@ private:
 
   std::vector<std::shared_ptr<VectorLayer>> mLayers;
   std::vector<std::shared_ptr<RasterLayer>> mRasterLayers;
+  std::vector<std::shared_ptr<RasterMosaic>> mMosaics;
+  /** Orden de dibujado de la banda raster (capas sueltas y mosaicos mezclados). */
+  std::vector<RasterStackEntry> mRasterStack;
   std::shared_ptr<VectorLayer> mCurrentLayer;
   MapRenderer mRenderer;
   FastMapRenderer mFastRenderer;
@@ -318,6 +361,7 @@ private:
   bool mDraftMode = false;
   int mDestinationEpsg = 4326;
   qint64 mMaximumFeatures = 0;
+  int mRasterTileBudget = 0;
   qint64 mLastRenderMs = 0;
 
   // Cache del ultimo cuadro de cada nivel de calidad, para reutilizarlo al

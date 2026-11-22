@@ -121,8 +121,12 @@ public:
    * `pixelSize` (unidades de mapa por pixel, > 0) fija la rejilla del warp a la
    * escala del lienzo; si cambia (zoom), el warp se recrea. Con 0 se usa la
    * rejilla que propone GDAL, que no encaja entre hojas contiguas.
+   *
+   * `created` (opcional) recibe true si esta llamada tuvo que crear el warp: el
+   * renderizador lo cuenta para distinguir un cuadro que reutiliza vistas de uno
+   * que las rehace (es la comprobacion del nivel de detalle).
    */
-  const View *viewForEpsg(int destinationEpsg, double pixelSize = 0.0) const;
+  const View *viewForEpsg(int destinationEpsg, double pixelSize = 0.0, bool *created = nullptr) const;
 
   Rectangle extent() const { return mExtent; }
 

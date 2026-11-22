@@ -29,7 +29,17 @@ bool sameEntry(const LayerEntry &left, const LayerEntry &right)
 {
   if (left.kind != right.kind)
     return false;
-  return left.kind == LayerEntry::Kind::Vector ? left.vector == right.vector : left.raster == right.raster;
+
+  switch (left.kind)
+  {
+    case LayerEntry::Kind::Vector:
+      return left.vector == right.vector;
+    case LayerEntry::Kind::Raster:
+      return left.raster == right.raster;
+    case LayerEntry::Kind::Mosaic:
+      return left.mosaic == right.mosaic;
+  }
+  return false;
 }
 
 /** Nombre que se muestra en el item del grupo. */
@@ -248,7 +258,7 @@ std::vector<LayerPanel::TreeRow> LayerPanel::treeRows() const
 void LayerPanel::updateButtons()
 {
   const LayerEntry entry = entryForItem(mTree->currentItem());
-  const bool hasSelection = entry.vector != nullptr || entry.raster != nullptr;
+  const bool hasSelection = entry.vector != nullptr || entry.raster != nullptr || entry.mosaic != nullptr;
   const bool isVector = entry.kind == LayerEntry::Kind::Vector && entry.vector != nullptr;
 
   mRemoveButton->setEnabled(hasSelection);
