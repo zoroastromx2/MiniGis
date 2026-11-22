@@ -352,9 +352,58 @@ minigis --connections "...\Connections.xml" --info -l pg:dataware_FDAC/mgn_2025/
 
 ---
 
+### 6.2 Mosaico de imagenes (carga masiva)
+
+Cuando se eligen **dos o mas imagenes** en *Abrir* (`Ctrl+O`), arrastrando o con
+`--layer-list`, MiniGIS las carga como **un mosaico**: una fila en el panel, una
+entrada en el orden de dibujado y una sola capa para el mapa.
+
+* Una **ventana de progreso** muestra el archivo en curso, la cuenta y el avance,
+  con **Cancelar**. Las hojas van apareciendo en el mapa conforme se abren y el
+  encuadre final es la union de todas.
+* Al terminar, la misma ventana **prepara los niveles de detalle** (replica
+  piramidal en el SRC del lienzo): es lo que hace fluida la vista de pais. La
+  segunda vez se reutiliza desde la cache.
+* La cache vive en `%LOCALAPPDATA%\MiniGIS\cache\mosaicos` (o
+  `MINIGIS_MOSAIC_CACHE_DIR`), con tope de 4 GB y borrado de las replicas menos
+  usadas. Nunca se escribe junto a los datos de origen.
+* Un solo archivo raster se abre exactamente igual que antes (sin mosaico).
+
+| Opcion / variable | Efecto |
+|---|---|
+| `--layer-list <archivo.txt>` | carga una ruta por linea (necesario con cientos de hojas: 508 `-l` no caben en la linea de comandos de Windows) |
+| `--mosaic-cache <dir>` | carpeta de cache de replicas para esa ejecucion |
+| `--no-mosaic-replica` | dibuja siempre desde las hojas (diagnostico) |
+| `--check-mosaic` | comprueba el mosaico sin ventana: registro, extension, colocacion, costuras, replica, descarte, cache y presupuesto |
+| `--snapshot-progress <png>` | captura la ventana de progreso |
+| `MINIGIS_MOSAIC_CACHE_DIR` | carpeta de cache |
+| `MINIGIS_MOSAIC_BUDGET_MS` | presupuesto por cuadro de `--check-mosaic` (250 por defecto) |
+| `MINIGIS_MOSAIC_DATASET` | conjunto real para la puerta `minigis.rendimiento-mosaico` (opt-in) |
+
+```bat
+:: comprobar el mosaico de ejemplo (6 hojas de data\sample\mosaico)
+bin\minigis.exe --check-mosaic -l data\sample\mosaico\hoja_1_1.tif -l data\sample\mosaico\hoja_1_2.tif ^
+        -l data\sample\mosaico\hoja_2_1.tif -l data\sample\mosaico\hoja_2_2.tif ^
+        -l data\sample\mosaico\hoja_3_1.tif -l data\sample\mosaico\hoja_3_2.tif ^
+        --mosaic-cache build\mosaic-cache
+
+:: con una cobertura real: una ruta por linea
+dir /b "E:\datos\nz-imagery\*.jpg" > build\hojas.txt
+bin\minigis.exe --check-mosaic --layer-list build\hojas.txt --size 1200x800
+```
+
+**Limites:** no hay visibilidad ni estilo por hoja (el estilo es del mosaico); el
+panel muestra una fila por mosaico con el recuento; el mosaico se dibuja debajo
+del vectorial; con `--no-mosaic-replica` la vista de pais vuelve a tardar decenas
+de segundos.
+
+---
 ## 7. Qué hace y qué no hace
 
 **Hace**
+
+* Abrir una cobertura de imagenes (cientos de hojas) como **un mosaico**, con
+  ventana de progreso, cancelacion y navegacion fluida (replica piramidal).
 
 * Abre cualquier formato vectorial soportado por GDAL/OGR (probado con shapefile y GeoPackage).
   **Si el archivo contiene varias capas, se cargan todas y se encuadran todas**: un GeoPackage con

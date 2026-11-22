@@ -24,6 +24,11 @@ ctest --preset windows-msvc-release --output-on-failure
 
 - El ejecutable sale en `build\<preset>\bin\minigis.exe`; para lanzarlo usa
   `scripts\run.bat windows-msvc-release` o `bin\minigis.exe <args>`.
+- **Aviso de este equipo:** el seguimiento de cabeceras de Ninja con MSVC no
+  funciona (Visual Studio en espanol y el prefijo de `ShowIncludes` llega mal
+  codificado), asi que al cambiar una cabecera puedes quedarte con objetos
+  obsoletos y fallos intermitentes. Tras tocar cabeceras, reconstruye limpio:
+  `call scripts\env.bat && cmake --build --preset windows-msvc-release --clean-first`.
 - Si anades o quitas un archivo fuente, edita tambien el `CMakeLists.txt` de su
   carpeta. Las listas de fuentes son explicitas: nunca uses `file(GLOB ...)`.
 

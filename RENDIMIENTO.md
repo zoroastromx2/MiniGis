@@ -1435,3 +1435,71 @@ set MINIGIS_STORE_BUDGET_MB=256
   acercarse, los elementos que ocupan pixeles vuelven a trazarse.
 * La construccion del almacen (4,5 s para esta capa) se paga la primera vez que
   se abre; el resto de cuadros no vuelven a leer el archivo.
+
+---
+
+## 16. Mosaico de imagenes (2026-11-21)
+
+Caso real: **508 imagenes satelitales** de LINZ (2400x3600, 10 m, EPSG:2193,
+1,54 GB) elegidas de golpe. Antes se cargaban como 508 capas sueltas: 26 s de
+ventana congelada al abrir y ~39 s por cuadro de pais.
+
+### 16.1 Antes / despues
+
+| Medida | Antes | Ahora |
+|---|---|---|
+| Apertura de las 508 hojas | ~26 s, sin progreso ni cancelacion | **4,4 s** en paralelo, con ventana de progreso |
+| Cuadro de pais (1200x800) | ~39 s | **14 ms** (replica), 15 ms al moverse en cualquier escala |
+| Cuadro en la transicion (4 hojas visibles) | — | 336 ms en el primer cuadro de esa escala; 15 ms despues |
+| Colocacion de cada hoja | — | 9/9 muestras exactas, error 0,00 px |
+| Costuras entre hojas | — | 0 pixeles de fondo |
+| Replica del mosaico | — | 14428x14486, 34,5 MB, 4 niveles, ~118 s la primera vez |
+| Segunda sesion | — | replica reutilizada; carga completa **7,8 s** |
+| Cache | — | `%LOCALAPPDATA%\MiniGIS\cache\mosaicos`, tope 4 GB con LRU |
+
+### 16.2 Por que
+
+El prototipo con un VRT unico leido a escala de lienzo costaba **59–61 s por
+cuadro**: el *warper* de GDAL lee el origen a resolucion completa aunque existan
+overviews. La solucion es una **replica piramidal en el SRC del lienzo**
+(GeoTIFF en teselas con JPEG + overviews 2–16): al coincidir el SRC del archivo
+con el del lienzo, se lee una ventana normal y GDAL elige el nivel; 14 ms.
+
+El detalle fino se sigue leyendo de las hojas originales, con descarte de lo que
+no corta la vista, warp por nivel de detalle (potencias de 2) y la rejilla de
+pixel compartida entre hojas (las costuras encajan). Ese camino cuesta ~90 ms
+por hoja la primera vez que se pide una escala (GDAL hace un warp por banda) y
+por eso la vista de pais no puede depender de el.
+
+### 16.3 Limites conocidos
+
+* La **construccion de la replica** tarda ~118 s con las 508 hojas: el camino
+  estable por la API (`GDALCreateWarpedVRT` + copia por bloques) lee las hojas a
+  resolucion completa, mientras que `gdalwarp` tarda 17,5 s porque usa sus
+  overviews 1/8. `USE_SRC_OVERVIEWS` y `NUM_THREADS` no cambian la cifra por esta
+  via. Queda como trabajo pendiente, con la ventana de progreso y la cancelacion
+  ya en su sitio.
+* La banda de transicion (unas 4 hojas visibles) paga ~90 ms por hoja en el
+  primer cuadro. Una cache de imagen por hoja y nivel, o una replica a 1/4, lo
+  bajaran.
+* La cache no se comparte entre equipos ni se invalida por contenido: se valida
+  por ruta, tamano y fecha de cada hoja.
+
+### 16.4 Reproducir
+
+```bat
+:: contrato del mosaico con el fixture de 6 hojas
+bin\minigis.exe --check-mosaic -l data\sample\mosaico\hoja_1_1.tif ^
+        -l data\sample\mosaico\hoja_1_2.tif -l data\sample\mosaico\hoja_2_1.tif ^
+        -l data\sample\mosaico\hoja_2_2.tif -l data\sample\mosaico\hoja_3_1.tif ^
+        -l data\sample\mosaico\hoja_3_2.tif --size 900x600 --mosaic-cache build\mosaic-cache
+
+:: conjunto real (una ruta por linea) y puerta de rendimiento
+set MINIGIS_MOSAIC_DATASET=E:\datos\nz-imagery
+set MINIGIS_MOSAIC_BUDGET_MS=250
+ctest --preset windows-msvc-release -R minigis.rendimiento-mosaico --output-on-failure
+```
+
+Pruebas: `minigis.mosaico-info`, `minigis.mosaico-dibujo`,
+`minigis.mosaico-progreso`, `minigis.mosaico-ventana` y la puerta opt-in
+`minigis.rendimiento-mosaico`. Total del proyecto: **59 pruebas**.
